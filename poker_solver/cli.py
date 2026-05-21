@@ -106,8 +106,13 @@ def build_parser() -> argparse.ArgumentParser:
         "-n",
         "--iterations",
         type=int,
-        default=10_000,
-        help="Monte Carlo iterations (default: 10000)",
+        default=250_000,
+        help=(
+            "Monte Carlo iterations (default: 250000, ~0.1%% SE per hand). "
+            "Ignored when the exact enumeration path is taken — concrete hands "
+            "with a small remaining-board space (flop/turn/river) are solved "
+            "exactly regardless of this value."
+        ),
     )
     eq.add_argument(
         "--seed",
