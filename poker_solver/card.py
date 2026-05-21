@@ -3,11 +3,12 @@
 Rank values: 2..14 (where 14 = Ace).
 Suit values: 0..3 mapping to s, h, d, c.
 """
+
 from __future__ import annotations
 
 import random as _random
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Sequence
 
 RANKS = "23456789TJQKA"
 SUITS = "shdc"
@@ -33,7 +34,7 @@ class Card:
         return f"Card('{self}')"
 
     @classmethod
-    def from_str(cls, s: str) -> "Card":
+    def from_str(cls, s: str) -> Card:
         return parse_card(s)
 
 
@@ -48,7 +49,7 @@ def parse_card(s: str) -> Card:
     return Card(RANK_VALUE[r], SUIT_VALUE[st])
 
 
-def _tokenize_cards(s: str) -> List[str]:
+def _tokenize_cards(s: str) -> list[str]:
     s = s.replace(",", " ").strip()
     if not s:
         return []
@@ -59,7 +60,7 @@ def _tokenize_cards(s: str) -> List[str]:
     return [s[i : i + 2] for i in range(0, len(s), 2)]
 
 
-def parse_hand(s: str) -> List[Card]:
+def parse_hand(s: str) -> list[Card]:
     tokens = _tokenize_cards(s)
     if len(tokens) != 2:
         raise ValueError(f"Hand must have exactly 2 cards, got {len(tokens)}: {s!r}")
@@ -69,7 +70,7 @@ def parse_hand(s: str) -> List[Card]:
     return cards
 
 
-def parse_board(s: str) -> List[Card]:
+def parse_board(s: str) -> list[Card]:
     tokens = _tokenize_cards(s)
     if len(tokens) > 5:
         raise ValueError(f"Board must have 0-5 cards, got {len(tokens)}: {s!r}")
@@ -79,24 +80,24 @@ def parse_board(s: str) -> List[Card]:
     return cards
 
 
-_FULL_DECK: List[Card] = [Card(r, s) for r in range(2, 15) for s in range(4)]
+_FULL_DECK: list[Card] = [Card(r, s) for r in range(2, 15) for s in range(4)]
 
 
-def full_deck() -> List[Card]:
+def full_deck() -> list[Card]:
     return list(_FULL_DECK)
 
 
 class Deck:
     """A shuffleable deck. Pass `exclude` to remove specific cards (e.g., hole cards)."""
 
-    def __init__(self, exclude: Optional[Iterable[Card]] = None) -> None:
+    def __init__(self, exclude: Iterable[Card] | None = None) -> None:
         excluded = set(exclude or ())
-        self.cards: List[Card] = [c for c in _FULL_DECK if c not in excluded]
+        self.cards: list[Card] = [c for c in _FULL_DECK if c not in excluded]
 
-    def shuffle(self, rng: Optional[_random.Random] = None) -> None:
+    def shuffle(self, rng: _random.Random | None = None) -> None:
         (rng or _random).shuffle(self.cards)
 
-    def deal(self, n: int) -> List[Card]:
+    def deal(self, n: int) -> list[Card]:
         if n < 0:
             raise ValueError("Cannot deal a negative number of cards")
         if n > len(self.cards):

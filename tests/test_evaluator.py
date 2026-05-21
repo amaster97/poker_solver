@@ -95,9 +95,7 @@ def test_wheel_straight_flush():
 
 def test_seven_card_best_five_is_chosen():
     # Best from 7: full house (aces full of kings) beats flush in hearts
-    r = evaluate(
-        cards("Ah", "Ad", "Ac", "Kh", "Kd", "2h", "5h")
-    )
+    r = evaluate(cards("Ah", "Ad", "Ac", "Kh", "Kd", "2h", "5h"))
     assert r[0] == HandRank.FULL_HOUSE
 
 

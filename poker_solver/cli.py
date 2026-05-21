@@ -1,16 +1,19 @@
 """Command-line interface for poker_solver."""
+
 from __future__ import annotations
 
 import argparse
 import random
 import sys
-from typing import List, Union
+from typing import Union
 
 from poker_solver.card import Card, parse_board, parse_hand
 from poker_solver.equity import equity
+from poker_solver.games import KuhnPoker
 from poker_solver.range import Range, parse_range
+from poker_solver.solver import solve
 
-HandInput = Union[List[Card], Range]
+HandInput = Union[list[Card], Range]
 
 
 def _parse_spec(spec: str) -> HandInput:
@@ -53,10 +56,38 @@ def _cmd_equity(args: argparse.Namespace) -> int:
     return 0
 
 
+_GAMES = {"kuhn": KuhnPoker}
+
+
+def _cmd_solve(args: argparse.Namespace) -> int:
+    game_cls = _GAMES[args.game]
+    game = game_cls()
+    result = solve(game, iterations=args.iterations, backend=args.backend)
+
+    print(f"Game:        {args.game}")
+    print(f"Backend:     {result.backend}")
+    print(f"Iterations:  {result.iterations}")
+    print(f"Game value:  {result.game_value:+.6f} (P1 perspective)")
+    last_exp = (
+        result.exploitability_history[-1]
+        if result.exploitability_history
+        else float("nan")
+    )
+    print(f"Exploitability (final): {last_exp:.6f}")
+    print()
+    print("Average strategy:")
+    print(f"  {'infoset':<8}  {'actions':<24}")
+    for key in sorted(result.average_strategy.keys()):
+        probs = result.average_strategy[key]
+        action_str = "  ".join(f"{p:.4f}" for p in probs)
+        print(f"  {key:<8}  {action_str}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="poker-solver",
-        description="Texas Hold'em equity solver",
+        description="Texas Hold'em equity + GTO solver",
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -86,10 +117,38 @@ def build_parser() -> argparse.ArgumentParser:
     )
     eq.set_defaults(func=_cmd_equity)
 
+    sv = sub.add_parser("solve", help="Solve a poker game to equilibrium via CFR")
+    sv.add_argument(
+        "--game",
+        choices=sorted(_GAMES.keys()),
+        required=True,
+        help="Which game to solve (currently: kuhn)",
+    )
+    sv.add_argument(
+        "-n",
+        "--iterations",
+        type=int,
+        default=50_000,
+        help="DCFR iterations (default: 50000)",
+    )
+    sv.add_argument(
+        "--backend",
+        choices=("python", "rust"),
+        default="python",
+        help="Solver backend: python (reference) or rust (production). Default: python.",
+    )
+    sv.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed (forward-compat; vanilla DCFR is deterministic)",
+    )
+    sv.set_defaults(func=_cmd_solve)
+
     return parser
 
 
-def main(argv: List[str] | None = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:

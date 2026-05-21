@@ -36,3 +36,14 @@ htmlcov/
 .vscode/
 *.swp
 .DS_Store
+
+# Rust
+target/
+
+# References are local-only — papers (3rd-party copyright), OSS repos
+# (large), competitor blog snapshots, etc. Run scripts/setup_references.sh
+# to repopulate code/ on a fresh clone.
+references/
+
+# Per-PR check artifact regenerated each run; not checked in
+pr_report.md

@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/cfr_core"]
+resolver = "2"
