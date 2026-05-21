@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import random
 import sys
+from dataclasses import replace
+from pathlib import Path
 from typing import Union
 
 from poker_solver.card import Card, parse_board, parse_hand
@@ -70,13 +72,82 @@ def _build_leduc(args: argparse.Namespace) -> Game:
 def _build_hunl_with_args(args: argparse.Namespace) -> Game:
     mode = getattr(args, "hunl_mode", "tiny_subgame")
     if mode == "tiny_subgame":
-        return HUNLPoker(default_tiny_subgame())
-    if mode == "full":
+        config = default_tiny_subgame()
+    elif mode == "full":
         raise NotImplementedError(
             "Full HUNL solve requires card abstraction (PR 4) + scalable "
             "solver (PR 5). Use --hunl-mode tiny_subgame for a small exercise."
         )
-    raise ValueError(f"Unknown --hunl-mode: {mode!r}")
+    else:
+        raise ValueError(f"Unknown --hunl-mode: {mode!r}")
+
+    abstraction_path = getattr(args, "abstraction", None)
+    if abstraction_path:
+        # Load once to grab the version, then attach an `AbstractionRef`
+        # (lightweight pointer; runtime LRU-caches the loaded tables).
+        from poker_solver.abstraction.buckets import (
+            AbstractionRef,
+            load_abstraction,
+        )
+
+        path = Path(abstraction_path)
+        loaded = load_abstraction(path)
+        version = str(
+            loaded.metadata.get(
+                "version", f"v{loaded.metadata.get('schema_version', 1)}"
+            )
+        )
+        ref = AbstractionRef(source_path=str(path.resolve()), version=version)
+        config = replace(config, abstraction=ref)
+    return HUNLPoker(config)
+
+
+def _cmd_precompute_abstraction(args: argparse.Namespace) -> int:
+    from poker_solver.abstraction.precompute import build_abstraction
+    from poker_solver.hunl import Street, default_tiny_subgame
+
+    flop_count, turn_count, river_count = (
+        int(x) for x in args.bucket_counts.split(",")
+    )
+    street_map = {
+        "flop": Street.FLOP,
+        "turn": Street.TURN,
+        "river": Street.RIVER,
+    }
+    if args.street == "all":
+        streets: tuple[Street, ...] = (Street.FLOP, Street.TURN, Street.RIVER)
+    else:
+        streets = (street_map[args.street],)
+    out_path = Path(args.output)
+
+    # CLI autosize coupling: when ``--mc-iterations`` is small, build_abstraction
+    # autosizes ``max_boards_per_street`` (default 8) and would otherwise truncate
+    # away the high-rank board ``default_tiny_subgame`` uses (As 7c 2d Kh 5s).
+    # Force-include the subgame board + hole cards so the CLI smoke test that
+    # follows up with ``solve --abstraction`` can look them up.
+    required_boards = None
+    required_hands = None
+    if args.mc_iterations < 5_000:
+        subgame = default_tiny_subgame()
+        required_boards = [subgame.initial_board]
+        required_hands = [subgame.initial_hole_cards[0], subgame.initial_hole_cards[1]]
+
+    build_abstraction(
+        out_path=out_path,
+        bucket_counts=(flop_count, turn_count, river_count),
+        seed=args.seed,
+        H=args.feature_bins,
+        max_iter=args.max_iter,
+        streets=streets,
+        flop_mode=args.flop_mode,
+        mc_iterations=args.mc_iterations,
+        progress=True,
+        max_boards_per_street=getattr(args, "max_boards", None),
+        required_boards=required_boards,
+        required_hands=required_hands,
+    )
+    print(f"Wrote abstraction to {out_path}")
+    return 0
 
 
 _GAMES = {
@@ -183,7 +254,59 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Random seed (forward-compat; vanilla DCFR is deterministic)",
     )
+    sv.add_argument(
+        "--abstraction",
+        type=str,
+        default=None,
+        help=(
+            "Path to an abstraction .npz file. When set, HUNL infoset keys "
+            "use the bucketed (b<id>|...) form on postflop streets; preflop "
+            "is always lossless. Default: None (PR 3 lossless behavior)."
+        ),
+    )
     sv.set_defaults(func=_cmd_solve)
+
+    pa = sub.add_parser(
+        "precompute-abstraction",
+        help="Build the EMD-bucketed card abstraction artifact (PR 4).",
+    )
+    pa.add_argument("--output", type=str, default="abstraction_v1.npz")
+    pa.add_argument(
+        "--bucket-counts",
+        type=str,
+        default="256,128,64",
+        help="Comma-separated flop,turn,river bucket counts. Default: 256,128,64.",
+    )
+    pa.add_argument("--feature-bins", type=int, default=50)
+    pa.add_argument("--seed", type=int, default=42)
+    pa.add_argument("--max-iter", type=int, default=200)
+    pa.add_argument(
+        "--street",
+        choices=("flop", "turn", "river", "all"),
+        default="all",
+    )
+    pa.add_argument(
+        "--flop-mode",
+        choices=("exact", "mc"),
+        default="mc",
+        help="Equity-feature mode for the flop street. Default: mc.",
+    )
+    pa.add_argument(
+        "--mc-iterations",
+        type=int,
+        default=200_000,
+        help="Monte Carlo iterations per (board, hand). Default: 200000.",
+    )
+    pa.add_argument(
+        "--max-boards",
+        type=int,
+        default=None,
+        help=(
+            "Cap on canonical-board enumeration per street (test/smoke knob; "
+            "default None = full enumeration)."
+        ),
+    )
+    pa.set_defaults(func=_cmd_precompute_abstraction)
 
     return parser
 
