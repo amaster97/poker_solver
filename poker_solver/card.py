@@ -112,3 +112,13 @@ class Deck:
 
 def cards_str(cards: Sequence[Card]) -> str:
     return " ".join(str(c) for c in cards)
+
+
+def card_to_int(card: Card) -> int:
+    """Map a Card to a stable integer in [8, 59] = rank * 4 + suit."""
+    return card.rank * 4 + card.suit
+
+
+def int_to_card(card_int: int) -> Card:
+    """Inverse of card_to_int."""
+    return Card(card_int // 4, card_int % 4)

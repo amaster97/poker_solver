@@ -9,7 +9,8 @@ from typing import Union
 
 from poker_solver.card import Card, parse_board, parse_hand
 from poker_solver.equity import equity
-from poker_solver.games import KuhnPoker, LeducPoker
+from poker_solver.games import Game, KuhnPoker, LeducPoker
+from poker_solver.hunl import HUNLPoker, default_tiny_subgame
 from poker_solver.range import Range, parse_range
 from poker_solver.solver import solve
 
@@ -56,12 +57,37 @@ def _cmd_equity(args: argparse.Namespace) -> int:
     return 0
 
 
-_GAMES = {"kuhn": KuhnPoker, "leduc": LeducPoker}
+def _build_kuhn(args: argparse.Namespace) -> Game:
+    del args
+    return KuhnPoker()
+
+
+def _build_leduc(args: argparse.Namespace) -> Game:
+    del args
+    return LeducPoker()
+
+
+def _build_hunl_with_args(args: argparse.Namespace) -> Game:
+    mode = getattr(args, "hunl_mode", "tiny_subgame")
+    if mode == "tiny_subgame":
+        return HUNLPoker(default_tiny_subgame())
+    if mode == "full":
+        raise NotImplementedError(
+            "Full HUNL solve requires card abstraction (PR 4) + scalable "
+            "solver (PR 5). Use --hunl-mode tiny_subgame for a small exercise."
+        )
+    raise ValueError(f"Unknown --hunl-mode: {mode!r}")
+
+
+_GAMES = {
+    "kuhn": _build_kuhn,
+    "leduc": _build_leduc,
+    "hunl": _build_hunl_with_args,
+}
 
 
 def _cmd_solve(args: argparse.Namespace) -> int:
-    game_cls = _GAMES[args.game]
-    game = game_cls()
+    game = _GAMES[args.game](args)
     result = solve(game, iterations=args.iterations, backend=args.backend)
 
     print(f"Game:        {args.game}")
@@ -127,7 +153,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--game",
         choices=sorted(_GAMES.keys()),
         required=True,
-        help="Which game to solve (kuhn, leduc)",
+        help="Which game to solve (kuhn, leduc, hunl)",
+    )
+    sv.add_argument(
+        "--hunl-mode",
+        choices=("tiny_subgame", "full"),
+        default="tiny_subgame",
+        help=(
+            "HUNL mode: tiny_subgame (default, river-only fixture) or full "
+            "(raises NotImplementedError; full HUNL solve lands in PR 5)."
+        ),
     )
     sv.add_argument(
         "-n",

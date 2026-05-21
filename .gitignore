@@ -51,3 +51,7 @@ pr_report.md
 # Strategic roadmap / decision log + author-specific docs are kept local.
 PLAN.md
 docs/
+
+# Office app artifacts (user's local files; not project source)
+*.docx
+~$*
