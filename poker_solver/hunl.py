@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from enum import IntEnum
+from typing import TYPE_CHECKING
 
 from poker_solver.action_abstraction import (
     ACTION_ALL_IN,
@@ -37,6 +38,12 @@ from poker_solver.action_abstraction import (
 )
 from poker_solver.card import Card, card_to_int, int_to_card
 from poker_solver.evaluator import evaluate
+
+if TYPE_CHECKING:
+    # Cycle break: poker_solver.abstraction.buckets imports Street from this
+    # module. The `abstraction` field is typed via forward-reference; the
+    # actual `AbstractionRef` class is imported lazily inside `infoset_key`.
+    from poker_solver.abstraction.buckets import AbstractionRef
 
 Action = int
 
@@ -101,6 +108,14 @@ class HUNLConfig:
     rake_cap: int = 0
     force_allin_threshold: int = 1
     min_bet_bb: int = 1
+    # PR 4: optional card abstraction. `AbstractionRef` carries (source_path,
+    # version) only; the runtime resolves it to an `AbstractionTables` via
+    # `resolve_abstraction_ref(ref)` (LRU-cached). Excluded from compare/hash
+    # because the resolved tables contain numpy arrays that don't hash and
+    # because two HUNLConfigs with different abstraction artifacts should still
+    # compare equal as game configurations (the abstraction is a runtime
+    # adjunct, not a game-rule field). Per consistency review v2 NEW-1.
+    abstraction: AbstractionRef | None = field(default=None, compare=False, hash=False)
 
     def __post_init__(self) -> None:
         if self.rake_rate != 0.0:
@@ -307,6 +322,28 @@ class HUNLPoker:
         return self._apply_player(state, action)
 
     def infoset_key(self, state: HUNLState, player: int) -> str:
+        cfg = state.config
+        if cfg.abstraction is not None and state.street >= Street.FLOP:
+            # Bucketed path: resolve `AbstractionRef` -> cached `AbstractionTables`,
+            # then look up the bucket id. Preflop always falls through to the
+            # lossless branch (per Decision 7.12).
+            from poker_solver.abstraction.buckets import (
+                lookup_bucket,
+                resolve_abstraction_ref,
+            )
+
+            tables = resolve_abstraction_ref(cfg.abstraction)
+            bucket_id = lookup_bucket(
+                tables,
+                state.board,
+                state.hole_cards[player],
+                state.street,
+            )
+            street_token = _STREET_TOKENS.get(state.street, "s")
+            all_streets = list(state.betting_tokens) + [state.current_street_tokens]
+            history = "/".join("".join(tokens) for tokens in all_streets)
+            return f"b{bucket_id}|{street_token}|{history}"
+        # Lossless path (PR 3 behavior preserved exactly).
         if state.hole_cards:
             player_hole = _sorted_card_string(state.hole_cards[player])
         else:
