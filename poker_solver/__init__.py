@@ -1,5 +1,15 @@
 """Texas Hold'em equity + GTO solver."""
 
+from poker_solver.abstraction.buckets import (
+    AbstractionRef,
+    AbstractionTables,
+    load_abstraction,
+    lookup_bucket,
+    resolve_abstraction_ref,
+    save_abstraction,
+)
+from poker_solver.abstraction.equity_features import canonicalize_for_suit_iso
+from poker_solver.abstraction.precompute import build_abstraction
 from poker_solver.action_abstraction import (
     ACTION_ALL_IN,
     ACTION_BET_33,
@@ -67,6 +77,14 @@ from poker_solver.range import Range, parse_range
 from poker_solver.solver import SolveResult, exploitability, solve
 
 __all__ = [
+    "AbstractionRef",
+    "AbstractionTables",
+    "build_abstraction",
+    "canonicalize_for_suit_iso",
+    "load_abstraction",
+    "lookup_bucket",
+    "resolve_abstraction_ref",
+    "save_abstraction",
     "Card",
     "Deck",
     "RANKS",
