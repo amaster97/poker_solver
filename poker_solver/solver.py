@@ -10,6 +10,13 @@ import numpy as np
 
 from poker_solver.dcfr import DCFRSolver
 from poker_solver.games import Game, KuhnPoker, LeducPoker
+from poker_solver.hunl import HUNLConfig, HUNLPoker, Street
+from poker_solver.pushfold import (
+    PUSHFOLD_MAX_BB,
+    PUSHFOLD_MIN_BB,
+    get_full_range,
+    is_pushfold_mode,
+)
 
 
 @dataclass
@@ -38,6 +45,15 @@ def solve(
         log_every: if set, record exploitability every `log_every` iterations.
         **dcfr_kwargs: forwarded to `DCFRSolver` (alpha, beta, gamma, seed).
     """
+    # Push/fold short-stack fast path: only dispatch for PREFLOP-start games.
+    # A river/turn/flop subgame at short stack still needs the tree solver —
+    # push/fold equilibria only exist on the preflop tree shape.
+    if (
+        isinstance(game, HUNLPoker)
+        and game.config.starting_street == Street.PREFLOP
+        and is_pushfold_mode(game.config.starting_stack, game.config.big_blind)
+    ):
+        return _solve_pushfold_lookup(game.config)
     if backend == "rust":
         return _solve_rust(game, iterations, **dcfr_kwargs)
     if backend != "python":
@@ -263,6 +279,36 @@ def _br_state_value(
             game, strategy, game.apply(state, action), br_player, best_action
         )
     return value
+
+
+def _solve_pushfold_lookup(config: HUNLConfig) -> SolveResult:
+    """Return a SolveResult built from the static push/fold charts.
+
+    The effective stack depth is rounded down to the nearest BB to pick a
+    chart cell; that matches how chart users think of stack depth ("I have
+    10 BB") rather than the exact chip count. Both positions' charts are
+    flattened into `average_strategy` so downstream callers can inspect
+    either side. Strategy vectors are `[fold_prob, aggressive_prob]`.
+    """
+    eff_bb = config.starting_stack // config.big_blind
+    if eff_bb < PUSHFOLD_MIN_BB:
+        eff_bb = PUSHFOLD_MIN_BB
+    elif eff_bb > PUSHFOLD_MAX_BB:
+        eff_bb = PUSHFOLD_MAX_BB
+    strategy: dict[str, list[float]] = {}
+    for position in ("sb_jam", "bb_call_vs_jam"):
+        chart = get_full_range(eff_bb, position)
+        for hand, freq in chart.items():
+            key = f"pushfold|{position}|{eff_bb}BB|{hand}"
+            agg = float(freq)
+            strategy[key] = [1.0 - agg, agg]
+    return SolveResult(
+        average_strategy=strategy,
+        exploitability_history=[0.0],
+        game_value=0.0,
+        iterations=0,
+        backend="pushfold",
+    )
 
 
 def _solve_rust(game: Game, iterations: int, **dcfr_kwargs: Any) -> SolveResult:
