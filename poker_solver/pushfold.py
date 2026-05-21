@@ -14,25 +14,32 @@ from __future__ import annotations
 import json
 from functools import lru_cache
 from importlib import resources
-from typing import Final, Literal, cast
+from typing import TYPE_CHECKING, Final, Literal, cast
 
 from poker_solver.card import RANK_VALUE, RANKS
+
+if TYPE_CHECKING:
+    from poker_solver.hunl import HUNLConfig
+    from poker_solver.solver import SolveResult
 
 Position = Literal["sb_jam", "bb_call_vs_jam"]
 
 PUSHFOLD_MIN_BB: Final[int] = 2
 PUSHFOLD_MAX_BB: Final[int] = 15
 PUSHFOLD_CHART_VERSIONS: Final[frozenset[str]] = frozenset({"v1", "v1-placeholder"})
+_EXPLOITABILITY_GATE_BB_PER_100: Final[float] = 0.05
 _VALID_POSITIONS: Final[frozenset[str]] = frozenset({"sb_jam", "bb_call_vs_jam"})
 _CHART_RESOURCE: Final[str] = "pushfold_v1.json"
 
 
-class PushFoldChartUnavailable(Exception):
+class PushFoldChartUnavailable(ValueError):
     """Raised when no push/fold chart covers the requested configuration.
 
     Examples: stack depth outside [2, 15] BB, unknown position string, or
     chart data missing for a (depth, position) cell. Callers can catch this
-    to fall back to the full tree solver.
+    to fall back to the full tree solver. Subclasses ``ValueError`` so the
+    spec §6 ``Raises: ValueError`` contract holds: ``except ValueError``
+    in caller code catches this branch.
     """
 
 
@@ -47,6 +54,20 @@ def _load_chart_data() -> dict[str, object]:
         raise PushFoldChartUnavailable(
             f"Unsupported pushfold chart version: {version!r}. "
             f"Known versions: {sorted(PUSHFOLD_CHART_VERSIONS)}."
+        )
+    final_expl = payload.get("final_exploitability_bb_per_100")
+    if final_expl is None:
+        raise PushFoldChartUnavailable(
+            "Chart metadata missing 'final_exploitability_bb_per_100' scalar; "
+            "regenerate via scripts/generate_pushfold_charts.py."
+        )
+    if (
+        not isinstance(final_expl, (int, float))
+        or float(final_expl) >= _EXPLOITABILITY_GATE_BB_PER_100
+    ):
+        raise PushFoldChartUnavailable(
+            f"Chart final_exploitability_bb_per_100={final_expl!r} fails the "
+            f"convergence gate (must be < {_EXPLOITABILITY_GATE_BB_PER_100})."
         )
     return cast(dict[str, object], payload)
 
@@ -137,6 +158,77 @@ def get_full_range(stack_bb: int, position: str) -> dict[str, float]:
     return {cls: float(chart.get(cls, 0.0)) for cls in _all_hand_classes()}
 
 
+# Spec §6 line 165 names this `get_pushfold_range`; we kept the shorter
+# `get_full_range` as the canonical implementation and alias the spec name so
+# downstream callers using either name compile.
+get_pushfold_range = get_full_range
+
+
+def solve_pushfold(config: HUNLConfig) -> SolveResult:
+    """Return a SolveResult built from the static push/fold charts.
+
+    Public spec §6 entry point. The effective stack depth is rounded down to
+    the nearest BB to pick a chart cell; both positions' charts are flattened
+    into ``average_strategy`` so downstream callers can inspect either side.
+    Strategy vectors are ``[fold_prob, aggressive_prob]`` keyed by
+    ``f"pushfold|{position}|{eff_bb}BB|{hand}"`` (a chart-specific format,
+    documented because no real HUNL game tree exists in the chart path).
+
+    Args:
+        config: an ``HUNLConfig`` whose effective stack falls in
+            ``[PUSHFOLD_MIN_BB, PUSHFOLD_MAX_BB]`` (= [2, 15] BB).
+
+    Returns:
+        ``SolveResult`` with ``backend == "pushfold_chart"`` and
+        ``iterations == 0`` (the chart path is non-iterative).
+
+    Raises:
+        ValueError: ``eff_stack_bb > PUSHFOLD_MAX_BB`` (caller should use the
+            tree-builder solver) or ``< PUSHFOLD_MIN_BB`` (degenerate — both
+            players are auto-allin and a chart cell does not exist).
+    """
+    # Localized import to avoid a hard import cycle: solver.py imports
+    # pushfold.py at module top, so importing SolveResult at module top here
+    # would form a cycle. Deferring to call time breaks the cycle.
+    from poker_solver.solver import SolveResult
+
+    eff_bb = config.starting_stack // config.big_blind
+    if eff_bb < PUSHFOLD_MIN_BB:
+        raise ValueError(
+            f"Effective stack {eff_bb} BB < {PUSHFOLD_MIN_BB} BB minimum; "
+            "both players are auto-allin pre-deal at this depth and no chart "
+            "cell exists. Use the tree-builder solver instead."
+        )
+    if eff_bb > PUSHFOLD_MAX_BB:
+        raise ValueError(
+            f"Effective stack {eff_bb} BB > {PUSHFOLD_MAX_BB} BB maximum; "
+            "use the tree-builder solver for deeper stacks."
+        )
+    strategy: dict[str, list[float]] = {}
+    for position in ("sb_jam", "bb_call_vs_jam"):
+        chart = get_full_range(eff_bb, position)
+        for hand, freq in chart.items():
+            key = f"pushfold|{position}|{eff_bb}BB|{hand}"
+            agg = float(freq)
+            strategy[key] = [1.0 - agg, agg]
+    # Surface the depth-specific residual exploitability from the JSON
+    # rather than a zero placeholder so callers reading
+    # ``result.exploitability_history[-1]`` get a faithful value.
+    payload = _load_chart_data()
+    per_depth_expl = cast(
+        dict[str, float],
+        payload.get("exploitability_bb_per_100", {}),
+    )
+    expl = float(per_depth_expl.get(str(eff_bb), 0.0))
+    return SolveResult(
+        average_strategy=strategy,
+        exploitability_history=[expl],
+        game_value=0.0,
+        iterations=0,
+        backend="pushfold_chart",
+    )
+
+
 def _all_hand_classes() -> tuple[str, ...]:
     """Enumerate the 169 canonical hand classes (13 pairs + 78 suited + 78 offsuit)."""
     ranks = "AKQJT98765432"
@@ -207,5 +299,7 @@ __all__ = [
     "Position",
     "get_pushfold_strategy",
     "get_full_range",
+    "get_pushfold_range",
     "is_pushfold_mode",
+    "solve_pushfold",
 ]
