@@ -41,17 +41,20 @@ poker-solver equity "AA,KK,AKs" QdQc --iterations 20000
 
 ### Solver (preview)
 
-Solve Kuhn poker to equilibrium via Discounted CFR (DCFR):
+Solve Kuhn or Leduc poker to equilibrium via Discounted CFR (DCFR):
 
 ```bash
-# Python reference tier (slow, readable)
+# Kuhn poker (12 infosets, closed-form Nash):
 poker-solver solve --game kuhn --iterations 50000
 
-# Rust production tier (fast)
+# Leduc poker (288 infosets, multi-round, public card reveal):
+poker-solver solve --game leduc --iterations 5000
+
+# Rust backend (faster; supports kuhn currently, leduc landing in same PR):
 poker-solver solve --game kuhn --iterations 50000 --backend rust
 ```
 
-Output is the average-strategy table per information set, the game value (P1 perspective), and the final exploitability. Both backends produce numerically equivalent strategies (within 1e-4 per action probability) — this is enforced by the differential test in `tests/test_dcfr_diff.py`.
+Output is the average-strategy table per information set, the game value (P1 perspective), and the final exploitability. Both backends produce numerically equivalent strategies (within 1e-4 per action probability) — this is enforced by the differential test in `tests/test_dcfr_diff.py`. Leduc extends the Kuhn pipeline with a mid-game chance node (a public card revealed between the two betting rounds), exercising the multi-round bookkeeping the HUNL solver will rely on.
 
 ## Library
 

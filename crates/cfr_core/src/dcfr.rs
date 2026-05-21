@@ -20,6 +20,12 @@
 //! tier's `_cfr` and `_discount` exactly so the differential test in
 //! `tests/test_dcfr_diff.py` passes.
 //!
+//! The solver is generic over the `Game` trait (see `game.rs`); concrete games
+//! (Kuhn, Leduc, future Hold'em abstractions) plug in without touching this
+//! file. Action counts are stored as `Vec<f64>` because Leduc has 1–3 legal
+//! actions per node depending on betting context — assuming a fixed width
+//! would not survive the port.
+//!
 //! Algorithmic reference: `references/code/open_spiel/open_spiel/algorithms/cfr.cc`
 //! (Apache 2.0) and `references/code/noambrown_poker_solver/cpp/src/trainer.cpp`
 //! (MIT). The exact structure here was re-derived from `dcfr.py` to keep tier
@@ -27,7 +33,7 @@
 
 use std::collections::HashMap;
 
-use crate::kuhn::KuhnState;
+use crate::game::Game;
 
 /// Per-infoset cumulative regret and strategy-sum vectors.
 #[derive(Clone, Debug)]
@@ -51,18 +57,26 @@ impl InfosetData {
     }
 }
 
-/// DCFR solver state.
-pub struct DCFRSolver {
+/// DCFR solver state, generic over a game type implementing `Game`.
+pub struct DCFRSolver<G: Game> {
     pub alpha: f64,
     pub beta: f64,
     pub gamma: f64,
     pub infosets: HashMap<String, InfosetData>,
     pub iteration: u32,
+    _phantom: std::marker::PhantomData<G>,
 }
 
-impl DCFRSolver {
+impl<G: Game> DCFRSolver<G> {
     pub fn new(alpha: f64, beta: f64, gamma: f64) -> Self {
-        Self { alpha, beta, gamma, infosets: HashMap::new(), iteration: 0 }
+        Self {
+            alpha,
+            beta,
+            gamma,
+            infosets: HashMap::new(),
+            iteration: 0,
+            _phantom: std::marker::PhantomData,
+        }
     }
 
     /// Regret-matching strategy: positive regrets normalized, uniform if zero.
@@ -122,7 +136,7 @@ impl DCFRSolver {
     /// Recursive CFR traversal.
     /// `reach` is `[p0_reach, p1_reach, chance_reach]`, mirroring Python's
     /// `np.ones(num_players + 1)`.
-    pub fn cfr(&mut self, state: &KuhnState, reach: [f64; 3], iteration: u32) -> [f64; 2] {
+    pub fn cfr(&mut self, state: &G, reach: [f64; 3], iteration: u32) -> [f64; 2] {
         if state.is_terminal() {
             return state.utility();
         }
@@ -154,7 +168,11 @@ impl DCFRSolver {
         let strategy = Self::get_strategy(info);
 
         let mut node_value = [0.0_f64; 2];
-        let mut action_values = vec![[0.0_f64; 2]; num_actions];
+        // `action_values` stores per-(action, player) utility. The outer Vec is
+        // sized by `num_actions` because Leduc has 1–3 legal actions per node
+        // depending on betting context (raise cap, fold availability); a fixed
+        // `[..; 2]` outer width would only fit Kuhn.
+        let mut action_values: Vec<[f64; 2]> = vec![[0.0_f64; 2]; num_actions];
         for (idx, &action) in actions.iter().enumerate() {
             let mut new_reach = reach;
             new_reach[player_idx] *= strategy[idx];
@@ -185,7 +203,7 @@ impl DCFRSolver {
 
     /// Solve for `iterations` iterations, return the average strategy.
     pub fn solve(&mut self, iterations: u32) -> HashMap<String, Vec<f64>> {
-        let initial = KuhnState::initial();
+        let initial = G::initial();
         for _ in 0..iterations {
             self.iteration += 1;
             let reach = [1.0_f64, 1.0, 1.0];

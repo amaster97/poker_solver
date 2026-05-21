@@ -9,7 +9,7 @@ from typing import Union
 
 from poker_solver.card import Card, parse_board, parse_hand
 from poker_solver.equity import equity
-from poker_solver.games import KuhnPoker
+from poker_solver.games import KuhnPoker, LeducPoker
 from poker_solver.range import Range, parse_range
 from poker_solver.solver import solve
 
@@ -56,7 +56,7 @@ def _cmd_equity(args: argparse.Namespace) -> int:
     return 0
 
 
-_GAMES = {"kuhn": KuhnPoker}
+_GAMES = {"kuhn": KuhnPoker, "leduc": LeducPoker}
 
 
 def _cmd_solve(args: argparse.Namespace) -> int:
@@ -122,7 +122,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--game",
         choices=sorted(_GAMES.keys()),
         required=True,
-        help="Which game to solve (currently: kuhn)",
+        help="Which game to solve (kuhn, leduc)",
     )
     sv.add_argument(
         "-n",
