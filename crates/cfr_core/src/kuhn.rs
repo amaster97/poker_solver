@@ -9,6 +9,8 @@
 //! test (`tests/test_dcfr_diff.py`) requires structural parity so per-action
 //! probabilities agree within 1e-4.
 
+use crate::game::Game;
+
 pub const PASS: u8 = 0;
 pub const BET: u8 = 1;
 
@@ -130,5 +132,35 @@ impl KuhnState {
     /// Infoset key for `player`: their card + the visible action history.
     pub fn infoset_key(&self, player: u8) -> String {
         format!("{}|{}", self.cards[player as usize], self.history_string())
+    }
+}
+
+impl Game for KuhnState {
+    fn num_players() -> usize {
+        2
+    }
+    fn initial() -> Self {
+        KuhnState::initial()
+    }
+    fn is_terminal(&self) -> bool {
+        KuhnState::is_terminal(self)
+    }
+    fn utility(&self) -> [f64; 2] {
+        KuhnState::utility(self)
+    }
+    fn current_player(&self) -> i8 {
+        KuhnState::current_player(self)
+    }
+    fn chance_outcomes(&self) -> Vec<(u8, f64)> {
+        KuhnState::chance_outcomes(self)
+    }
+    fn legal_actions(&self) -> Vec<u8> {
+        KuhnState::legal_actions(self)
+    }
+    fn apply(&self, action: u8) -> Self {
+        KuhnState::apply(self, action)
+    }
+    fn infoset_key(&self, player: u8) -> String {
+        KuhnState::infoset_key(self, player)
     }
 }

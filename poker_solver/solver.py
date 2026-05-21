@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 
 from poker_solver.dcfr import DCFRSolver
-from poker_solver.games import Game, KuhnPoker
+from poker_solver.games import Game, KuhnPoker, LeducPoker
 
 
 @dataclass
@@ -147,29 +147,35 @@ def _best_response_value(
 ) -> float:
     """Compute `br_player`'s value when best-responding to opponents on `strategy`.
 
-    Walks the tree once collecting (state, counterfactual_reach) groups per
+    Walks the tree collecting (state, counterfactual_reach) groups per
     `br_player` infoset, then picks the action maximizing the responder's
-    expected utility per infoset.
+    expected utility per infoset. For multi-round games infosets are visited
+    in DFS pre-order; one BR pass therefore uses the previous pass's choices
+    at deeper infosets, so we iterate to a fixed point.
     """
     infoset_groups: dict[str, list[tuple]] = {}
     _collect_infosets(
         game, strategy, game.initial_state(), 1.0, br_player, infoset_groups
     )
     best_action: dict[str, int] = {}
-    for key, entries in infoset_groups.items():
-        actions = entries[0][1]
-        action_values = np.zeros(len(actions), dtype=np.float64)
-        for state, _actions, cf_reach in entries:
-            for idx, action in enumerate(actions):
-                child_v = _br_state_value(
-                    game,
-                    strategy,
-                    game.apply(state, action),
-                    br_player,
-                    best_action,
-                )
-                action_values[idx] += cf_reach * child_v
-        best_action[key] = int(np.argmax(action_values))
+    while True:
+        previous = dict(best_action)
+        for key, entries in infoset_groups.items():
+            actions = entries[0][1]
+            action_values = np.zeros(len(actions), dtype=np.float64)
+            for state, _actions, cf_reach in entries:
+                for idx, action in enumerate(actions):
+                    child_v = _br_state_value(
+                        game,
+                        strategy,
+                        game.apply(state, action),
+                        br_player,
+                        best_action,
+                    )
+                    action_values[idx] += cf_reach * child_v
+            best_action[key] = int(np.argmax(action_values))
+        if best_action == previous:
+            break
     return float(
         _br_state_value(
             game,
@@ -262,21 +268,24 @@ def _br_state_value(
 def _solve_rust(game: Game, iterations: int, **dcfr_kwargs: Any) -> SolveResult:
     """Run the Rust DCFR production tier and adapt its output to `SolveResult`.
 
-    The Rust extension currently only knows Kuhn; non-Kuhn games raise
-    `NotImplementedError` so callers fall back to the Python tier.
+    Routes Kuhn → `_rust.solve_kuhn`, Leduc → `_rust.solve_leduc`. Any other
+    game raises `NotImplementedError` so callers fall back to the Python tier.
     """
-    if not isinstance(game, KuhnPoker):
-        raise NotImplementedError(
-            "Rust backend currently only supports Kuhn poker. "
-            f"Got {type(game).__name__}; use backend='python' instead."
-        )
-    # Localized import so non-Rust environments don't pay the import cost.
-    from poker_solver._rust import solve_kuhn as _rust_solve_kuhn  # type: ignore
-
     alpha = float(dcfr_kwargs.get("alpha", 1.5))
     beta = float(dcfr_kwargs.get("beta", 0.0))
     gamma = float(dcfr_kwargs.get("gamma", 2.0))
-    result = _rust_solve_kuhn(int(iterations), alpha, beta, gamma)
+
+    # Localized import so non-Rust environments don't pay the import cost.
+    if isinstance(game, KuhnPoker):
+        from poker_solver._rust import solve_kuhn as _rust_solve  # type: ignore
+    elif isinstance(game, LeducPoker):
+        from poker_solver._rust import solve_leduc as _rust_solve  # type: ignore
+    else:
+        raise NotImplementedError(
+            "Rust backend currently supports Kuhn and Leduc. "
+            f"Got {type(game).__name__}; use backend='python' instead."
+        )
+    result = _rust_solve(int(iterations), alpha, beta, gamma)
     avg = {k: list(v) for k, v in result["average_strategy"].items()}
     # Recompute exploitability and game value via the Python reference
     # functions so the diff test compares like-for-like. The strategies are
