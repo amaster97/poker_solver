@@ -80,13 +80,19 @@ pytest
 
 ## References
 
-The project relies on a curated set of papers, OSS solver repos, and competitor blog posts that are **kept local only** (not checked into git — 3rd-party copyright + repo size). To populate them on a fresh clone:
+This work builds on the standard CFR literature. The papers that informed the engine design (kept local only — not redistributed here):
+
+- **DCFR** (Brown & Sandholm 2019) — *Solving Imperfect-Information Games via Discounted Regret Minimization* — the algorithm we use.
+- **CFR+** (Tammelin 2014) — *Solving Large Imperfect Information Games Using CFR+*.
+- **Vanilla CFR** (Zinkevich, Johanson, Bowling, Piccione 2007) — *Regret Minimization in Games with Incomplete Information* — the foundational paper.
+- **Libratus** (Brown & Sandholm 2017, *Science*) — HU NLHE superhuman AI.
+- **Pluribus** (Brown & Sandholm 2019, *Science*) — multiplayer NLHE.
+
+OSS reference solvers studied for inspiration: `b-inary/postflop-solver` (Rust, AGPL — read-only), `bupticybee/TexasSolver` (C++, AGPL — read-only), `noambrown/poker_solver` (MIT), `google-deepmind/open_spiel` (Apache 2.0 — used as Kuhn/Leduc correctness oracle), `ericgjackson/slumbot2019` (MIT). To clone them locally for study:
 
 ```bash
 sh scripts/setup_references.sh
 ```
-
-That clones the 6 OSS reference solvers into `references/code/`. Papers and blog posts need to be fetched manually; see `PLAN.md` for the must-have list. See `PLAN.md` for the long-term roadmap and full decision log.
 
 ## Notation
 
