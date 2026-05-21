@@ -1,11 +1,11 @@
 [build-system]
-requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
 
 [project]
 name = "poker_solver"
-version = "0.1.0"
-description = "Texas Hold'em equity solver: hand evaluation, Monte Carlo equity, range parsing"
+version = "0.2.0"
+description = "Texas Hold'em equity + GTO solver: hand evaluation, Monte Carlo equity, range parsing, CFR engine"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
@@ -16,17 +16,45 @@ classifiers = [
     "Operating System :: OS Independent",
     "Topic :: Games/Entertainment",
 ]
-dependencies = []
+dependencies = ["numpy>=1.24"]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0"]
+dev = ["pytest>=7.0", "maturin>=1.7", "ruff>=0.6", "black>=24.0"]
 
 [project.scripts]
 poker-solver = "poker_solver.cli:main"
 
-[tool.setuptools.packages.find]
-include = ["poker_solver*"]
-exclude = ["tests*"]
+[tool.maturin]
+python-source = "."
+module-name = "poker_solver._rust"
+manifest-path = "crates/cfr_core/Cargo.toml"
+features = ["pyo3/extension-module"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py39"
+line-length = 88
+extend-exclude = ["references/code", "references/manual_downloads"]
+
+[tool.ruff.lint]
+# E = pycodestyle errors, W = pycodestyle warnings, F = pyflakes,
+# I = isort, B = flake8-bugbear, UP = pyupgrade, SIM = flake8-simplify.
+select = ["E", "F", "W", "I", "B", "UP", "SIM"]
+# black handles formatting; let it own line-length judgment calls.
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]  # assert False is fine in tests
+
+[tool.black]
+line-length = 88
+target-version = ["py39"]
+extend-exclude = '''
+/(
+    references/code
+  | references/manual_downloads
+  | target
+)/
+'''

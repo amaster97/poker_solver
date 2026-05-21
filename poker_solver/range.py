@@ -10,21 +10,22 @@ Accepts comma-separated tokens combining:
 
 Example: ``"AA, KK-TT, AKs, AKo, 76s+"``
 """
+
 from __future__ import annotations
 
 import random
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Iterable, List, Optional, Set, Tuple
 
-from poker_solver.card import Card, RANK_VALUE, RANKS, parse_card
+from poker_solver.card import RANK_VALUE, RANKS, Card, parse_card
 
-Combo = Tuple[Card, Card]
+Combo = tuple[Card, Card]
 
 
 @dataclass
 class Range:
-    combos: List[Combo] = field(default_factory=list)
-    _combo_set: Set[Combo] = field(default_factory=set, repr=False)
+    combos: list[Combo] = field(default_factory=list)
+    _combo_set: set[Combo] = field(default_factory=set, repr=False)
 
     def add(self, combo: Iterable[Card]) -> None:
         c = tuple(sorted(combo, key=lambda card: (-card.rank, card.suit)))
@@ -43,9 +44,7 @@ class Range:
     def __iter__(self):
         return iter(self.combos)
 
-    def sample_excluding(
-        self, excluded: Set[Card], rng: random.Random
-    ) -> Optional[Combo]:
+    def sample_excluding(self, excluded: set[Card], rng: random.Random) -> Combo | None:
         """Pick a random combo whose cards are not in `excluded`.
 
         Falls back to a full scan if random rejection fails repeatedly.
@@ -105,7 +104,7 @@ class _Token:
     is_pair: bool
     r1: int  # higher rank for non-pairs
     r2: int  # lower rank for non-pairs (== r1 for pairs)
-    suit: Optional[str]  # 's', 'o', or None
+    suit: str | None  # 's', 'o', or None
 
 
 def _parse_hand_token(token: str) -> _Token:
@@ -114,7 +113,7 @@ def _parse_hand_token(token: str) -> _Token:
     r1c, r2c = token[0].upper(), token[1].upper()
     if r1c not in RANK_VALUE or r2c not in RANK_VALUE:
         raise ValueError(f"Invalid ranks in token: {token!r}")
-    suit: Optional[str] = None
+    suit: str | None = None
     if len(token) == 3:
         suit = token[2].lower()
         if suit not in ("s", "o"):

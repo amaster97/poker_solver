@@ -1,9 +1,11 @@
 """Monte Carlo equity calculator for Texas Hold'em."""
+
 from __future__ import annotations
 
 import random
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import List, Optional, Sequence, Union
+from typing import Union
 
 from poker_solver.card import Card, full_deck
 from poker_solver.evaluator import evaluate
@@ -19,7 +21,7 @@ class EquityResult:
     lose: int = 0
     iterations: int = 0
     equity_sum: float = 0.0
-    samples: List[List[Card]] = field(default_factory=list, repr=False)
+    samples: list[list[Card]] = field(default_factory=list, repr=False)
 
     @property
     def win_pct(self) -> float:
@@ -40,11 +42,11 @@ class EquityResult:
 
 def equity(
     hands: Sequence[HandSpec],
-    board: Optional[Sequence[Card]] = None,
+    board: Sequence[Card] | None = None,
     iterations: int = 10_000,
-    rng: Optional[random.Random] = None,
+    rng: random.Random | None = None,
     max_attempts_multiplier: int = 10,
-) -> List[EquityResult]:
+) -> list[EquityResult]:
     """Run a Monte Carlo equity simulation.
 
     Args:
@@ -62,7 +64,7 @@ def equity(
     if len(hands) < 2:
         raise ValueError("Need at least two hands to compute equity")
     rng = rng or random.Random()
-    board_list: List[Card] = list(board or [])
+    board_list: list[Card] = list(board or [])
     if len(board_list) > 5:
         raise ValueError(f"Board has {len(board_list)} cards (max 5)")
     if len(set(board_list)) != len(board_list):
@@ -78,7 +80,7 @@ def equity(
     while completed < iterations and attempts < max_attempts:
         attempts += 1
         used = set(board_list)
-        sampled_hands: List[List[Card]] = []
+        sampled_hands: list[list[Card]] = []
         conflict = False
         for h in hands:
             if isinstance(h, Range):

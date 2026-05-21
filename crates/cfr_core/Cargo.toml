@@ -1,0 +1,12 @@
+[package]
+name = "cfr_core"
+version = "0.2.0"
+edition = "2021"
+license = "MIT"
+
+[lib]
+name = "_rust"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.23", features = ["extension-module"] }

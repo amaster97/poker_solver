@@ -13,11 +13,12 @@ comparable: a larger tuple beats a smaller one. The category integers are:
     1 one pair
     0 high card
 """
+
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Sequence
 from enum import IntEnum
-from typing import Sequence, Tuple
 
 from poker_solver.card import Card
 
@@ -51,7 +52,7 @@ def _straight_high(unique_ranks_desc: Sequence[int]) -> int:
     return 0
 
 
-def evaluate(cards: Sequence[Card]) -> Tuple[int, ...]:
+def evaluate(cards: Sequence[Card]) -> tuple[int, ...]:
     if len(cards) < 5:
         raise ValueError(f"evaluate needs at least 5 cards, got {len(cards)}")
 
@@ -87,9 +88,7 @@ def evaluate(cards: Sequence[Card]) -> Tuple[int, ...]:
 
     # Flush
     if flush_suit is not None:
-        top5 = sorted(
-            (c.rank for c in cards if c.suit == flush_suit), reverse=True
-        )[:5]
+        top5 = sorted((c.rank for c in cards if c.suit == flush_suit), reverse=True)[:5]
         return (HandRank.FLUSH, *top5)
 
     # Straight

@@ -1,7 +1,6 @@
 import pytest
 
 from poker_solver.card import (
-    Card,
     Deck,
     parse_board,
     parse_card,
