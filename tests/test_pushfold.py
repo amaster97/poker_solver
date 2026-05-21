@@ -141,7 +141,7 @@ def test_pushfold_mode_dispatch_at_short_stack():
     suffices because the chart path is non-iterative."""
     game = HUNLPoker(HUNLConfig(starting_stack=1000))
     result = solve(game, iterations=0)
-    assert result.backend == "pushfold"
+    assert result.backend == "pushfold_chart"
 
 
 def test_pushfold_mode_not_triggered_for_river_subgame_at_short_stack():
@@ -160,7 +160,7 @@ def test_pushfold_mode_not_triggered_for_river_subgame_at_short_stack():
     # Solve with very few iterations (any non-pushfold backend is fine).
     result = solve(game, iterations=5)
     assert (
-        result.backend != "pushfold"
+        result.backend != "pushfold_chart"
     ), "River subgame at short stack must NOT dispatch to pushfold chart"
 
 
@@ -175,9 +175,9 @@ def test_pushfold_mode_not_triggered_at_long_stack():
     from poker_solver import is_pushfold_mode
 
     config = HUNLConfig(starting_stack=10000)
-    assert not is_pushfold_mode(config.starting_stack, config.big_blind), (
-        "100 BB stack must NOT trigger pushfold dispatch"
-    )
+    assert not is_pushfold_mode(
+        config.starting_stack, config.big_blind
+    ), "100 BB stack must NOT trigger pushfold dispatch"
 
 
 def test_pushfold_strategy_frequencies_sum_consistently():
@@ -209,9 +209,9 @@ def test_pushfold_strategy_frequencies_sum_consistently():
     total_2bb = sum(
         get_pushfold_strategy(2, "sb_jam", hc) * _combos_in_class(hc) for hc in classes
     )
-    assert total_2bb >= 1326.0 * 0.80, (
-        f"SB jam range at 2 BB suspiciously narrow: {total_2bb}/1326 combos"
-    )
+    assert (
+        total_2bb >= 1326.0 * 0.80
+    ), f"SB jam range at 2 BB suspiciously narrow: {total_2bb}/1326 combos"
 
     # AKs hand class must contain exactly 4 combos per parse_range, mirroring
     # the chart's strategic-equivalence collapse.

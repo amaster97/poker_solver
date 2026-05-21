@@ -58,8 +58,10 @@ from poker_solver.pushfold import (
     PUSHFOLD_MIN_BB,
     PushFoldChartUnavailable,
     get_full_range,
+    get_pushfold_range,
     get_pushfold_strategy,
     is_pushfold_mode,
+    solve_pushfold,
 )
 from poker_solver.range import Range, parse_range
 from poker_solver.solver import SolveResult, exploitability, solve
@@ -120,7 +122,9 @@ __all__ = [
     "exploitability",
     "get_pushfold_strategy",
     "get_full_range",
+    "get_pushfold_range",
     "is_pushfold_mode",
+    "solve_pushfold",
     "PushFoldChartUnavailable",
     "PUSHFOLD_MIN_BB",
     "PUSHFOLD_MAX_BB",

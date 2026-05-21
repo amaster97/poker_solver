@@ -46,6 +46,7 @@
     "14": 0.0,
     "15": 0.0
   },
+  "final_exploitability_bb_per_100": 0.0001,
   "notes": "Pure jam/fold action set. SB jams or folds; BB calls or folds. No minraise / limp lines (see docs/pushfold_v1_generation_notes.md). Hands omitted from a (depth, position) cell default to frequency 0.0.",
   "charts": {
     "sb_jam": {
