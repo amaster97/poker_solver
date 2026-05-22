@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import json as _json
+import os as _os
 import random
 import sys
+from dataclasses import asdict as _asdict
 from dataclasses import replace
 from pathlib import Path
 from typing import IO, Union
@@ -13,6 +16,12 @@ from poker_solver.card import Card, parse_board, parse_hand
 from poker_solver.equity import equity
 from poker_solver.games import Game, KuhnPoker, LeducPoker
 from poker_solver.hunl import HUNLConfig, HUNLPoker, Street, default_tiny_subgame
+from poker_solver.library import (
+    Library,
+    LibraryDuplicateError,
+    LibraryFilter,
+    _resolve_library_path,
+)
 from poker_solver.range import Range, parse_range
 from poker_solver.solver import solve
 
@@ -339,6 +348,248 @@ def _cmd_ui(args: argparse.Namespace) -> int:
     return 0
 
 
+def _library_path_from_args(args: argparse.Namespace) -> Path:
+    """Apply the CLI flag precedence on top of ``_resolve_library_path``.
+
+    Precedence: ``--library-path`` flag > ``$POKER_SOLVER_LIBRARY_PATH`` >
+    ``~/.poker_solver/library.db``. The library module already honors the
+    env var and default; we just gate the explicit flag.
+    """
+    explicit = getattr(args, "library_path", None)
+    return _resolve_library_path(Path(explicit) if explicit else None)
+
+
+def _cmd_library_list(args: argparse.Namespace) -> int:
+    path = _library_path_from_args(args)
+    filt = LibraryFilter(
+        board_pattern=args.board_pattern,
+        street=args.street,
+        stack_bb_min=args.stack_bb_min,
+        stack_bb_max=args.stack_bb_max,
+        solver_version=args.solver_version,
+        created_after=args.created_after,
+        label_pattern=args.label_pattern,
+    )
+    with Library.open(path) as lib:
+        rows = lib.list(filt, limit=args.limit, offset=args.offset)
+    if args.json:
+        print(_json.dumps([_asdict(r) for r in rows], indent=2))
+        return 0
+    if args.table:
+        try:
+            from rich.console import Console
+            from rich.table import Table
+
+            table = Table(title=f"poker-solver library ({len(rows)} rows)")
+            for col in (
+                "spot_id",
+                "label",
+                "street",
+                "board",
+                "stacks",
+                "value",
+                "exp",
+                "iters",
+                "tier",
+                "version",
+                "created",
+            ):
+                table.add_column(col)
+            for r in rows:
+                table.add_row(
+                    r.spot_id[:12],
+                    r.label,
+                    r.street,
+                    r.board_signature,
+                    str(r.stack_bb),
+                    f"{r.game_value:+.4f}",
+                    f"{r.exploitability:.4f}",
+                    str(r.iterations),
+                    r.abstraction_tier,
+                    r.solver_version,
+                    str(r.created_at),
+                )
+            Console().print(table)
+            return 0
+        except ImportError:
+            pass
+    for r in rows:
+        print(
+            "\t".join(
+                [
+                    r.spot_id,
+                    r.label,
+                    r.street,
+                    r.board_signature,
+                    str(r.stack_bb),
+                    f"{r.game_value:+.6f}",
+                    f"{r.exploitability:.6f}",
+                    str(r.iterations),
+                    r.abstraction_tier,
+                    r.solver_version,
+                    str(r.created_at),
+                ]
+            )
+        )
+    return 0
+
+
+def _cmd_library_get(args: argparse.Namespace) -> int:
+    path = _library_path_from_args(args)
+    with Library.open(path) as lib:
+        result = lib.get(args.spot_id)
+    if result is None:
+        print(f"error: spot_id {args.spot_id} not found", file=sys.stderr)
+        return 1
+    if args.json:
+        last_exp = (
+            result.exploitability_history[-1] if result.exploitability_history else None
+        )
+        print(
+            _json.dumps(
+                {
+                    "average_strategy": result.average_strategy,
+                    "game_value": result.game_value,
+                    "exploitability": last_exp,
+                    "iterations": result.iterations,
+                    "backend": result.backend,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+    print(f"spot_id:        {args.spot_id}")
+    print(f"game_value:     {result.game_value:+.6f}")
+    if result.exploitability_history:
+        print(f"exploitability: {result.exploitability_history[-1]:.6f}")
+    print(f"iterations:     {result.iterations}")
+    print(f"infosets:       {len(result.average_strategy)}")
+    return 0
+
+
+def _cmd_library_put(args: argparse.Namespace) -> int:
+    # PUT consumes an exported-format JSON file (same schema as `import`);
+    # the round-trip lets users hand-craft a spot + result offline. We
+    # delegate to Library.import_ which validates the schema.
+    path = _library_path_from_args(args)
+    src = Path(args.description)
+    with Library.open(path) as lib:
+        try:
+            spot_id = lib.import_(src, overwrite=args.overwrite)
+        except LibraryDuplicateError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+    print(spot_id)
+    return 0
+
+
+def _cmd_library_export(args: argparse.Namespace) -> int:
+    path = _library_path_from_args(args)
+    out = Path(args.output_path)
+    with Library.open(path) as lib:
+        try:
+            lib.export(args.spot_id, out)
+        except KeyError:
+            print(f"error: spot_id {args.spot_id} not found", file=sys.stderr)
+            return 1
+    print(str(out))
+    return 0
+
+
+def _cmd_library_import(args: argparse.Namespace) -> int:
+    path = _library_path_from_args(args)
+    src = Path(args.input_path)
+    with Library.open(path) as lib:
+        try:
+            spot_id = lib.import_(src, overwrite=args.overwrite)
+        except LibraryDuplicateError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+    print(spot_id)
+    return 0
+
+
+def _cmd_library_delete(args: argparse.Namespace) -> int:
+    path = _library_path_from_args(args)
+    with Library.open(path) as lib:
+        try:
+            lib.delete(args.spot_id)
+        except KeyError:
+            print(f"error: spot_id {args.spot_id} not found", file=sys.stderr)
+            return 1
+    return 0
+
+
+def _cmd_library_stats(args: argparse.Namespace) -> int:
+    path = _library_path_from_args(args)
+    with Library.open(path) as lib:
+        stats = lib.stats()
+    if args.json:
+        print(_json.dumps(_asdict(stats), indent=2, sort_keys=True))
+        return 0
+    print(f"path:               {path}")
+    print(f"total_count:        {stats.total_count}")
+    print(f"total_size_bytes:   {stats.total_size_bytes}")
+    print(f"oldest_created_at:  {stats.oldest_created_at}")
+    print(f"newest_created_at:  {stats.newest_created_at}")
+    if stats.by_street:
+        print("by_street:")
+        for k, v in sorted(stats.by_street.items()):
+            print(f"  {k:<10}  {v}")
+    if stats.by_solver_version:
+        print("by_solver_version:")
+        for k, v in sorted(stats.by_solver_version.items()):
+            print(f"  {k:<10}  {v}")
+    return 0
+
+
+def _cmd_batch_solve(args: argparse.Namespace) -> int:
+    """Delegate to ``scripts.batch_solve`` (Agent C).
+
+    PR 11 keeps the CLI wiring here; the CSV-driven loop is owned by
+    ``scripts/batch_solve.py``. If Agent C's file isn't on PYTHONPATH
+    yet, we fall back to an explicit "not yet wired" error rather than
+    a confusing ``ImportError`` traceback.
+    """
+    try:
+        # TODO(agent-c): scripts.batch_solve.run() is the expected entry point.
+        from scripts.batch_solve import run as _run  # type: ignore[import-not-found]
+    except ImportError:
+        print(
+            "error: scripts/batch_solve.py is not available on PYTHONPATH; "
+            "PR 11 Agent C delivers that file. Run "
+            "`PYTHONPATH=. python -m scripts.batch_solve --input <csv>` once "
+            "the file lands.",
+            file=sys.stderr,
+        )
+        return 2
+    # Forward the resolved library path so the env var / flag work uniformly.
+    resolved = _library_path_from_args(args)
+    _os.environ.setdefault("POKER_SOLVER_LIBRARY_PATH", str(resolved))
+    return int(
+        _run(
+            input_csv=Path(args.input),
+            workers=args.workers,
+            max_memory_gb=args.max_memory_gb,
+            dry_run=args.dry_run,
+            library_path=resolved,
+        )
+    )
+
+
+def _add_library_path_flag(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--library-path",
+        type=str,
+        default=None,
+        help=(
+            "Override the library DB path. Precedence: this flag > "
+            "$POKER_SOLVER_LIBRARY_PATH > ~/.poker_solver/library.db."
+        ),
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="poker-solver",
@@ -540,6 +791,77 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     ui_parser.set_defaults(func=_cmd_ui)
+
+    # ---- PR 11: library subcommand group ----
+    lib = sub.add_parser(
+        "library",
+        help="Manage the local solved-spot library (PR 11).",
+    )
+    lib_sub = lib.add_subparsers(dest="library_cmd", required=True)
+
+    lib_list = lib_sub.add_parser("list", help="List solved spots (most recent first).")
+    lib_list.add_argument("--street", type=str, default=None)
+    lib_list.add_argument("--board-pattern", type=str, default=None)
+    lib_list.add_argument("--stack-bb-min", type=int, default=None)
+    lib_list.add_argument("--stack-bb-max", type=int, default=None)
+    lib_list.add_argument("--solver-version", type=str, default=None)
+    lib_list.add_argument("--created-after", type=int, default=None)
+    lib_list.add_argument("--label-pattern", type=str, default=None)
+    lib_list.add_argument("--limit", type=int, default=1000)
+    lib_list.add_argument("--offset", type=int, default=0)
+    lib_list_fmt = lib_list.add_mutually_exclusive_group()
+    lib_list_fmt.add_argument("--json", action="store_true")
+    lib_list_fmt.add_argument("--table", action="store_true")
+    _add_library_path_flag(lib_list)
+    lib_list.set_defaults(func=_cmd_library_list)
+
+    lib_get = lib_sub.add_parser("get", help="Fetch a single spot by id.")
+    lib_get.add_argument("spot_id", type=str)
+    lib_get.add_argument("--json", action="store_true")
+    _add_library_path_flag(lib_get)
+    lib_get.set_defaults(func=_cmd_library_get)
+
+    lib_put = lib_sub.add_parser(
+        "put", help="Insert a spot from an exported-format JSON file."
+    )
+    lib_put.add_argument("description", type=str, help="Path to the spot JSON file.")
+    lib_put.add_argument("--overwrite", action="store_true")
+    _add_library_path_flag(lib_put)
+    lib_put.set_defaults(func=_cmd_library_put)
+
+    lib_export = lib_sub.add_parser("export", help="Export a spot to JSON.")
+    lib_export.add_argument("spot_id", type=str)
+    lib_export.add_argument("output_path", type=str)
+    _add_library_path_flag(lib_export)
+    lib_export.set_defaults(func=_cmd_library_export)
+
+    lib_import = lib_sub.add_parser("import", help="Import a previously exported spot.")
+    lib_import.add_argument("input_path", type=str)
+    lib_import.add_argument("--overwrite", action="store_true")
+    _add_library_path_flag(lib_import)
+    lib_import.set_defaults(func=_cmd_library_import)
+
+    lib_delete = lib_sub.add_parser("delete", help="Delete a spot by id.")
+    lib_delete.add_argument("spot_id", type=str)
+    _add_library_path_flag(lib_delete)
+    lib_delete.set_defaults(func=_cmd_library_delete)
+
+    lib_stats = lib_sub.add_parser("stats", help="Aggregate library statistics.")
+    lib_stats.add_argument("--json", action="store_true")
+    _add_library_path_flag(lib_stats)
+    lib_stats.set_defaults(func=_cmd_library_stats)
+
+    # ---- PR 11: batch-solve top-level subcommand ----
+    bs = sub.add_parser(
+        "batch-solve",
+        help="Solve a CSV of spots and write results to the library (PR 11 Agent C).",
+    )
+    bs.add_argument("--input", type=str, required=True, help="Path to the CSV input.")
+    bs.add_argument("--workers", type=int, default=1)
+    bs.add_argument("--max-memory-gb", type=float, default=14.0)
+    bs.add_argument("--dry-run", action="store_true")
+    _add_library_path_flag(bs)
+    bs.set_defaults(func=_cmd_batch_solve)
 
     return parser
 

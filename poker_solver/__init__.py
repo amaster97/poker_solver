@@ -64,6 +64,16 @@ from poker_solver.hunl import (
     default_tiny_subgame,
 )
 from poker_solver.hunl_solver import HUNLSolveResult, solve_hunl_postflop
+from poker_solver.library import (
+    Library,
+    LibraryDuplicateError,
+    LibraryError,
+    LibraryFilter,
+    LibrarySchemaError,
+    LibraryStats,
+    SpotDescription,
+    SpotMetadata,
+)
 from poker_solver.profiler.memory import MemoryProbe, MemoryReport, StreetMemoryEntry
 from poker_solver.pushfold import (
     PUSHFOLD_MAX_BB,
@@ -153,6 +163,14 @@ __all__ = [
     "PushFoldChartUnavailable",
     "PUSHFOLD_MIN_BB",
     "PUSHFOLD_MAX_BB",
+    "Library",
+    "LibraryDuplicateError",
+    "LibraryError",
+    "LibraryFilter",
+    "LibrarySchemaError",
+    "LibraryStats",
+    "SpotDescription",
+    "SpotMetadata",
 ]
 
-__version__ = "0.6.0"
+__version__ = "1.0.0"
