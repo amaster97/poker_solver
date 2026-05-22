@@ -1,21 +1,22 @@
 # poker_solver
 
-A Texas Hold'em equity calculator and GTO solver, written in Python with a
-Rust performance tier. Today it ships a hybrid exact / Monte Carlo equity
+A Texas Hold'em equity calculator and GTO solver, written in Python with
+a Rust performance tier. Ships a hybrid exact / Monte Carlo equity
 engine, a hand evaluator, a range parser, closed-form-verified Kuhn and
 Leduc solvers, a Heads-Up No-Limit Hold'em (HUNL) game tree with a
-14-action abstraction, and DCFR-generated push/fold charts for 2-15 BB
-short-stack play. The HUNL substrate is in place; full postflop and
-preflop solving land in the next PRs. Goalpost: PioSolver-class HU local
-solving on a MacBook.
+14-action abstraction, DCFR-generated push/fold charts for 2-15 BB
+short-stack play, and a full HUNL postflop solver (Python + Rust).
+Goalpost: PioSolver-class HU local solving on a MacBook.
 
-**v0.5.0 released 2026-05-22** — HUNL postflop solver (Python + Rust
-tiers), ~24x Rust speedup, bit-exact Python ↔ Rust parity.
+**v1.0.0 released 2026-05-22 — GA milestone.** HUNL postflop solver
+(Python + Rust tiers, ~24x speedup, bit-exact parity), mock-first
+NiceGUI scaffold, library mode, EMD card abstraction, external Nash
+validation vs `noambrown/poker_solver`, macOS `.dmg` packaging.
 
 ## Status
 
-- **Current version:** 1.0.0 ("HUNL postflop solver + UI + library + macOS packaging: v1 GA milestone") —
-  see [`CHANGELOG.md`](CHANGELOG.md). Historical release notes:
+- **Current version:** 1.0.0 (GA) — see [`CHANGELOG.md`](CHANGELOG.md).
+  Historical release notes:
   [`docs/release_notes_v0.3.md`](docs/release_notes_v0.3.md),
   [`docs/release_notes_v0.3.1.md`](docs/release_notes_v0.3.1.md).
 - **Roadmap:** see [`PLAN.md`](PLAN.md).
@@ -24,7 +25,7 @@ tiers), ~24x Rust speedup, bit-exact Python ↔ Rust parity.
 - **Python:** 3.9+ (developed on 3.13). Rust toolchain required for the
   perf-tier extension.
 
-## Features (v0.5)
+## Features (v1.0)
 
 - **Texas Hold'em equity calculator** — hybrid exact-enumeration +
   Monte Carlo. Concrete-hand spots with a small remaining-board space
@@ -70,29 +71,37 @@ tiers), ~24x Rust speedup, bit-exact Python ↔ Rust parity.
   artifact and looked up via `AbstractionRef`. See
   `poker_solver/abstraction/`, the `poker-solver precompute-abstraction`
   CLI, and `tests/test_abstraction_*.py`.
-- **Rust HUNL postflop solver** *(new in v0.5.0, PR 6)* —
-  Python-tier reference solver plus a Rust-tier port at ~24x speedup
-  (3.88 s Rust vs 92.9 s Python at 100k iters, Apple M4 Pro),
-  bit-exact diff-tested against the Python reference on shared seeds.
-  Selectable via `--backend rust` on the `solve` CLI.
+- **HUNL postflop solver (Python + Rust)** — Python reference plus a
+  Rust port at ~24x speedup (3.88 s Rust vs 92.9 s Python at 100k iters,
+  Apple M4 Pro), bit-exact diff-tested on shared seeds. Selectable via
+  `--backend rust` on the `solve` CLI.
+- **External Nash validation** — river-spot diff test against
+  third-party `noambrown/poker_solver` (MIT) confirms strategy agreement
+  on shared seeds. See `tests/test_noambrown_diff.py`.
+- **NiceGUI app (mock-first scaffold)** — browser UI with 13x13 range
+  matrix, board picker, solver controls, and decision-tree browser.
+  Ships against a fixture-backed mock solver behind a banner; PR 10b
+  swaps in the real solver via a single DI point. See
+  [`docs/pr10_prep/`](docs/pr10_prep/).
+- **Library mode** — clean Python API surface (`equity`, `solve`,
+  `get_pushfold_strategy`, `HUNLPoker`, `HUNLConfig`, ...) so the engine
+  is usable as a dependency, not just a CLI.
+- **macOS packaging** — codesigned + notarized `.dmg` for M-series
+  MacBooks; double-click installs the CLI and launches the UI. See the
+  v1.0.0 release artifacts.
 
-## Not yet (roadmap)
+## What's coming next
 
-**v0.5.1 (next):**
-- **River-spot diff test vs `noambrown/poker_solver`** — PR 7 (in flight).
-  External Nash validation against a third solver.
+**v1.x (post-GA):** spec-conformance audit (PR 10a.5), NEON SIMD +
+cache-blocking + public chance sampling (PR 8), HUNL preflop full solve
+(PR 9, replacing the push/fold lookup above 15 BB), mock -> real solver
+swap in the UI (PR 10b, one-line DI flip once PR 9 lands).
 
-**Coming soon:**
-- **NEON SIMD + cache-blocking + public chance sampling** — PR 8.
-- **HUNL preflop solve** — PR 9.
-- **NiceGUI app** (range matrix, board input, solver controls, decision
-  tree browser) — PR 10.
-- **macOS packaging** (codesign + notarize + `.dmg`) — PR 11.
-- **3-handed postflop stretch** — PR 12, optional and explicitly
-  approximate (CFR has no convergence guarantee for >=3 players).
+**Stretch (post-v1):** 3-handed postflop (PR 12), explicitly approximate
+since CFR has no convergence guarantee for >=3 players.
 
-`poker-solver solve --game hunl --hunl-mode full` deliberately raises
-`NotImplementedError` today, pointing at PR 5.
+`poker-solver solve --game hunl --hunl-mode full` above 15 BB still
+raises `NotImplementedError` today, pointing at PR 9.
 
 ## Installation
 
@@ -132,16 +141,11 @@ poker-solver solve --game leduc --iterations 5000 --backend rust
 # HUNL tiny river subgame (deterministic AhKc vs QdQh, board As7c2dKh5s):
 poker-solver solve --game hunl --hunl-mode tiny_subgame --iterations 500
 
-# Same river subgame on the Rust tier (v0.5.0, PR 6):
+# Same river subgame on the Rust tier (v1.0.0):
 poker-solver solve --game hunl --hunl-mode tiny_subgame --iterations 1000 --backend rust
 
-# Quick perf demo — Python vs Rust backends side-by-side:
-time poker-solver solve --game hunl --hunl-mode tiny_subgame --iterations 10000 --backend python
-# Python: ~9s
-time poker-solver solve --game hunl --hunl-mode tiny_subgame --iterations 10000 --backend rust
-# Rust: ~0.4s  (~23x speedup; bit-exact strategy)
-
-# Short-stack push/fold lookup happens automatically inside solve():
+# Perf demo (M4 Pro, 10k iters): python ~9 s vs rust ~0.4 s (~23x).
+# Short-stack push/fold lookup is automatic inside solve():
 #   solve(HUNLPoker(HUNLConfig(starting_stack=1000)))  -> backend="pushfold"
 
 # Card abstraction — build once, reuse from --abstraction:
@@ -180,29 +184,18 @@ assert r.backend == "pushfold"
 
 ## UI (mock)
 
-An optional browser-based UI is available:
-
 ```bash
 pip install -e .[ui]
 poker-solver ui
 ```
 
-This launches a local NiceGUI server (default http://127.0.0.1:8080) with:
-
-- A 13x13 range matrix viewer (Pio convention: red=fold, yellow=call, green=raise)
-- Board input via card picker
-- Solver run controls with live exploitability tracking
-- A decision tree browser showing EV + frequency per action
-
-**PR 10a note:** the UI ships against a mock solver (fixture-backed) so
-the full UX is exercisable before PR 9 / 10b land. A yellow "Mock mode"
-banner across the top of the app indicates this; it downgrades to a
-subtle `(mock)` chip after PR 10b swaps in the real solver in one line.
-
-See [`docs/pr10_prep/pr10a_spec.md`](docs/pr10_prep/pr10a_spec.md) for
-the locked design decisions and
-[`docs/pr10_prep/pr10b_spec.md`](docs/pr10_prep/pr10b_spec.md) for the
-swap mechanics.
+Launches NiceGUI on `http://127.0.0.1:8080` with a 13x13 range matrix
+(Pio palette), board picker, solver controls with live exploitability,
+and a decision-tree browser. v1 ships behind a "Mock mode" banner
+(fixture-backed) which downgrades to a subtle `(mock)` chip when PR 10b
+swaps in the real solver. See
+[`docs/pr10_prep/pr10a_spec.md`](docs/pr10_prep/pr10a_spec.md) and
+[`docs/pr10_prep/pr10b_spec.md`](docs/pr10_prep/pr10b_spec.md).
 
 ## Architecture (brief)
 
@@ -235,11 +228,10 @@ sh scripts/check_pr.sh
 ```
 
 From PR 3 onward every change ships on its own feature branch
-(`pr-N-<title>`), passes `scripts/check_pr.sh`, and receives a mandatory
-audit from a fresh agent that reviews the diff with no implementation
-context. Both `pr_report.md` and `audit_report.md` must look clean
-before the branch is merged. See [`PLAN.md`](PLAN.md) section 4 for the
-full validation chain.
+(`pr-N-<title>`), passes `scripts/check_pr.sh`, and receives a fresh-agent
+audit reviewing the diff with no implementation context. Both
+`pr_report.md` and `audit_report.md` must be clean before merge. See
+[`PLAN.md`](PLAN.md) section 4 for the full validation chain.
 
 ## Contributing
 
