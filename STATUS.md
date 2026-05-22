@@ -5,7 +5,7 @@
 | Branch | Tip | Status |
 |---|---|---|
 | main | `2b67370` | awaiting v1.0.0 merge OK |
-| integration | `bbb4395` | PR 1-7 + 3.5/10a/11 landed; v1.0.0 tag |
+| integration | `a7955c7` | PR 1-7 + 3.5/10a/11 landed; v1.0.0 tag on `bbb4395` |
 | pr-11-library-and-packaging | `6af3684` | shipped → integration |
 
 ## 2. PRs
@@ -48,7 +48,7 @@
 
 | # | Task | Path / Branch |
 |---|---|---|
-| 1 | Main merge (v1.0.0 GA → main) + re-tag | integration `bbb4395` |
+| 1 | Main merge (v1.0.0 GA → main) + re-tag | integration `a7955c7` |
 | 2 | PR 10a.5 conformance pass | clear 5 fail + 7 xfail |
 | 3 | PR 8 NEON SIMD + cache + PCS | `docs/pr8_prep/launch_kickoff.md` |
 | 4 | PR 9 (preflop blueprint) | `docs/pr9_prep/` |
