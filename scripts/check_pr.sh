@@ -65,6 +65,10 @@ run() {
 # 1. Python tests
 # ---------------------------------------------------------------------------
 echo "[1/9] Python tests"
+# PR 11 (Agent C): library + CLI tests live alongside the rest under
+# tests/. `pytest -x` discovers them automatically; the per-file run
+# below is an additive belt-and-suspenders gate so PR 11 surfaces a
+# clear failure if the library test files were dropped from the diff.
 if [ -d tests ]; then
     if pytest -x > /tmp/check_pr_pytest 2>&1; then
         py_count=$(tail -1 /tmp/check_pr_pytest | grep -Eo '[0-9]+ passed' | head -1 || echo "?")
@@ -75,6 +79,23 @@ if [ -d tests ]; then
         tail -30 /tmp/check_pr_pytest | sed 's/^/      /'
         record "Python tests" "$FAIL_SYMBOL" "see logs"
         FAILED="$FAILED pytest"
+    fi
+
+    # PR 11 explicit library-test gate (additive; the broader pytest run
+    # above already covers these, but a per-file invocation surfaces
+    # cleaner errors when iterating on the library module itself).
+    if [ -f tests/test_library.py ] || [ -f tests/test_library_cli.py ]; then
+        if pytest tests/test_library.py tests/test_library_cli.py \
+            > /tmp/check_pr_pytest_library 2>&1; then
+            lib_count=$(tail -1 /tmp/check_pr_pytest_library | grep -Eo '[0-9]+ passed' | head -1 || echo "?")
+            echo "  $PASS_SYMBOL  library tests: $lib_count"
+            record "library tests" "$PASS_SYMBOL" "$lib_count"
+        else
+            echo "  $FAIL_SYMBOL  library tests"
+            tail -30 /tmp/check_pr_pytest_library | sed 's/^/      /'
+            record "library tests" "$FAIL_SYMBOL" "see logs"
+            FAILED="$FAILED library-tests"
+        fi
     fi
 else
     echo "  $SKIP_SYMBOL  no tests/ directory"

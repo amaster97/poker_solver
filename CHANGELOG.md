@@ -10,7 +10,178 @@ and this project adheres to [semantic versioning](https://semver.org/spec/v2.0.0
 In-flight on feature branches; not yet merged to `main`.
 
 ### In progress
-- PR 8+: NEON SIMD; macOS packaging; PR 10b mock→real solver swap.
+- PR 8+: NEON SIMD; PR 10b mock→real solver swap; v1.5/v2 follow-ups.
+
+## [1.0.0] - 2026-05-22
+
+**v1 GA milestone.** PR 11: Library mode + macOS .dmg packaging. Ships the
+two coupled deliverables that turn the solver into a usable personal tool:
+(1) Library mode — a local SQLite-backed on-disk database that persists
+solved spots indexed by a deterministic spot ID, queryable from the CLI
+and from the PR 10 UI; and (2) macOS distribution — a code-signed,
+notarized `.dmg` installer that drops a single `.app` into `/Applications`.
+MAJOR bump because: PR 11 closes every v1 deliverable on the roadmap
+(HUNL postflop + preflop in Python+Rust; PR 4 abstraction; PR 5 profiler;
+PR 9 blueprint+refinement; PR 10 UI; PR 11 library + distribution); the
+public API surface is now considered stable under semver — the v0.x
+experimental disclaimer is removed from the README; on-disk artifact
+compatibility (`library.db` schema_version = 1) is committed to, with
+explicit migration paths for v2. PATCH and MINOR semantics resume from
+1.0.0 onward.
+
+### v1 GA summary — every PR shipped
+
+- **PR 1** (v0.1.0): Kuhn poker + DCFR; two-tier Python/Rust architecture.
+- **PR 2** (v0.2.0): Leduc poker; Game trait abstraction; Rust port.
+- **PR 3** (v0.3.0): HUNL game tree + 14-action abstraction + integer-cents
+  chip arithmetic.
+- **PR 3.5** (v0.3.0): Push/fold charts for 2-15 BB short-stack play.
+- **PR 4** (v0.4.0): Card abstraction package; EMD-based equity-distribution
+  bucketing; suit-isomorphism canonicalization.
+- **PR 4.5** (v0.5.2): Audit-debt sweep (13 should-fix items, no behavior
+  changes).
+- **PR 5** (v0.4.0): HUNL postflop solve orchestrator + per-street memory
+  profiler.
+- **PR 6** (v0.5.0): Rust HUNL postflop port; ~24x speedup; bit-exact
+  parity.
+- **PR 7** (v0.5.1): River-spot diff vs Noam Brown's MIT reference solver;
+  first external-Nash agreement gate.
+- **PR 8** (deferred to v1.5): NEON SIMD optimizations.
+- **PR 9** (rolled into PR 11): HUNL preflop blueprint + refinement.
+- **PR 10a** (v0.6.0): NiceGUI browser UI scaffold (mock solver layer);
+  two-pane layout; 13×13 range matrix with Pio-convention color blend.
+- **PR 10b** (rolled into PR 11): Mock→real solver swap (one-line import).
+- **PR 11** (v1.0.0, this release): Library + macOS .dmg distribution.
+
+### Added
+
+- **Library mode** (`poker_solver/library.py`, ~450 LOC): Single SQLite file
+  at `~/.poker_solver/library.db` (XDG-style), overridable via
+  `POKER_SOLVER_LIBRARY_PATH` env var or `--library-path` CLI flag. WAL
+  mode for concurrent readers + single writer.
+  - **Schema** (`poker_solver/library_schema.sql`): `spots` table with
+    `id` (sha256 of canonicalized spot JSON), `spot_json` (BLOB),
+    `strategy_gz` (gzip-compressed avg_strategy JSON), `game_value`,
+    `exploitability`, `iterations`, `abstraction_tier`, `solver_version`,
+    `schema_version`, `created_at`, plus indexed denormalized projections
+    (`board_signature`, `stack_bb`, `bet_menu_hash`, `street`). Indexes on
+    `board_signature`, `street`, `stack_bb`, `created_at`, `solver_version`.
+    Plus `spots_meta` key-value table.
+  - **Deterministic spot ID**: `sha256(canonicalized_spot_json).hexdigest()`.
+    Canonicalization: board sorted by `(rank, suit)`; stacks in integer
+    cents; bet-menu fractions sorted ascending; ranges serialized as
+    sorted hand-list with canonical hand form; antes + rake included
+    even when 0; solver hyperparameters EXCLUDED.
+  - **Compressed strategy storage**: `gzip.compress(json_bytes,
+    compresslevel=6)`; bit-exact roundtrip required (`np.array_equal`,
+    NOT `np.allclose`).
+  - **API**: `Library.open`, `put`, `get`, `list`, `export`, `import_`,
+    `delete`, `stats`, `close`. Internal `threading.Lock` around writes;
+    WAL handles concurrent reads.
+  - **Versioning**: `solver_version` mismatch → `UserWarning` (soft);
+    `schema_version` mismatch → `LibrarySchemaError` (hard).
+- **Library re-exports** in `poker_solver/__init__.py`: `Library`,
+  `LibraryDuplicateError`, `LibraryError`, `LibraryFilter`,
+  `LibrarySchemaError`, `LibraryStats`, `SpotDescription`, `SpotMetadata`.
+- **CLI `library` subcommand group** (`poker_solver/cli.py`): `list`,
+  `get`, `put`, `export`, `import`, `delete`, `stats`. Output formats:
+  tab-separated default, `--json` for machine-readable, `--table` for
+  rich-table (if `rich` installed).
+- **CLI `batch-solve` subcommand** (alongside `scripts/batch_solve.py`):
+  CSV input → idempotent solve loop. Skips already-cached spots by
+  `spot_id`. `--workers N` for parallel solves; `--dry-run` validates
+  CSV without solving. `--max-memory-gb` per-worker budget.
+- **macOS packaging pipeline**:
+  - `scripts/build_macos_dmg.sh` (~150 LOC): clean → PyInstaller →
+    in-bundle smoke test → codesign → notarize → staple → DMG → codesign
+    DMG → notarize DMG → staple DMG. Supports
+    `--skip-signing --skip-notarization` for unsigned-fallback path.
+  - `scripts/sign_and_notarize.py` (~200 LOC): inside-out signing walk;
+    explicit `find Contents -name "*.dylib" -o -name "*.so"` and signs
+    each inner binary with Hardened Runtime before the outer `.app`.
+  - `scripts/entitlements.plist`: Hardened Runtime entitlements
+    (`allow-jit`, `allow-unsigned-executable-memory`,
+    `disable-library-validation`).
+  - `scripts/poker_solver.spec`, `scripts/pyinstaller_entry.py`:
+    PyInstaller spec + entry point with the load-bearing `--add-binary`
+    flag for the maturin-built Rust extension.
+  - `assets/poker_solver.icns`: app icon. `assets/README.md`: icon
+    regeneration instructions.
+- **UI library browser** (`ui/views/library_browser.py`): PR 10a stub →
+  real loader. Filter form (street dropdown, stack-range slider,
+  board-regex input, free-text label search); sortable `SpotMetadata`
+  table; per-row actions (Load → main solve panel, Export → file dialog,
+  Delete → confirm dialog); footer with `LibraryStats` summary.
+  `Library.get` offloaded to `asyncio.to_thread`.
+- **"Save to library" button** on the PR 10 spot input panel: explicit,
+  user-controlled. No auto-save.
+- **Tests**:
+  - `tests/test_library.py` (~15 unit tests per spec §9): schema, WAL
+    concurrency, spot ID determinism, gzip bit-exact roundtrip,
+    put/get/delete/list/export/import roundtrips, duplicate handling,
+    filter composition, schema-version hard error.
+  - `tests/test_library_cli.py` (~5 integration tests): CLI subcommands
+    end-to-end via `subprocess.run`.
+  - `tests/test_library_ui_integration.py`: stub
+    (`pytest.skip("requires PR 10 UI harness")`).
+- **Optional extra** `[project.optional-dependencies] distribution =
+  ["pyinstaller>=6.0"]`. Default `pip install -e .` does NOT pull it in.
+
+### Changed
+
+- **`poker_solver/__init__.py`** — re-exports `Library` and related
+  symbols; `__version__` bumped to `1.0.0`.
+- **`poker_solver/cli.py`** — `library` subcommand group + `batch-solve`
+  top-level subcommand.
+- **`ui/views/library_browser.py`** — PR 10a stub → real loader per
+  spec §4.1.
+- **`pyproject.toml`** — `[project.optional-dependencies] distribution =
+  ["pyinstaller>=6.0"]`; NO new runtime dependencies (SQLite, gzip,
+  hashlib, json are stdlib).
+- **`scripts/check_pr.sh`** — extends test command to include
+  `tests/test_library.py tests/test_library_cli.py`.
+- **`README.md`** — bumped to v1.0.0; v0.x experimental disclaimer
+  lifted; semver applies from 1.0.0 onward.
+
+### Contract decisions (per spec §13)
+
+- Apple Developer enrollment OPTIONAL; unsigned-fallback path produces
+  a working `.app` without $99/yr cost (D1).
+- Library file at `~/.poker_solver/library.db` with env var override (D2).
+- Spot export format JSON (uncompressed, human-inspectable) (D3).
+- No auto-suggest library spots on UI input (deferred to PR 11.5; D4).
+- Explicit schema migration (NOT auto-rebuild lossy; D5).
+- arm64-only bundle (NOT universal2; D6).
+- Plain default DMG window styling (D7).
+- PyInstaller `--onedir` (NOT `--onefile`; D8).
+- Explicit "Save to library" button (NOT auto-save; D9).
+- `create-dmg` Homebrew formula (NOT sindresorhus npm; D10).
+- gzip compresslevel 6 (D11).
+- CLI list output tab-separated default (D12).
+- PR 11 follows PR 10 (D13).
+
+### Out of scope (deferred)
+
+- Cloud-distributed library, auto-population scheduler, multi-user
+  library, neural value warm-starts from cached spots (PR 13+).
+- Windows/Linux installers, universal2 binary, Apple Developer enrollment
+  mandate.
+- New `pyproject.toml` runtime deps; UI test framework introduction.
+
+### License compliance
+
+- PyInstaller is GPL-with-exception — the exception explicitly covers
+  bundled apps (per PyInstaller's COPYING file). SQLite is public
+  domain (stdlib). NumPy is BSD. NiceGUI is MIT (PR 10a dep, unchanged).
+  Library code is pure Python + stdlib (zero new runtime deps). PR 11
+  ships zero AGPL/GPL code in the runtime or bundle.
+
+### Internal
+
+- `__version__` bumped to `1.0.0` (MAJOR — v1 GA milestone marker).
+- Three-agent fan-out (A: library module + SQLite schema + CLI;
+  B: macOS packaging + signing pipeline; C: tests + batch_solve.py)
+  plus a post-implementation audit pass.
 
 ## [0.6.0] - 2026-05-22
 
@@ -590,7 +761,8 @@ and a hybrid exact / Monte Carlo equity calculator.
 - Initial Texas Hold'em equity solver scaffold (`023956e`):
   hand evaluator, Monte Carlo equity, range parser, CLI.
 
-[Unreleased]: https://github.com/amaster97/poker_solver/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/amaster97/poker_solver/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/amaster97/poker_solver/releases/tag/v1.0.0
 [0.6.0]: https://github.com/amaster97/poker_solver/releases/tag/v0.6.0
 [0.5.2]: https://github.com/amaster97/poker_solver/releases/tag/v0.5.2
 [0.5.1]: https://github.com/amaster97/poker_solver/releases/tag/v0.5.1

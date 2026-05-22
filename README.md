@@ -14,7 +14,7 @@ tiers), ~24x Rust speedup, bit-exact Python ↔ Rust parity.
 
 ## Status
 
-- **Current version:** 0.5.1 ("River-spot diff vs Brown's MIT solver: external Nash validation") —
+- **Current version:** 1.0.0 ("HUNL postflop solver + UI + library + macOS packaging: v1 GA milestone") —
   see [`CHANGELOG.md`](CHANGELOG.md). Historical release notes:
   [`docs/release_notes_v0.3.md`](docs/release_notes_v0.3.md),
   [`docs/release_notes_v0.3.1.md`](docs/release_notes_v0.3.1.md).
