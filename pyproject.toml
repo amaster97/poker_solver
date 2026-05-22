@@ -16,10 +16,10 @@ classifiers = [
     "Operating System :: OS Independent",
     "Topic :: Games/Entertainment",
 ]
-dependencies = ["numpy>=1.24"]
+dependencies = ["numpy>=1.24", "psutil>=5.9"]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0", "maturin>=1.7", "ruff>=0.6", "black>=24.0"]
+dev = ["black>=24.0", "maturin>=1.7", "pytest>=7.0", "pytest-timeout>=2.3", "ruff>=0.6"]
 
 [project.scripts]
 poker-solver = "poker_solver.cli:main"
@@ -35,6 +35,11 @@ include = ["poker_solver/charts/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+timeout = 90
+markers = [
+    "slow: long-running tests (5min-1hr); skip with -m 'not slow'",
+    "very_slow: hour-scale builds (production precompute); opt-out of timeout cap",
+]
 
 [tool.ruff]
 target-version = "py39"
