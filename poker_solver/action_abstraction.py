@@ -1,5 +1,9 @@
 """Bet-size action abstraction for HUNL (pure-functional, integer-arithmetic).
 
+License posture: no third-party code derivation; original implementation
+(NLHE bet/raise/cap rules are standard poker mechanics, not copied from any
+specific reference repo).
+
 A flat 14-action enum with five pot-fraction bet sizes and five pot-fraction
 raise sizes, plus fold/check/call/all-in. Enumeration is parameterized by an
 :class:`ActionContext` describing the per-decision pot/stack/aggressor state;
@@ -208,7 +212,9 @@ def enumerate_legal_actions(ctx: ActionContext) -> list[int]:
     stack = _stack_remaining(ctx)
 
     if stack <= 0:
-        return []
+        # Unreachable per HUNL invariant: stack-0 player has all_in[p]==True
+        # so is never current player. Fail loudly per PR 3 audit (Should-fix).
+        raise AssertionError("unreachable; stack<=0 implies all_in[p]==True")
 
     facing_bet = ctx.to_call > 0
 

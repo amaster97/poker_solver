@@ -190,10 +190,13 @@ def _kmeans_plusplus_init(
             mask[chosen_idx[:c]] = False
             unselected = np.flatnonzero(mask)
             if unselected.size == 0:
-                # Every point is selected; pad by reusing index 0.
-                chosen_idx[c] = chosen_idx[0]
-            else:
-                chosen_idx[c] = int(rng.choice(unselected))
+                # Unreachable: every point being selected requires n == c < K,
+                # but the n < K branch at line 167 (above) already handled
+                # that case before entering this loop.
+                raise AssertionError(
+                    "unreachable; n < K degenerate branch handled at line 167"
+                )
+            chosen_idx[c] = int(rng.choice(unselected))
         else:
             # Sample with probability sq_dists / total. Use ``rng.random()``
             # + cumulative sum for an explicit inverse-CDF draw so the path
