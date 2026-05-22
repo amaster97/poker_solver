@@ -24,6 +24,12 @@ from poker_solver import LEDUC_CALL, LEDUC_FOLD, LEDUC_RAISE, LeducPoker, solve
 # solve (module scope) so the whole test module runs within the 60s budget.
 LEDUC_ITERATIONS = 800
 
+# pytest-timeout doesn't apply to module-scoped fixtures by default. The
+# fixture runs one 800-iter Python Leduc DCFR solve (~55s nominal, ~100s
+# on x86_64 Python under Rosetta). Bump per-test cap above pytest's 90s
+# default so the fixture's first-touch setup fits.
+_LEDUC_INTUITION_TIMEOUT = 180
+
 
 @pytest.fixture(scope="module")
 def leduc_strategy():
@@ -53,6 +59,7 @@ def _enumerate_reachable_infosets() -> set[str]:
     return keys
 
 
+@pytest.mark.timeout(_LEDUC_INTUITION_TIMEOUT)
 def test_king_never_folds_to_first_bet(leduc_strategy):
     # Round-1 infosets where the player holds K (private=13), no public card has
     # been revealed, and the opponent has put in exactly one raise. Two such
@@ -72,6 +79,7 @@ def test_king_never_folds_to_first_bet(leduc_strategy):
         )
 
 
+@pytest.mark.timeout(_LEDUC_INTUITION_TIMEOUT)
 def test_jack_never_raises_round1_when_facing_raise(leduc_strategy):
     # Round-1 infosets where the player holds J (private=11) and the opponent
     # has bet/raised once: "11|r" (P1 facing P0's open raise) and "11|cr"
@@ -91,6 +99,7 @@ def test_jack_never_raises_round1_when_facing_raise(leduc_strategy):
         )
 
 
+@pytest.mark.timeout(_LEDUC_INTUITION_TIMEOUT)
 def test_pair_with_public_card_value_betting(leduc_strategy):
     # "private = public_card" is the strongest possible holding in Leduc:
     # a pair always beats any non-paired opponent and ties only opponents
@@ -113,6 +122,7 @@ def test_pair_with_public_card_value_betting(leduc_strategy):
         )
 
 
+@pytest.mark.timeout(_LEDUC_INTUITION_TIMEOUT)
 def test_underpair_caution(leduc_strategy):
     # "private = J on K public board" -- private=11, public=13. K-high public
     # paired board scenario: anyone holding K has a pair (top set) and is
@@ -135,6 +145,7 @@ def test_underpair_caution(leduc_strategy):
         )
 
 
+@pytest.mark.timeout(_LEDUC_INTUITION_TIMEOUT)
 def test_strategy_mass_sums_to_one(leduc_strategy):
     # Every infoset's action distribution must be a valid probability vector.
     # Floating-point round-off should be well under 1e-9 for any infoset since
@@ -148,6 +159,7 @@ def test_strategy_mass_sums_to_one(leduc_strategy):
         )
 
 
+@pytest.mark.timeout(_LEDUC_INTUITION_TIMEOUT)
 def test_strategy_is_well_defined_on_all_reachable_infosets(leduc_strategy):
     # The Leduc game tree has 288 reachable infosets (see test_leduc_dcfr.py).
     # DCFR's tree-walk traverses every decision node every iteration, so every
