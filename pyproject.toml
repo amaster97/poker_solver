@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "poker_solver"
-version = "0.6.0"
+version = "1.0.0"
 description = "Texas Hold'em equity + GTO solver: hand evaluation, Monte Carlo equity, range parsing, CFR engine"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -21,6 +21,9 @@ dependencies = ["numpy>=1.24", "psutil>=5.9"]
 [project.optional-dependencies]
 dev = ["black>=24.0", "maturin>=1.7", "pytest>=7.0", "pytest-timeout>=2.3", "ruff>=0.6"]
 ui = ["nicegui>=2.0,<3.0"]
+# PyInstaller is OPT-IN: only installed when packaging the macOS .app.
+# Default `pip install -e .` does NOT pull it in.  See assets/README.md.
+distribution = ["pyinstaller>=6.0"]
 
 [project.scripts]
 poker-solver = "poker_solver.cli:main"

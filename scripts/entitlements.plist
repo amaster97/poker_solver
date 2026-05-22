@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened Runtime entitlements for the Poker Solver .app bundle.
+
+  Justification (per Apple "Notarizing macOS Software Before Distribution"):
+
+  - com.apple.security.cs.allow-jit
+      NumPy and CPython use JIT-like memory patterns (e.g., ctypes
+      trampolines, NumPy SIMD dispatch).  Apple documents this as safe
+      for hardened-runtime apps that ship a Python interpreter.
+
+  - com.apple.security.cs.allow-unsigned-executable-memory
+      Required for the embedded CPython interpreter on modern macOS;
+      CPython allocates RWX pages for compiled bytecode and ctypes
+      callbacks that are not signed by Apple.
+
+  - com.apple.security.cs.disable-library-validation
+      Required because PyInstaller bundles dylibs from PyPI/maturin
+      signed by other parties (e.g., NumPy wheels, our own _rust.so
+      built by maturin/PyO3).  Without this entitlement, the embedded
+      Python interpreter refuses to dlopen those dylibs.
+
+  All three are the minimal set documented in the PR 11 spec (§6.4) and
+  are the same set that Briefcase/PyInstaller-packaged Python apps in
+  the wild use.  We deliberately do NOT request network entitlements,
+  microphone, etc. — the app is local-only.
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>
