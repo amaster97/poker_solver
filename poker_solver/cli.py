@@ -319,6 +319,26 @@ def _print_memory_section(report: object, stream: IO[str] | None = None) -> None
     print(f"  river ratio                 ={river_ratio:>9.1%}", file=out)
 
 
+def _cmd_ui(args: argparse.Namespace) -> int:
+    """Launch the PR 10 NiceGUI app.
+
+    Lazy-imports ``ui.app`` so the rest of the CLI works without NiceGUI
+    installed. Catches ``ImportError`` (broader than ``ModuleNotFoundError``
+    — covers cases where ``nicegui`` is installed but a sub-import fails)
+    and prints a clear install hint with exit code 2.
+    """
+    try:
+        from ui.app import launch  # type: ignore[import-not-found]
+    except ImportError:
+        print(
+            "UI support not installed. " "Install with `pip install poker-solver[ui]`.",
+            file=sys.stderr,
+        )
+        return 2
+    launch(port=args.port, host=args.host, dark_mode=args.dark_mode)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="poker-solver",
@@ -500,6 +520,26 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     pa.set_defaults(func=_cmd_precompute_abstraction)
+
+    # PR 10: NiceGUI UI subcommand. Lazy-imports `ui.app` inside `_cmd_ui`
+    # so the rest of the CLI works without the `[ui]` extra installed.
+    ui_parser = sub.add_parser(
+        "ui",
+        help="Launch the NiceGUI browser UI (PR 10).",
+    )
+    ui_parser.add_argument("--port", type=int, default=8080)
+    ui_parser.add_argument("--host", type=str, default="127.0.0.1")
+    ui_parser.add_argument(
+        "--dark-mode",
+        choices=("auto", "light", "dark"),
+        default="auto",
+        help=(
+            "Theme override: 'auto' follows the OS system preference (PR 10a "
+            "default per pr10a_spec.md §2.4); 'light' and 'dark' force the "
+            "respective theme."
+        ),
+    )
+    ui_parser.set_defaults(func=_cmd_ui)
 
     return parser
 
