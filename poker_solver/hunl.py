@@ -1,5 +1,9 @@
 """Heads-Up No-Limit Hold'em (HUNL) game tree (Python reference tier).
 
+License posture: no third-party code derivation; original implementation
+(rules-engine state machine and infoset-key format are independent of any
+specific reference repo; see PR 3 audit report for the per-area review).
+
 All chip values in `HUNLState` and `HUNLConfig` are **integer cents** scaled
 from big blinds (1 BB = 100 cents). Floating-point chip arithmetic is
 forbidden throughout this module; utilities only convert to BB-floats at
@@ -119,9 +123,9 @@ class HUNLConfig:
 
     def __post_init__(self) -> None:
         if self.rake_rate != 0.0:
-            raise AssertionError("rake_rate must be 0.0 in PR 3 (rake lands in PR 9)")
+            raise ValueError("rake_rate must be 0.0 in PR 3 (rake lands in PR 9)")
         if self.rake_cap != 0:
-            raise AssertionError("rake_cap must be 0 in PR 3 (rake lands in PR 9)")
+            raise ValueError("rake_cap must be 0 in PR 3 (rake lands in PR 9)")
         if self.starting_street == Street.PREFLOP:
             if self.initial_pot != 0:
                 raise ValueError("initial_pot must be 0 when starting at preflop")
@@ -323,7 +327,11 @@ class HUNLPoker:
 
     def infoset_key(self, state: HUNLState, player: int) -> str:
         cfg = state.config
-        if cfg.abstraction is not None and state.street >= Street.FLOP:
+        if cfg.abstraction is not None and state.street in (
+            Street.FLOP,
+            Street.TURN,
+            Street.RIVER,
+        ):
             # Bucketed path: resolve `AbstractionRef` -> cached `AbstractionTables`,
             # then look up the bucket id. Preflop always falls through to the
             # lossless branch (per Decision 7.12).
