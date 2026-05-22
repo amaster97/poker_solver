@@ -11,16 +11,17 @@ solving on a MacBook.
 
 ## Status
 
-- **Current version:** 0.3.0 ("HUNL substrate") — see
-  [`CHANGELOG.md`](CHANGELOG.md) and
-  [`docs/release_notes_v0.3.md`](docs/release_notes_v0.3.md).
+- **Current version:** 0.5.0 ("Rust HUNL postflop port, ~24x speedup") —
+  see [`CHANGELOG.md`](CHANGELOG.md). Historical release notes:
+  [`docs/release_notes_v0.3.md`](docs/release_notes_v0.3.md),
+  [`docs/release_notes_v0.3.1.md`](docs/release_notes_v0.3.1.md).
 - **Roadmap:** see [`PLAN.md`](PLAN.md).
 - **License:** MIT.
 - **Platform:** macOS / Linux; M-series MacBook is the primary target.
 - **Python:** 3.9+ (developed on 3.13). Rust toolchain required for the
   perf-tier extension.
 
-## Features (v0.3)
+## Features (v0.5)
 
 - **Texas Hold'em equity calculator** — hybrid exact-enumeration +
   Monte Carlo. Concrete-hand spots with a small remaining-board space
@@ -66,13 +67,14 @@ solving on a MacBook.
   artifact and looked up via `AbstractionRef`. See
   `poker_solver/abstraction/`, the `poker-solver precompute-abstraction`
   CLI, and `tests/test_abstraction_*.py`.
+- **Rust HUNL postflop solver** *(new in v0.5.0, PR 6)* —
+  Python-tier reference solver plus a Rust-tier port at ~24x speedup
+  (3.88 s Rust vs 92.9 s Python at 100k iters, Apple M4 Pro),
+  bit-exact diff-tested against the Python reference on shared seeds.
+  Selectable via `--backend rust` on the `solve` CLI.
 
 ## Not yet (roadmap)
 
-- **Full HUNL postflop solve** — PR 5 (Python reference solver +
-  per-street memory profiler) is the next merge.
-- **HUNL postflop in Rust** — PR 6 (license-aware port of the PR 5
-  Python reference).
 - **River-spot diff test vs `noambrown/poker_solver`** — PR 7.
 - **NEON SIMD + cache-blocking + public chance sampling** — PR 8.
 - **HUNL preflop solve** — PR 9.
@@ -122,6 +124,9 @@ poker-solver solve --game leduc --iterations 5000 --backend rust
 
 # HUNL tiny river subgame (deterministic AhKc vs QdQh, board As7c2dKh5s):
 poker-solver solve --game hunl --hunl-mode tiny_subgame --iterations 500
+
+# Same river subgame on the Rust tier (ships in v0.5.0, next release with PR 6):
+poker-solver solve --game hunl --hunl-mode tiny_subgame --iterations 1000 --backend rust
 
 # Short-stack push/fold lookup happens automatically inside solve():
 #   solve(HUNLPoker(HUNLConfig(starting_stack=1000)))  -> backend="pushfold"

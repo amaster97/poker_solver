@@ -225,9 +225,27 @@ def _cmd_solve(args: argparse.Namespace) -> int:
     # postflop-start games (it only fires on Street.PREFLOP), so calling
     # solve_hunl_postflop here is equivalent to solver.solve()'s postflop
     # branch for this case.
+    #
+    # PR 6: when the user opts in via ``--backend rust`` on the postflop
+    # path, route through ``solve()`` instead so it picks up the new HUNL
+    # Rust branch in ``_solve_rust``. The Python postflop path stays the
+    # default per locked decision D10.
     result: object
     try:
-        if args.game == "hunl" and getattr(args, "hunl_mode", "") == "postflop":
+        if (
+            args.game == "hunl"
+            and getattr(args, "hunl_mode", "") == "postflop"
+            and args.backend == "rust"
+        ):
+            assert isinstance(game, HUNLPoker)
+            result = solve(
+                game,
+                iterations=args.iterations,
+                backend="rust",
+                target_exploitability=args.target_exploitability,
+                seed=args.seed,
+            )
+        elif args.game == "hunl" and getattr(args, "hunl_mode", "") == "postflop":
             from poker_solver.hunl_solver import solve_hunl_postflop
 
             assert isinstance(game, HUNLPoker)
