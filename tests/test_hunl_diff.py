@@ -49,16 +49,25 @@ from tests.fixtures.hunl_solve_fixtures import (
     tiny_synthetic_abstraction_ref,
 )
 
-# Rust PR 6 surface — Agent B exposes this. Until PR 6 lands, the symbol is
-# missing from poker_solver._rust; we probe via importlib so a missing symbol
-# yields a clean ``None`` rather than a module-level ImportError that breaks
-# collection. Probed once at import time; tests skip if absent.
+# Rust PR 6 surface — Agent B exposes this. Post PR 6 merge the symbol must be
+# present; any ImportError on ``poker_solver._rust`` itself indicates a stale
+# `.so` from a prior architecture (x86_64 binary on arm64 host or vice versa)
+# and should halt collection LOUDLY rather than silently skipping the diff
+# tests. A missing ``solve_hunl_postflop`` attribute (module imports cleanly
+# but the symbol is absent — only possible during in-flight Rust development)
+# still falls back to the per-test skip path, but the module-level import
+# failure is now a hard error per PR 6 audit followup triage §3 / PR 6.5.
 _rust_solve_hunl: Any = None
 try:
     _rust_module = importlib.import_module("poker_solver._rust")
     _rust_solve_hunl = getattr(_rust_module, "solve_hunl_postflop", None)
-except ImportError:
-    _rust_solve_hunl = None
+except ImportError as exc:
+    raise RuntimeError(
+        f"_rust extension required for HUNL diff tests but failed to import: "
+        f"{exc!r}. Rebuild via `maturin develop --release` from the project "
+        f"root; common cause is a stale `.so` from a prior architecture "
+        f"(x86_64 binary on arm64 host or vice versa)."
+    ) from exc
 
 
 # ---------------------------------------------------------------------------

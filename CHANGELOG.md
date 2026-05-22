@@ -10,8 +10,57 @@ and this project adheres to [semantic versioning](https://semver.org/spec/v2.0.0
 In-flight on feature branches; not yet merged to `main`.
 
 ### In progress
-- PR 7+: river-spot diff vs `noambrown/poker_solver`; NEON SIMD; HUNL preflop;
-  NiceGUI scaffold; macOS packaging.
+- PR 8+: NEON SIMD; HUNL preflop; NiceGUI scaffold; macOS packaging.
+
+## [0.5.1] - 2026-05-22
+
+PR 7: River-spot diff vs Noam Brown's MIT-licensed `noambrown/poker_solver`
+(C++ reference). First external-Nash agreement gate in the project. PR 6's
+parity check was internal Python ↔ Rust; this PR closes the loop with an
+independent oracle. PATCH bump per semver — no public API change, no new
+runtime deps, validation-only addition.
+
+### Added
+
+- **Parity wrapper package** (`poker_solver/parity/`): internal test
+  infrastructure for invoking Brown's `river_solver_optimized` binary as a
+  subprocess, parsing its JSON `--dump-strategy` output, and canonicalizing
+  histories between Brown's raise-as-delta and our raise-to-total conventions.
+  Original Python (no C++ copied); license attribution in
+  `noambrown_wrapper.py` header.
+- **River-spot fixture** (`tests/data/river_spots.json`, schema_version=1):
+  15 spots × 5 board categories (dry rainbow, wet rainbow, monotone, paired,
+  broadway-heavy). Per-spot range/board non-overlap validated at load.
+- **Build script** (`scripts/build_noambrown.sh`): idempotent
+  out-of-tree build; soft-fails (exit 0) on hosts without cmake/c++ so CI
+  on missing-Xcode-CLT macOS hosts skips cleanly.
+- **River diff harness** (`tests/test_river_diff.py`, ~491 LOC,
+  `@pytest.mark.parity_noambrown` opt-in): subprocess driver with
+  `tempfile.NamedTemporaryFile(suffix=".json", delete=False)` for
+  xdist-worker safety; per-action tolerance `5e-3`, per-spot game-value
+  tolerance `1e-3 * pot`; 80% history-coverage assertion.
+- **Self-sanity smoke** (`tests/test_river_diff_self_sanity.py`, ~487 LOC,
+  9 tests): Brown-binary-free; fixture loaders, history canonicalization
+  round-trip, strategy-matrix shape, iterations override, binary finder
+  returns Path-or-None.
+- **`parity_noambrown` pytest marker** registered in `pyproject.toml`.
+
+### Changed
+
+- **`tests/test_hunl_diff.py`** (+21/-6): hardened the PR 6 stale-`.so`
+  import-fallback path. The previous silent skip masked Rust-tier
+  regressions after `cargo build` without `maturin develop`. Now raises
+  `RuntimeError` pointing at `maturin develop --release`.
+
+### Internal
+
+- DCFR triple `(alpha=1.5, beta=0, gamma=2)` and `--iters 2000` passed
+  explicitly to Brown — same hyperparameters as our Rust tier; explicit
+  `--seed 7` matches Brown default but enforced per spec §11 #1.
+- Brown binary path resolved via repo-anchored
+  `Path(__file__).resolve().parents[2] / "references" / ...` (not
+  cwd-anchored).
+- `__version__` bumped to `0.5.1`.
 
 ## [0.5.0] - 2026-05-22
 
@@ -315,6 +364,7 @@ and a hybrid exact / Monte Carlo equity calculator.
   hand evaluator, Monte Carlo equity, range parser, CLI.
 
 [Unreleased]: ./
+[0.5.1]: ./
 [0.5.0]: ./
 [0.4.0]: ./
 [0.3.1]: ./

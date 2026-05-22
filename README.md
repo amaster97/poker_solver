@@ -9,9 +9,12 @@ short-stack play. The HUNL substrate is in place; full postflop and
 preflop solving land in the next PRs. Goalpost: PioSolver-class HU local
 solving on a MacBook.
 
+**v0.5.0 released 2026-05-22** — HUNL postflop solver (Python + Rust
+tiers), ~24x Rust speedup, bit-exact Python ↔ Rust parity.
+
 ## Status
 
-- **Current version:** 0.5.0 ("Rust HUNL postflop port, ~24x speedup") —
+- **Current version:** 0.5.1 ("River-spot diff vs Brown's MIT solver: external Nash validation") —
   see [`CHANGELOG.md`](CHANGELOG.md). Historical release notes:
   [`docs/release_notes_v0.3.md`](docs/release_notes_v0.3.md),
   [`docs/release_notes_v0.3.1.md`](docs/release_notes_v0.3.1.md).
@@ -75,7 +78,11 @@ solving on a MacBook.
 
 ## Not yet (roadmap)
 
-- **River-spot diff test vs `noambrown/poker_solver`** — PR 7.
+**v0.5.1 (next):**
+- **River-spot diff test vs `noambrown/poker_solver`** — PR 7 (in flight).
+  External Nash validation against a third solver.
+
+**Coming soon:**
 - **NEON SIMD + cache-blocking + public chance sampling** — PR 8.
 - **HUNL preflop solve** — PR 9.
 - **NiceGUI app** (range matrix, board input, solver controls, decision
@@ -125,8 +132,14 @@ poker-solver solve --game leduc --iterations 5000 --backend rust
 # HUNL tiny river subgame (deterministic AhKc vs QdQh, board As7c2dKh5s):
 poker-solver solve --game hunl --hunl-mode tiny_subgame --iterations 500
 
-# Same river subgame on the Rust tier (ships in v0.5.0, next release with PR 6):
+# Same river subgame on the Rust tier (v0.5.0, PR 6):
 poker-solver solve --game hunl --hunl-mode tiny_subgame --iterations 1000 --backend rust
+
+# Quick perf demo — Python vs Rust backends side-by-side:
+time poker-solver solve --game hunl --hunl-mode tiny_subgame --iterations 10000 --backend python
+# Python: ~9s
+time poker-solver solve --game hunl --hunl-mode tiny_subgame --iterations 10000 --backend rust
+# Rust: ~0.4s  (~23x speedup; bit-exact strategy)
 
 # Short-stack push/fold lookup happens automatically inside solve():
 #   solve(HUNLPoker(HUNLConfig(starting_stack=1000)))  -> backend="pushfold"
