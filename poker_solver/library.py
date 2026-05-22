@@ -225,7 +225,8 @@ def _canonicalize_spot(spot: SpotDescription) -> dict[str, Any]:
         "rake_rate": float(cfg.rake_rate),
         "rake_cap": int(cfg.rake_cap),
         "initial_ranges": ranges_serial,
-        "label": spot.label,
+        # ``label`` is intentionally EXCLUDED — spec §2.3 rules 1-7 omit it.
+        # A re-label is a rename, not a different spot.
     }
     return canonical
 
@@ -531,9 +532,10 @@ class Library:
         on_disk = int(row["value"])
         if on_disk > _SCHEMA_VERSION:
             raise LibrarySchemaError(
-                f"library at {self._path} has schema_version={on_disk}; "
-                f"this code knows schema_version={_SCHEMA_VERSION}. "
-                "Upgrade poker_solver to read this library."
+                f"library at {self._path} was created by a newer poker_solver "
+                f"(schema_version={on_disk}); this code knows "
+                f"schema_version={_SCHEMA_VERSION}. Upgrade poker_solver to "
+                "read this library."
             )
 
     # ---- public API ----
