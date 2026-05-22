@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "poker_solver"
-version = "0.5.0"
+version = "0.5.1"
 description = "Texas Hold'em equity + GTO solver: hand evaluation, Monte Carlo equity, range parsing, CFR engine"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -39,6 +39,7 @@ timeout = 90
 markers = [
     "slow: long-running tests (5min-1hr); skip with -m 'not slow'",
     "very_slow: hour-scale builds (production precompute); opt-out of timeout cap",
+    "parity_noambrown: river-spot parity diff vs Noam Brown's river_solver_optimized (deselect with -m 'not parity_noambrown')",
 ]
 
 [tool.ruff]
