@@ -34,8 +34,9 @@ def both_results():
 # pytest-timeout doesn't apply to module-scoped fixtures by default; bumping
 # the timeout per-test gives the shared fixture's first-touch setup (Python
 # Leduc DCFR + Rust DCFR @ 2k iters + cold Rust binding load) ample headroom
-# above pytest's 90s default. Observed ~30-60s on cold venvs.
-_LEDUC_DIFF_TIMEOUT = 180
+# above pytest's 90s default. Observed ~140s on x86_64 Python under Rosetta
+# (Python baseline leg dominates; Rust leg is ~18s).
+_LEDUC_DIFF_TIMEOUT = 300
 
 
 def _diff_strategies(a: dict[str, list[float]], b: dict[str, list[float]], atol: float):

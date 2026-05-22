@@ -32,6 +32,7 @@ def test_leduc_game_value_close_to_known(leduc_run):
     assert leduc_run.game_value == pytest.approx(-0.085, abs=0.02)
 
 
+@pytest.mark.timeout(300)
 def test_leduc_exploitability_monotone_trend():
     game = LeducPoker()
     sampled = []
