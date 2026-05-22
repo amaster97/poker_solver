@@ -40,7 +40,10 @@ def solve(
     Args:
         game: any object implementing the `Game` protocol.
         iterations: total iterations.
-        backend: "python" (the reference tier). Rust backend lands in a later PR.
+        backend: ``"python"`` (the reference tier) or ``"rust"`` (PR 6
+            production tier for HUNL postflop; PR 1/2 Rust for Kuhn/Leduc).
+            HUNL preflop on the Rust backend raises ``NotImplementedError``
+            pointing at PR 9.
         log_every: if set, record exploitability every `log_every` iterations.
         force_tree_solve: if True, skip the push/fold chart short-circuit and
             always run the tree-builder solver. Power-user escape hatch per
@@ -48,9 +51,15 @@ def solve(
             cross-check chart values against a fresh DCFR solve.
         **dcfr_kwargs: forwarded to `DCFRSolver` (alpha, beta, gamma, seed).
     """
-    # Push/fold short-stack fast path: only dispatch for PREFLOP-start games.
-    # A river/turn/flop subgame at short stack still needs the tree solver —
-    # push/fold equilibria only exist on the preflop tree shape.
+    # PR 9 §6 canonical dispatch composition (PR 6 inherits):
+    #   1. push/fold short-circuit (PR 3.5 — ≤15 BB HUNL preflop → chart)
+    #   2. HUNL postflop Rust branch (PR 6 — backend == "rust", postflop)
+    #   3. HUNL postflop Python fallback (PR 5)
+    #   4. HUNL preflop branch (PR 9 — currently NotImplementedError)
+    #   5. Kuhn/Leduc branches (PR 1/2)
+    #
+    # Inserting the HUNL Rust elif before push/fold would silently bypass
+    # the chart for ≤15-BB postflop configs. Order matters.
     if (
         not force_tree_solve
         and isinstance(game, HUNLPoker)
@@ -63,22 +72,39 @@ def solve(
             eff_bb,
         )
         return solve_pushfold(game.config)
-    # PR 5: HUNL postflop dispatch. See PR 9 spec §6 for the canonical full
-    # dispatch composition (push/fold ≤15 BB → chart; >250 BB → error;
-    # postflop → here; preflop → PR 9's preflop solver). PR 5 adds the
-    # postflop branch only; the push/fold short-circuit above takes
-    # precedence; PR 9 lands the preflop branch + the >250 BB rejection.
+    # PR 6: HUNL postflop Rust branch. Routes to `_solve_rust` (which calls
+    # the PyO3 binding `_rust.solve_hunl_postflop`) when the user opts in
+    # via `backend="rust"`. The default Python path (next branch) is
+    # unchanged from PR 5.
+    if (
+        backend == "rust"
+        and isinstance(game, HUNLPoker)
+        and Street.FLOP <= game.config.starting_street < Street.SHOWDOWN
+    ):
+        return _solve_rust(game, iterations, **dcfr_kwargs)
+    # PR 5: HUNL postflop Python dispatch. See PR 9 spec §6 for the
+    # canonical full dispatch composition; PR 5 adds the postflop branch
+    # only; the push/fold short-circuit above takes precedence; the Rust
+    # branch above pre-empts when `backend == "rust"`.
     if (
         isinstance(game, HUNLPoker)
         and Street.FLOP <= game.config.starting_street < Street.SHOWDOWN
     ):
         from poker_solver.hunl_solver import solve_hunl_postflop
 
+        # Sort kwargs into ones the Python solver accepts directly vs ones
+        # that need to ride along inside `dcfr_kwargs` (alpha/beta/gamma).
+        _DIRECT_KEYS = {"target_exploitability", "memory_budget_gb", "seed"}
+        direct_kwargs: dict[str, Any] = {
+            k: v for k, v in dcfr_kwargs.items() if k in _DIRECT_KEYS
+        }
+        remainder = {k: v for k, v in dcfr_kwargs.items() if k not in _DIRECT_KEYS}
         return solve_hunl_postflop(
             game.config,
             iterations=iterations,
             log_every=log_every,
-            **dcfr_kwargs,
+            dcfr_kwargs=remainder or None,
+            **direct_kwargs,
         )
     if backend == "rust":
         return _solve_rust(game, iterations, **dcfr_kwargs)
@@ -310,21 +336,80 @@ def _br_state_value(
 def _solve_rust(game: Game, iterations: int, **dcfr_kwargs: Any) -> SolveResult:
     """Run the Rust DCFR production tier and adapt its output to `SolveResult`.
 
-    Routes Kuhn → `_rust.solve_kuhn`, Leduc → `_rust.solve_leduc`. Any other
-    game raises `NotImplementedError` so callers fall back to the Python tier.
+    Routes Kuhn → `_rust.solve_kuhn`, Leduc → `_rust.solve_leduc`, HUNL
+    postflop → `_rust.solve_hunl_postflop` (PR 6). HUNL preflop raises
+    `NotImplementedError` pointing at PR 9. Other games raise
+    `NotImplementedError` so callers fall back to the Python tier.
     """
     alpha = float(dcfr_kwargs.get("alpha", 1.5))
     beta = float(dcfr_kwargs.get("beta", 0.0))
     gamma = float(dcfr_kwargs.get("gamma", 2.0))
 
+    # PR 6: HUNL Rust branch. Composes AFTER the push/fold short-circuit in
+    # `solve()` (which routes ≤15-BB preflop configs to the chart fast path
+    # before reaching this function) — see PR 9 §6 canonical dispatch order.
+    if isinstance(game, HUNLPoker):
+        if game.config.starting_street == Street.PREFLOP:
+            raise NotImplementedError(
+                "HUNL preflop port lands in PR 9. Use --hunl-mode postflop."
+            )
+        # `poker_solver._rust` is the PyO3 extension and lacks `.pyi`
+        # stubs. The `type: ignore[import-untyped]` here silences mypy's
+        # untyped-import warning; later imports in this function inherit
+        # the suppression (mypy reports only the first occurrence per
+        # module-load, so the Kuhn/Leduc imports below no longer need it
+        # — but they keep their `# type: ignore` for backward compat with
+        # the PR 5 surface).
+        from poker_solver._rust import (  # type: ignore[import-untyped]
+            solve_hunl_postflop as _rust_solve_hunl,
+        )
+        from poker_solver.abstraction.buckets import resolve_abstraction_ref
+        from poker_solver.hunl import _serialize_hunl_config
+
+        config_json = _serialize_hunl_config(game.config)
+        abstraction_path: str | None = None
+        if game.config.abstraction is not None:
+            # Canonical entry: LRU-cached + version-checked resolver per PR 4.
+            # Never reach into `game.config.abstraction.source_path` directly
+            # — that bypasses the cache and the version check, silently
+            # accepting stale artifacts (spec §6.3 lock).
+            tables = resolve_abstraction_ref(game.config.abstraction)
+            if tables.source_path is not None:
+                abstraction_path = str(tables.source_path)
+        raw = _rust_solve_hunl(
+            config_json,
+            abstraction_path,
+            int(iterations),
+            alpha,
+            beta,
+            gamma,
+            dcfr_kwargs.get("target_exploitability"),
+            dcfr_kwargs.get("seed"),
+        )
+        avg = {k: list(v) for k, v in raw["average_strategy"].items()}
+        # D5 — Python recomputes exploitability + game_value from the Rust
+        # strategy. Matches the Kuhn/Leduc pattern below.
+        expl = exploitability(game, avg)
+        gv = _game_value(game, avg)
+        return SolveResult(
+            average_strategy=avg,
+            exploitability_history=[expl],
+            game_value=gv,
+            iterations=int(raw["iterations"]),
+            backend="rust",
+        )
+
     # Localized import so non-Rust environments don't pay the import cost.
+    # PR 6 note: the HUNL import above carries the `type: ignore[import-untyped]`
+    # for `_rust`; mypy reports the missing-stubs warning only once per module
+    # load, so the Kuhn/Leduc imports below no longer need their own.
     if isinstance(game, KuhnPoker):
-        from poker_solver._rust import solve_kuhn as _rust_solve  # type: ignore
+        from poker_solver._rust import solve_kuhn as _rust_solve
     elif isinstance(game, LeducPoker):
-        from poker_solver._rust import solve_leduc as _rust_solve  # type: ignore
+        from poker_solver._rust import solve_leduc as _rust_solve
     else:
         raise NotImplementedError(
-            "Rust backend currently supports Kuhn and Leduc. "
+            "Rust backend currently supports Kuhn, Leduc, and HUNL postflop. "
             f"Got {type(game).__name__}; use backend='python' instead."
         )
     result = _rust_solve(int(iterations), alpha, beta, gamma)
