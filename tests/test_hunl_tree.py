@@ -119,6 +119,7 @@ def test_hunl_river_subgame_no_chance_nodes():
     assert len(chance_nodes) == 0
 
 
+@pytest.mark.timeout(120)
 def test_hunl_default_tiny_subgame_solvable_in_one_minute():
     config = default_tiny_subgame()
     game = HUNLPoker(config)

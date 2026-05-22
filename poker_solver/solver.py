@@ -63,6 +63,23 @@ def solve(
             eff_bb,
         )
         return solve_pushfold(game.config)
+    # PR 5: HUNL postflop dispatch. See PR 9 spec §6 for the canonical full
+    # dispatch composition (push/fold ≤15 BB → chart; >250 BB → error;
+    # postflop → here; preflop → PR 9's preflop solver). PR 5 adds the
+    # postflop branch only; the push/fold short-circuit above takes
+    # precedence; PR 9 lands the preflop branch + the >250 BB rejection.
+    if (
+        isinstance(game, HUNLPoker)
+        and Street.FLOP <= game.config.starting_street < Street.SHOWDOWN
+    ):
+        from poker_solver.hunl_solver import solve_hunl_postflop
+
+        return solve_hunl_postflop(
+            game.config,
+            iterations=iterations,
+            log_every=log_every,
+            **dcfr_kwargs,
+        )
     if backend == "rust":
         return _solve_rust(game, iterations, **dcfr_kwargs)
     if backend != "python":
