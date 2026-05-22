@@ -178,6 +178,32 @@ r = solve(short, iterations=0)
 assert r.backend == "pushfold"
 ```
 
+## UI (mock)
+
+An optional browser-based UI is available:
+
+```bash
+pip install -e .[ui]
+poker-solver ui
+```
+
+This launches a local NiceGUI server (default http://127.0.0.1:8080) with:
+
+- A 13x13 range matrix viewer (Pio convention: red=fold, yellow=call, green=raise)
+- Board input via card picker
+- Solver run controls with live exploitability tracking
+- A decision tree browser showing EV + frequency per action
+
+**PR 10a note:** the UI ships against a mock solver (fixture-backed) so
+the full UX is exercisable before PR 9 / 10b land. A yellow "Mock mode"
+banner across the top of the app indicates this; it downgrades to a
+subtle `(mock)` chip after PR 10b swaps in the real solver in one line.
+
+See [`docs/pr10_prep/pr10a_spec.md`](docs/pr10_prep/pr10a_spec.md) for
+the locked design decisions and
+[`docs/pr10_prep/pr10b_spec.md`](docs/pr10_prep/pr10b_spec.md) for the
+swap mechanics.
+
 ## Architecture (brief)
 
 Two-tier with differential testing: the Python package `poker_solver/` is
