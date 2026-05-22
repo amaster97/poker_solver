@@ -59,12 +59,18 @@ solving on a MacBook.
   effective stack lands in this range. See `poker_solver/pushfold.py`,
   `poker_solver/charts/pushfold_v1.json`,
   `docs/pushfold_v1_generation_notes.md`, and `tests/test_pushfold.py`.
+- **Card abstraction (EMD bucketing)** — imperfect-recall EMD-based
+  clustering at 256/128/64 buckets (flop/turn/river) with
+  suit-isomorphism canonicalization. Slumbot-MIT inspired kmeans++ +
+  1-D EMD via cumulative-sum closed form. Persisted as a `.npz`
+  artifact and looked up via `AbstractionRef`. See
+  `poker_solver/abstraction/`, the `poker-solver precompute-abstraction`
+  CLI, and `tests/test_abstraction_*.py`.
 
 ## Not yet (roadmap)
 
-- **Full HUNL postflop solve** — PR 4 (card abstraction: imperfect-recall
-  EMD bucketing, 256/128/64 targets) and PR 5 (Python reference solver +
-  per-street memory profiler).
+- **Full HUNL postflop solve** — PR 5 (Python reference solver +
+  per-street memory profiler) is the next merge.
 - **HUNL postflop in Rust** — PR 6 (license-aware port of the PR 5
   Python reference).
 - **River-spot diff test vs `noambrown/poker_solver`** — PR 7.
@@ -119,6 +125,10 @@ poker-solver solve --game hunl --hunl-mode tiny_subgame --iterations 500
 
 # Short-stack push/fold lookup happens automatically inside solve():
 #   solve(HUNLPoker(HUNLConfig(starting_stack=1000)))  -> backend="pushfold"
+
+# Card abstraction — build once, reuse from --abstraction:
+poker-solver precompute-abstraction --bucket-counts 256,128,64 \
+    --mc-iterations 200000 --output abstraction_v1.npz
 ```
 
 Python API:
@@ -189,13 +199,14 @@ full validation chain.
 
 ## Contributing
 
-This is a personal solo build right now; the surface area is small and
-the design choices are deliberately load-bearing. Before opening a PR,
-please read [`PLAN.md`](PLAN.md) for the locked decisions (algorithm,
-abstraction, stack range, license posture) and the PR roadmap, and skim
-the per-PR audit pattern. Reference-first rule: every technical claim in
-this repo cites a paper, a competitor repo, or a test — please match the
-norm.
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the dev-environment, test,
+and PR-flow contract. The TL;DR: this is a personal solo build right
+now; the surface area is small and the design choices are deliberately
+load-bearing. Before opening a PR, please read [`PLAN.md`](PLAN.md) for
+the locked decisions (algorithm, abstraction, stack range, license
+posture) and the PR roadmap, and skim the per-PR audit pattern.
+Reference-first rule: every technical claim in this repo cites a paper,
+a competitor repo, or a test — please match the norm.
 
 ## References
 

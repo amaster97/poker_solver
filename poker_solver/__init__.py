@@ -63,6 +63,8 @@ from poker_solver.hunl import (
     Street,
     default_tiny_subgame,
 )
+from poker_solver.hunl_solver import HUNLSolveResult, solve_hunl_postflop
+from poker_solver.profiler.memory import MemoryProbe, MemoryReport, StreetMemoryEntry
 from poker_solver.pushfold import (
     PUSHFOLD_MAX_BB,
     PUSHFOLD_MIN_BB,
@@ -112,8 +114,13 @@ __all__ = [
     "HUNLPoker",
     "HUNLState",
     "HUNLConfig",
+    "HUNLSolveResult",
     "Street",
     "default_tiny_subgame",
+    "solve_hunl_postflop",
+    "MemoryProbe",
+    "MemoryReport",
+    "StreetMemoryEntry",
     "ActionContext",
     "ActionAbstractionConfig",
     "enumerate_legal_actions",

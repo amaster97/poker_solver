@@ -7,12 +7,12 @@ import random
 import sys
 from dataclasses import replace
 from pathlib import Path
-from typing import Union
+from typing import IO, Union
 
 from poker_solver.card import Card, parse_board, parse_hand
 from poker_solver.equity import equity
 from poker_solver.games import Game, KuhnPoker, LeducPoker
-from poker_solver.hunl import HUNLPoker, default_tiny_subgame
+from poker_solver.hunl import HUNLConfig, HUNLPoker, Street, default_tiny_subgame
 from poker_solver.range import Range, parse_range
 from poker_solver.solver import solve
 
@@ -69,14 +69,74 @@ def _build_leduc(args: argparse.Namespace) -> Game:
     return LeducPoker()
 
 
+def _parse_bet_sizes(spec: str) -> tuple[float, ...]:
+    """Parse a comma-separated percentage list into pot-fraction floats.
+
+    ``"33,75,100,150,200"`` → ``(0.33, 0.75, 1.0, 1.5, 2.0)``. Used for the
+    ``--bet-sizes`` flag in ``--hunl-mode postflop``.
+    """
+    out: list[float] = []
+    for tok in spec.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        out.append(float(tok) / 100.0)
+    if not out:
+        raise ValueError(f"--bet-sizes must list at least one fraction; got {spec!r}")
+    return tuple(out)
+
+
+def _build_postflop_config(args: argparse.Namespace) -> HUNLConfig:
+    """Build an ad-hoc postflop `HUNLConfig` from CLI args (PR 5 §6).
+
+    `--board` is REQUIRED; its card count picks the starting street
+    (3=flop, 4=turn, 5=river). `--stacks` is the per-player BB count
+    (symmetric); `--bet-sizes` overrides the bet-size menu.
+    """
+    board_spec = getattr(args, "board", None)
+    if not board_spec:
+        raise ValueError(
+            "--hunl-mode postflop requires --board (e.g., 'As 7c 2d' for flop)."
+        )
+    board_cards = parse_board(board_spec)
+    if len(board_cards) == 3:
+        starting_street = Street.FLOP
+    elif len(board_cards) == 4:
+        starting_street = Street.TURN
+    elif len(board_cards) == 5:
+        starting_street = Street.RIVER
+    else:
+        raise ValueError(
+            f"--board must have 3/4/5 cards for postflop; got {len(board_cards)}."
+        )
+    stacks_bb = int(getattr(args, "stacks", 100))
+    big_blind = 100
+    starting_stack = stacks_bb * big_blind
+    initial_pot = 2 * big_blind  # SB + BB equivalents already in.
+    bet_sizes_spec = getattr(args, "bet_sizes", None) or "33,75,100,150,200"
+    bet_fractions = _parse_bet_sizes(bet_sizes_spec)
+    return HUNLConfig(
+        starting_stack=starting_stack,
+        small_blind=big_blind // 2,
+        big_blind=big_blind,
+        starting_street=starting_street,
+        initial_board=tuple(board_cards),
+        initial_pot=initial_pot,
+        initial_contributions=(big_blind, big_blind),
+        bet_size_fractions=bet_fractions,
+    )
+
+
 def _build_hunl_with_args(args: argparse.Namespace) -> Game:
     mode = getattr(args, "hunl_mode", "tiny_subgame")
     if mode == "tiny_subgame":
         config = default_tiny_subgame()
+    elif mode == "postflop":
+        config = _build_postflop_config(args)
     elif mode == "full":
         raise NotImplementedError(
-            "Full HUNL solve requires card abstraction (PR 4) + scalable "
-            "solver (PR 5). Use --hunl-mode tiny_subgame for a small exercise."
+            "Full HUNL solve (preflop tree) lands in PR 9. For postflop "
+            "subgames use --hunl-mode postflop with --board and --stacks."
         )
     else:
         raise ValueError(f"Unknown --hunl-mode: {mode!r}")
@@ -159,7 +219,36 @@ _GAMES = {
 
 def _cmd_solve(args: argparse.Namespace) -> int:
     game = _GAMES[args.game](args)
-    result = solve(game, iterations=args.iterations, backend=args.backend)
+    # The HUNL postflop path bypasses solver.solve() so we can thread the
+    # extra CLI flags (--max-memory-gb, --log-every, --target-exploitability)
+    # through directly. The push/fold short-circuit doesn't fire for
+    # postflop-start games (it only fires on Street.PREFLOP), so calling
+    # solve_hunl_postflop here is equivalent to solver.solve()'s postflop
+    # branch for this case.
+    result: object
+    try:
+        if args.game == "hunl" and getattr(args, "hunl_mode", "") == "postflop":
+            from poker_solver.hunl_solver import solve_hunl_postflop
+
+            assert isinstance(game, HUNLPoker)
+            result = solve_hunl_postflop(
+                game.config,
+                iterations=args.iterations,
+                memory_budget_gb=args.max_memory_gb,
+                target_exploitability=args.target_exploitability,
+                log_every=args.log_every,
+                seed=args.seed,
+            )
+        else:
+            result = solve(game, iterations=args.iterations, backend=args.backend)
+    except MemoryError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        if len(exc.args) > 1:
+            report = exc.args[1]
+            print(file=sys.stderr)
+            print("Memory (partial report at abort):", file=sys.stderr)
+            _print_memory_section(report, stream=sys.stderr)
+        return 1
 
     print(f"Game:        {args.game}")
     print(f"Backend:     {result.backend}")
@@ -178,7 +267,38 @@ def _cmd_solve(args: argparse.Namespace) -> int:
         probs = result.average_strategy[key]
         action_str = "  ".join(f"{p:.4f}" for p in probs)
         print(f"  {key:<8}  {action_str}")
+    # PR 5: print the memory section when the result is a HUNLSolveResult.
+    memory_report = getattr(result, "memory_report", None)
+    if memory_report is not None:
+        print()
+        print("Memory:")
+        _print_memory_section(memory_report)
     return 0
+
+
+def _print_memory_section(report: object, stream: IO[str] | None = None) -> None:
+    """Pretty-print the per-street memory breakdown.
+
+    Accepts an opaque `MemoryReport` (defined in Agent B's `profiler.memory`)
+    so we don't take a direct dependency on a specific dataclass shape from
+    inside CLI code that may be imported by users without psutil installed.
+    """
+    out: IO[str] = stream if stream is not None else sys.stdout
+    per_street = getattr(report, "per_street", ())
+    for entry in per_street:
+        name = entry.street.name
+        mb = entry.total_bytes / 1024**2
+        count = entry.infoset_count
+        print(
+            f"  {name:<7}  infosets={count:>8}  total={mb:>9.2f} MB",
+            file=out,
+        )
+    total_gb = getattr(report, "total_gb", 0.0)
+    rss_gb = getattr(report, "process_rss_gb", 0.0)
+    river_ratio = getattr(report, "river_ratio", 0.0)
+    print(f"  total            grand_total={total_gb:>9.3f} GB", file=out)
+    print(f"  psutil RSS                  ={rss_gb:>9.3f} GB", file=out)
+    print(f"  river ratio                 ={river_ratio:>9.1%}", file=out)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -228,11 +348,66 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sv.add_argument(
         "--hunl-mode",
-        choices=("tiny_subgame", "full"),
+        choices=("tiny_subgame", "postflop", "full"),
         default="tiny_subgame",
         help=(
-            "HUNL mode: tiny_subgame (default, river-only fixture) or full "
-            "(raises NotImplementedError; full HUNL solve lands in PR 5)."
+            "HUNL mode: tiny_subgame (default, river-only fixture); postflop "
+            "(PR 5 — ad-hoc postflop subgame solver via --board + --stacks); "
+            "full (HUNL preflop tree; raises NotImplementedError pointing at "
+            "PR 9)."
+        ),
+    )
+    sv.add_argument(
+        "--board",
+        type=str,
+        default=None,
+        help=(
+            "Community cards for --hunl-mode postflop (3/4/5 cards = "
+            "flop/turn/river start). e.g. 'As 7c 2d'."
+        ),
+    )
+    sv.add_argument(
+        "--stacks",
+        type=int,
+        default=100,
+        help="Per-player effective stack in BB for --hunl-mode postflop (default 100).",
+    )
+    sv.add_argument(
+        "--max-memory-gb",
+        type=float,
+        default=14.0,
+        help=(
+            "Memory budget for the postflop solver (default 14.0 GB per "
+            "PLAN.md). Exceeding aborts cleanly with a partial MemoryReport."
+        ),
+    )
+    sv.add_argument(
+        "--bet-sizes",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated pot-fraction percentages (e.g. '33,75,100,150,200') "
+            "for postflop bet sizing. Default: the full 5-size menu. All-in "
+            "always available."
+        ),
+    )
+    sv.add_argument(
+        "--target-exploitability",
+        type=float,
+        default=None,
+        help=(
+            "Optional convergence target in BB; the postflop solver "
+            "early-exits when reached. Requires --log-every to compute "
+            "exploitability between chunks."
+        ),
+    )
+    sv.add_argument(
+        "--log-every",
+        type=int,
+        default=None,
+        help=(
+            "When set, snapshot exploitability + memory every N iterations. "
+            "Default: snapshot once at end."
         ),
     )
     sv.add_argument(
