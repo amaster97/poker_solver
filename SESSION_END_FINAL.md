@@ -1,7 +1,7 @@
 # SESSION END — 2026-05-22
 
 ## TL;DR
-**v1.0.0 GA milestone HIT.** 10 PRs shipped: 3, 3.5, 3.5-followup, 4, 4.5, 5, 6, 7, 10a, 11. Integration tip `bbb4395`. Tags: v0.6.0, v1.0.0 (autonomous, on integration).
+**v1.0.0 GA milestone HIT.** 10 PRs shipped: 3, 3.5, 3.5-followup, 4, 4.5, 5, 6, 7, 10a, 11. Integration tip `a7955c7` (PR 11 follow-up); v1.0.0 tag on `bbb4395`. Tags: v0.6.0, v1.0.0 (autonomous, on integration).
 
 ## Top 3 user actions
 1. **Main merge approval:** integration → main is the v1.0.0 release
