@@ -89,6 +89,7 @@ def test_pr3_tiny_subgame_still_passes_without_abstraction():
         assert not re.match(r"^b\d+\|", k)
 
 
+@pytest.mark.timeout(180)
 def test_tiny_subgame_with_abstraction_produces_bucketed_infosets(tmp_path):
     """With an AbstractionRef set, postflop infoset keys take the bucketed form."""
     path = _build_tiny_river_only(tmp_path)
@@ -144,6 +145,7 @@ def test_abstraction_collapses_strategically_similar_hands(tmp_path):
     assert b_a == b_b
 
 
+@pytest.mark.timeout(180)
 def test_end_to_end_build_loadback_solve(tmp_path):
     """Full pipeline: build → save → load → attach → solve."""
     path = _build_tiny_river_only(tmp_path)
@@ -164,6 +166,7 @@ def test_end_to_end_build_loadback_solve(tmp_path):
     assert np.isfinite(result.exploitability_history[-1])
 
 
+@pytest.mark.timeout(180)
 def test_abstraction_lookup_speed_under_50ms(tmp_path):
     """1000 lookup_bucket calls under 50 ms (i.e., effectively O(1)).
 
@@ -197,6 +200,7 @@ def test_abstraction_lookup_speed_under_50ms(tmp_path):
     assert elapsed < 0.050, f"1000 lookups took {elapsed * 1000:.2f} ms"
 
 
+@pytest.mark.timeout(180)
 def test_build_abstraction_seed_reproducibility(tmp_path):
     """Same seed → identical AbstractionTables (modulo wall-clock metadata)."""
     out1 = tmp_path / "rep1.npz"
@@ -227,6 +231,7 @@ def test_build_abstraction_seed_reproducibility(tmp_path):
         assert t1.metadata[k] == t2.metadata[k], f"metadata mismatch on {k!r}"
 
 
+@pytest.mark.timeout(180)
 def test_cli_precompute_abstraction_smoke(tmp_path):
     """``poker-solver precompute-abstraction`` smoke test."""
     out = tmp_path / "cli.npz"
@@ -263,6 +268,7 @@ def test_cli_precompute_abstraction_smoke(tmp_path):
     assert len(np.unique(river_arr)) <= 2
 
 
+@pytest.mark.timeout(180)
 def test_cli_solve_with_abstraction_loads_file(tmp_path):
     """``poker-solver solve --abstraction PATH`` runs to completion."""
     out = tmp_path / "cli_solve.npz"

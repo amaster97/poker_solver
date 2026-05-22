@@ -31,6 +31,13 @@ def both_results():
     return py, rs
 
 
+# pytest-timeout doesn't apply to module-scoped fixtures by default; bumping
+# the timeout per-test gives the shared fixture's first-touch setup (Python
+# Leduc DCFR + Rust DCFR @ 2k iters + cold Rust binding load) ample headroom
+# above pytest's 90s default. Observed ~30-60s on cold venvs.
+_LEDUC_DIFF_TIMEOUT = 180
+
+
 def _diff_strategies(a: dict[str, list[float]], b: dict[str, list[float]], atol: float):
     """Return a list of (infoset, action_idx, py_prob, rs_prob, abs_diff)
     tuples for any per-action diff exceeding atol."""
@@ -46,6 +53,7 @@ def _diff_strategies(a: dict[str, list[float]], b: dict[str, list[float]], atol:
     return diffs
 
 
+@pytest.mark.timeout(_LEDUC_DIFF_TIMEOUT)
 def test_leduc_python_rust_infoset_keys_match(both_results):
     py, rs = both_results
     py_keys = set(py.average_strategy.keys())
@@ -58,6 +66,7 @@ def test_leduc_python_rust_infoset_keys_match(both_results):
     assert len(py_keys) == 288, f"Leduc should have 288 infosets, got {len(py_keys)}"
 
 
+@pytest.mark.timeout(_LEDUC_DIFF_TIMEOUT)
 def test_leduc_python_rust_strategy_agreement(both_results):
     py, rs = both_results
     diffs = _diff_strategies(py.average_strategy, rs.average_strategy, STRATEGY_ATOL)
@@ -70,6 +79,7 @@ def test_leduc_python_rust_strategy_agreement(both_results):
     )
 
 
+@pytest.mark.timeout(_LEDUC_DIFF_TIMEOUT)
 def test_leduc_python_rust_game_value_agreement(both_results):
     py, rs = both_results
     assert py.game_value == pytest.approx(
@@ -77,6 +87,7 @@ def test_leduc_python_rust_game_value_agreement(both_results):
     ), f"Game value diverges: python={py.game_value!r} rust={rs.game_value!r}"
 
 
+@pytest.mark.timeout(_LEDUC_DIFF_TIMEOUT)
 def test_leduc_python_rust_exploitability_agreement(both_results):
     py, rs = both_results
     py_exp = py.exploitability_history[-1]
@@ -86,6 +97,7 @@ def test_leduc_python_rust_exploitability_agreement(both_results):
     ), f"Final exploitability diverges: python={py_exp!r} rust={rs_exp!r}"
 
 
+@pytest.mark.timeout(_LEDUC_DIFF_TIMEOUT)
 def test_leduc_both_backends_reach_published_value(both_results):
     """Sanity: both implementations should be near the published Leduc value."""
     published_value = -0.085

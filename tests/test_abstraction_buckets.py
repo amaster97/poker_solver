@@ -181,6 +181,7 @@ def test_lookup_bucket_returns_minus_one_for_preflop(tiny_tables):
     assert lookup_bucket(tables, board, hand, Street.PREFLOP) == -1
 
 
+@pytest.mark.timeout(180)
 def test_lookup_bucket_returns_in_range_for_postflop(tmp_path):
     """Build a tiny artifact covering all three streets and check ranges.
 
@@ -236,6 +237,7 @@ def test_lookup_bucket_deterministic(tiny_tables):
 # -- Save / load round trip + schema -------------------------------------
 
 
+@pytest.mark.timeout(180)
 def test_save_load_round_trip(tmp_path):
     out = tmp_path / "round.npz"
     built = build_abstraction(
@@ -266,6 +268,7 @@ def test_save_load_round_trip(tmp_path):
         assert loaded.metadata[k] == v
 
 
+@pytest.mark.timeout(180)
 def test_save_load_schema_version_check(tmp_path):
     """Corrupt schema_version on disk; loader must raise ValueError.
 
@@ -304,6 +307,7 @@ def test_save_load_schema_version_check(tmp_path):
         load_abstraction(out)
 
 
+@pytest.mark.timeout(180)
 def test_save_load_source_path_populated_on_load(tmp_path):
     """B2 amendment: load_abstraction sets source_path; build leaves it None."""
     out = tmp_path / "src.npz"
@@ -327,6 +331,7 @@ def test_save_load_source_path_populated_on_load(tmp_path):
     assert built.source_path is None
 
 
+@pytest.mark.timeout(180)
 def test_save_load_size_under_guard_rail(tmp_path):
     out = tmp_path / "small.npz"
     build_abstraction(
@@ -375,6 +380,7 @@ def test_lookup_bucket_raises_on_wrong_board_size(tiny_tables):
 # -- Metadata + build artifact -------------------------------------------
 
 
+@pytest.mark.timeout(180)
 def test_abstraction_tables_metadata_includes_required_fields(tmp_path):
     out = tmp_path / "meta.npz"
     tables = build_abstraction(
@@ -427,6 +433,7 @@ def test_canonical_hand_key_in_range_for_random_inputs():
         assert idx >= 0
 
 
+@pytest.mark.timeout(180)
 def test_build_abstraction_writes_file_with_correct_shape(tmp_path):
     out = tmp_path / "shape.npz"
     build_abstraction(
