@@ -637,10 +637,77 @@ def _unpack_hole_outcome(action: Action) -> tuple[Card, Card, Card, Card]:
     return (c0, c1, c2, c3)
 
 
+def _serialize_hunl_config(config: HUNLConfig) -> str:
+    """Dump ``config`` to a JSON string matching the Rust ``serde`` shape.
+
+    PR 6 §6.2 — the Rust HUNL solve entry takes the config as a JSON string
+    (locked decision D2: simpler than struct binding). The field set, types,
+    and JSON keys are 1:1 with Agent A's ``HUNLConfig`` ``serde::Deserialize``
+    derive in ``crates/cfr_core/src/hunl.rs``.
+
+    Serializes ``initial_hole_cards`` (Agent A's ``HUNLState::initial`` reads
+    them from the config for postflop subgames) and the abstraction's
+    ``source_path`` + ``version`` (so the Rust side can ``load_abstraction``
+    the ``.npz`` independently). ``rake_rate`` / ``rake_cap`` are always 0/0
+    by ``HUNLConfig.__post_init__`` but emitted explicitly so Agent A's
+    ``Deserialize`` shape stays aligned.
+
+    f64 fields (``bet_size_fractions``) round-trip bit-exactly via
+    ``json.dumps`` / ``serde_json::from_str`` per IEEE-754 invariants
+    (PR 6 §9 #15).
+    """
+    import json
+
+    abstraction_path: str | None = None
+    abstraction_version: str | None = None
+    if config.abstraction is not None:
+        abstraction_path = str(config.abstraction.source_path)
+        abstraction_version = str(config.abstraction.version)
+
+    if config.initial_hole_cards:
+        # Tuple-of-pairs of `Card` -> nested int-list matching Agent A's
+        # `Option<[[u8; 2]; 2]>` field.
+        initial_hole = [
+            [card_to_int(c) for c in pair] for pair in config.initial_hole_cards
+        ]
+    else:
+        initial_hole = None
+
+    payload: dict[str, object] = {
+        "starting_stack": int(config.starting_stack),
+        "small_blind": int(config.small_blind),
+        "big_blind": int(config.big_blind),
+        "ante": int(config.ante),
+        "starting_street": int(config.starting_street),
+        "initial_board": [card_to_int(c) for c in config.initial_board],
+        "initial_pot": int(config.initial_pot),
+        "initial_contributions": [
+            int(config.initial_contributions[0]),
+            int(config.initial_contributions[1]),
+        ],
+        "initial_hole_cards": initial_hole,
+        "preflop_raise_cap": int(config.preflop_raise_cap),
+        "postflop_raise_cap": int(config.postflop_raise_cap),
+        "bet_size_fractions": [float(x) for x in config.bet_size_fractions],
+        "include_all_in": bool(config.include_all_in),
+        "force_allin_threshold": int(config.force_allin_threshold),
+        "min_bet_bb": int(config.min_bet_bb),
+        "rake_rate": float(config.rake_rate),
+        "rake_cap": int(config.rake_cap),
+        "abstraction_path": abstraction_path,
+        "abstraction_version": abstraction_version,
+        # PR 8 forward-compat (consistency review I6). Default False until
+        # PR 8 introduces the public-chance-sampling code path.
+        "use_pcs": False,
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
 __all__ = [
     "HUNLConfig",
     "HUNLPoker",
     "HUNLState",
     "Street",
+    "_serialize_hunl_config",
     "default_tiny_subgame",
 ]

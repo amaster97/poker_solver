@@ -10,12 +10,125 @@ and this project adheres to [semantic versioning](https://semver.org/spec/v2.0.0
 In-flight on feature branches; not yet merged to `main`.
 
 ### In progress
-- PR 4: card abstraction (EMD bucketing, 256/128/64 buckets, suit-isomorphism
-  included). Spec'd; implementation pending.
-- PR 5: HUNL postflop solve (Python reference) + per-street memory profiler.
-- PR 6: HUNL postflop port to Rust (license-aware: MIT/Apache only).
 - PR 7+: river-spot diff vs `noambrown/poker_solver`; NEON SIMD; HUNL preflop;
   NiceGUI scaffold; macOS packaging.
+
+## [0.5.0] - 2026-05-22
+
+PR 6: Rust HUNL postflop port (~24x speedup, bit-exact diff at 100k iters);
+`--backend rust` flag; PyO3 `_rust.solve_hunl_postflop` export.
+
+### Added
+
+- **Rust HUNL postflop solver** (`crates/cfr_core/src/hunl.rs`,
+  `hunl_tree.rs`, `hunl_eval.rs`, `abstraction.rs`, `hunl_solver.rs`;
+  exposed via PyO3 as `poker_solver._rust.solve_hunl_postflop`).
+  Same DCFR (alpha=1.5, beta=0, gamma=2.0), same action menu, same
+  bucket lookups as the PR 5 Python tier. Bit-exact parity at 100k
+  iterations on the tiny river-subgame fixture; 5e-3 parity on the
+  flop fixture. ~24x speedup vs Python (3.88 s Rust vs 92.9 s Python
+  at 100k iters, Apple M4 Pro, median of 3 trials).
+- **CLI**: `--backend rust` flag on `solve --game hunl --hunl-mode
+  postflop`. Default stays `python`.
+- **New Rust deps** (all MIT/Apache 2.0 dual-licensed): `ndarray = "0.16"`,
+  `ndarray-npy = "0.9"` for `.npz` abstraction loading.
+
+### Changed
+
+- `solver.py` dispatch: HUNL postflop Rust branch composes AFTER the
+  PR 3.5 push/fold short-circuit and BEFORE the Python fallback
+  (PR 9 §6 canonical ordering).
+- Python recomputes exploitability + game_value from the Rust-returned
+  strategy (Kuhn/Leduc precedent; removes cross-tier float drift).
+
+## [0.4.0] - 2026-05-22
+
+PR 4 + PR 5 milestone: card abstraction and HUNL postflop solve land on
+`integration`. Adds the bucketing infrastructure required for tractable
+postflop CFR, the Python reference postflop solver orchestrator, and a
+per-street memory profiler that surfaces the river-ratio trigger for the
+PR 4 revisit.
+
+### Added
+
+- **Card abstraction package** (`poker_solver/abstraction/`, PR 4;
+  commit `6565b84`). EMD-based equity-distribution bucketing with
+  Slumbot-inspired k-means; default bucket counts 256/128/64 for
+  flop/turn/river respectively. Suit-isomorphism canonicalization
+  built-in. Public API: `AbstractionTables`, `AbstractionRef`,
+  `build_abstraction`, `load_abstraction`, `save_abstraction`,
+  `lookup_bucket`, `resolve_abstraction_ref`,
+  `canonicalize_for_suit_iso`. Methodology notes under `docs/pr4_prep/`.
+- **HUNL postflop solve orchestrator** (`poker_solver/hunl_solver.py`,
+  PR 5; commit `a9d02ca`). `solve_hunl_postflop(...)` + `HUNLSolveResult`
+  dataclass wire the abstraction tables, DCFR core, and HUNL tree into
+  a single entrypoint for flop/turn/river subgames.
+- **Per-street memory profiler** (`poker_solver/profiler/memory.py`,
+  PR 5). `MemoryProbe` (sampler), `MemoryReport` (per-street rollup
+  with `.river_ratio` PR-4-revisit trigger), `StreetMemoryEntry`
+  (per-street record). `psutil>=5.9` runtime dep.
+- **CLI**: `precompute-abstraction` subcommand + `solve --hunl-mode postflop`
+  with new `--board`, `--stacks`, `--bet-sizes`, `--max-memory-gb`,
+  `--abstraction PATH` flags.
+- **Test fixtures**: `tests/fixtures/hunl_solve_fixtures.py` for the
+  postflop solve battery.
+
+### Changed
+
+- **`HUNLConfig.abstraction`** field added (additive, default `None` —
+  preserves PR 3 lossless behavior when omitted).
+- **`solve()` dispatch**: HUNLPoker postflop routing branch added after
+  the push/fold short-circuit; non-HUNL games unaffected.
+- **CLI `--hunl-mode full`**: retargeted from PR 5 to PR 9.
+
+### Fixed
+
+- Per-PR audit must-fix patches applied and verified for PR 4 and PR 5
+  (audits in `docs/pr4_prep/audit_report.md` and PR 5 equivalent).
+- PR 5 audit must-fix #1 — `hunl_solver.py` exploitability guard
+  against zero-iteration solves.
+
+### Dependencies
+
+- `psutil>=5.9` added as a runtime dep (memory profiler).
+- `pytest-timeout>=2.3` added as a dev dep; pytest-timeout wiring under
+  `[tool.pytest.ini_options]` (90s default, slow/very_slow markers).
+
+### Internal
+
+- `__version__` bumped to `0.4.0` (lag from v0.3.0 fully reconciled).
+
+## [0.3.1] - 2026-05-21
+
+PR 3.5 audit follow-up + sparse JSON fill. Two correctness fixes caught
+during the PR 3.5 ready-to-commit verification chain. No new public API;
+no schema changes. v0.3.0 was tagged but never distributed before these
+fixes landed, so v0.3.1 is effectively the first public v0.3 release.
+
+### Fixed
+
+- **`get_full_range` returns all 169 canonical hand classes**
+  (`poker_solver/pushfold.py`). The DCFR chart generator writes cells in
+  sparse form (zero-frequency entries omitted), so the previous
+  `get_full_range` returned 113 keys at 10 BB SB jam instead of 169.
+  Now explicitly fills every canonical class via `_all_hand_classes()`
+  helper, defaulting absent hands to `0.0`. Silent-data-loss class of
+  bug; surfaced when Agent B's DCFR chart regeneration changed the
+  sparse pattern.
+- **Push/fold dispatch requires `starting_street == PREFLOP`**
+  (`poker_solver/solver.py`). The PR 3.5 dispatch checked only stack
+  depth, which silently misfired on HUNL subgames starting on a postflop
+  street (e.g. `default_tiny_subgame()` at 10 BB river). Added the
+  `starting_street` guard so river/turn/flop subgames always run through
+  the tree solver. Regression test:
+  `test_pushfold_mode_not_triggered_for_river_subgame_at_short_stack`.
+
+### Internal
+
+- Both bugs caught by the parallel-agents + cross-check discipline (one
+  agent writing `docs/architecture.md` surfaced the dispatch gap; the
+  chart-generation agent surfaced the sparse-JSON gap). Sequential
+  single-agent execution would likely have shipped both bugs.
 
 ## [0.3.0] - 2026-05-21
 
@@ -202,6 +315,9 @@ and a hybrid exact / Monte Carlo equity calculator.
   hand evaluator, Monte Carlo equity, range parser, CLI.
 
 [Unreleased]: ./
+[0.5.0]: ./
+[0.4.0]: ./
+[0.3.1]: ./
 [0.3.0]: ./
 [0.2.0]: ./
 [0.1.0]: ./
