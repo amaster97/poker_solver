@@ -1,5 +1,8 @@
 """Equity-distribution histograms for card-abstraction features (Stage 1).
 
+License posture: no third-party code derivation; equity feature is original
+(implemented from first principles atop :func:`poker_solver.evaluator.evaluate`).
+
 For each (board, hero_hole_cards, street), compute the histogram (over ``H``
 equal-width bins on equity in [0, 1]) of the hand's equity against a
 uniform-random opponent hole pair, integrated over all future board runouts.

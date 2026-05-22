@@ -5,8 +5,8 @@
 | Branch | Tip | Status |
 |---|---|---|
 | main | `2b67370` | awaiting merge OK |
-| integration | `6c438b8` | PR 1-6 + 3.5/followup landed |
-| pr-7-noambrown-diff | uncommitted | M1+M2+M3 patches landed, commit pipeline in flight |
+| integration | `d135add` | PR 1-7 + 3.5/followup landed |
+| pr-7-noambrown-diff | shipped | merged to integration |
 
 ## 2. PRs
 
@@ -17,8 +17,9 @@
 | PR 4 (card abstraction) | shipped | v0.4.0 | `6565b84` → `5832b2f` |
 | PR 5 (postflop + profiler) | shipped | v0.4.0 | `a9d02ca` → `eee9b4b` |
 | PR 6 (Rust port) | shipped | v0.5.0 | `0933367` → `6c438b8` |
-| PR 7 (Brown diff) | in flight | v0.5.1 | TBD |
-| PR 4.5 / 8 / 9 / 10a / 10b / 11 / 12 | staged | v0.6.0→v1.1.0 | — |
+| PR 7 (Brown diff) | shipped | v0.5.1 | `83d7b9c` → `d135add` |
+| PR 4.5 (audit-debt sweep) | mid-audit | v0.5.2 | READY-WITH-PATCHES; must-fixes in flight |
+| PR 8 / 9 / 10a / 10b / 11 / 12 | staged | v0.6.0→v1.1.0 | — |
 
 ## 3. Decisions awaiting (3)
 
