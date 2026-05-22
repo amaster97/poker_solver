@@ -47,6 +47,13 @@ _STREET_BOARD_LEN: dict[Street, int] = {
 # Bucket-count fits in u8 (max 256).
 _MAX_BUCKETS_U8 = 256
 
+# Autosize heuristic: ``None`` + mc below threshold => smoke-test caps applied;
+# ``-1`` => explicit "no cap"; positive => direct cap. Threshold sits well
+# below the locked production default (D2: 200_000) so production never trips.
+_AUTOSIZE_MC_ITERATIONS_THRESHOLD = 5_000
+_AUTOSIZE_BOARDS_CAP = 8
+_AUTOSIZE_HANDS_CAP = 16
+
 
 def _abs_size_bytes(
     flop_assign: np.ndarray,
@@ -444,15 +451,23 @@ def build_abstraction(
     if flop_mode not in ("exact", "mc"):
         raise ValueError(f"invalid flop_mode: {flop_mode!r}")
 
-    # Autosize smoke-test guard: when the caller has not supplied an explicit
-    # board cap and the MC budget is tiny, the build is almost certainly a
-    # unit-test fixture (production builds default to mc_iterations=200_000).
-    # Full canonical enumeration of the river (~134K boards) would dominate
-    # test time, so cap to a small constant. Production unaffected.
-    if max_boards_per_street is None and mc_iterations < 5_000:
-        max_boards_per_street = 8
-    if max_hands_per_board is None and mc_iterations < 5_000:
-        max_hands_per_board = 16
+    # Autosize smoke-test guard (see ``_AUTOSIZE_MC_ITERATIONS_THRESHOLD``
+    # above for the rationale and sentinel scheme). ``None`` => autosize when
+    # mc budget is tiny; ``-1`` => explicit "no cap"; positive => direct cap.
+    if (
+        max_boards_per_street is None
+        and mc_iterations < _AUTOSIZE_MC_ITERATIONS_THRESHOLD
+    ):
+        max_boards_per_street = _AUTOSIZE_BOARDS_CAP
+    if (
+        max_hands_per_board is None
+        and mc_iterations < _AUTOSIZE_MC_ITERATIONS_THRESHOLD
+    ):
+        max_hands_per_board = _AUTOSIZE_HANDS_CAP
+    if max_boards_per_street == -1:
+        max_boards_per_street = None
+    if max_hands_per_board == -1:
+        max_hands_per_board = None
 
     out_path = Path(out_path)
     checkpoint_dir = out_path.parent / f".{out_path.stem}_tmp"

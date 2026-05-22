@@ -51,6 +51,10 @@ _STREET_TOKEN_MAP: dict[str, Street] = {
 # ground-truth gate; tune this if calibration drifts on a new interpreter.
 _DICT_OVERHEAD_RATIO: float = 0.5
 
+# Single source of truth for byte-to-GB conversion used in `MemoryReport`
+# derived properties; replaces inline ``1024**3`` literals.
+_BYTES_PER_GB: int = 1024**3
+
 
 @dataclass(frozen=True)
 class StreetMemoryEntry:
@@ -107,25 +111,25 @@ class MemoryReport:
 
     @property
     def flop_gb(self) -> float:
-        return self._bytes_for(Street.FLOP) / 1024**3
+        return self._bytes_for(Street.FLOP) / _BYTES_PER_GB
 
     @property
     def turn_gb(self) -> float:
-        return self._bytes_for(Street.TURN) / 1024**3
+        return self._bytes_for(Street.TURN) / _BYTES_PER_GB
 
     @property
     def river_gb(self) -> float:
-        return self._bytes_for(Street.RIVER) / 1024**3
+        return self._bytes_for(Street.RIVER) / _BYTES_PER_GB
 
     @property
     def total_gb(self) -> float:
         """Grand total (solver + abstraction + overhead) in GB."""
-        return self.grand_total_bytes / 1024**3
+        return self.grand_total_bytes / _BYTES_PER_GB
 
     @property
     def process_rss_gb(self) -> float:
         """`psutil` RSS at snapshot time, in GB."""
-        return self.rss_observed_bytes / 1024**3
+        return self.rss_observed_bytes / _BYTES_PER_GB
 
     @property
     def river_ratio(self) -> float:

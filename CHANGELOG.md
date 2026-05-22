@@ -12,6 +12,68 @@ In-flight on feature branches; not yet merged to `main`.
 ### In progress
 - PR 8+: NEON SIMD; HUNL preflop; NiceGUI scaffold; macOS packaging.
 
+## [0.5.2] - 2026-05-22
+
+PR 4.5: Audit-debt sweep. Bundles 13 should-fix / nice-to-fix items from
+the PR 3 / 3.5 / 4 / 5 audit reports into one mechanical cleanup PR.
+No behavior changes; no spec amendments; no new tests. PATCH bump per
+SemVer: backward-compatible fixes only. Three-agent fan-out (A: PR 3/3.5;
+B: PR 4; C: PR 5) per `docs/pr4_5_audit_debt/launch_kickoff.md` sec 2.
+Audit verdict READY-WITH-PATCHES per
+`docs/pr4_5_audit_debt/audit_report.md`; must-fix patches landed before
+this commit.
+
+### Added
+
+- **License-posture headers** on three modules (no third-party derivation;
+  original implementation): `poker_solver/hunl.py` (3-A),
+  `poker_solver/action_abstraction.py` (3-B),
+  `poker_solver/abstraction/equity_features.py` (4-A).
+- **`max_boards_per_street` kwarg** on `build_abstraction(...)` (4-D;
+  `poker_solver/abstraction/precompute.py`). Opt-in sentinel:
+  `None` = autosize (existing default behavior preserved); `-1` = no cap;
+  `int > 0` = fixed cap. Surface-only; internal 5000-iteration autosize
+  threshold unchanged. Named constants replace prior magic numbers.
+- **Named byte / iteration constants** in `poker_solver/profiler/memory.py`
+  (5-A) replacing literal magic numbers; clarifies units at call sites.
+
+### Changed
+
+- **SHOWDOWN predicate tightened** at `poker_solver/hunl.py:326` from
+  `state.street >= Street.FLOP` to explicit `{FLOP, TURN, RIVER}`
+  membership (4-B). Latent fix; solver's `_is_terminal` guard masks it
+  currently, but the explicit set future-proofs against new `Street`
+  enum members.
+- **Unreachable-branch annotations** added to
+  `enumerate_legal_actions` stack<=0 branch (3-E,
+  `poker_solver/action_abstraction.py`), `_kmeans_plusplus_init`
+  empty-cluster fallback (4-C,
+  `poker_solver/abstraction/emd_clustering.py`), and a misc HUNL branch
+  (`poker_solver/hunl.py`). All upstream-guarded paths; asserts do not
+  trip in CI.
+- **`pushfold.py` documentation/header tightening** (3.5 docs;
+  `poker_solver/pushfold.py`). Docstring + module-header polish only;
+  no API change.
+- **Dropped unused `numpy` import** in `poker_solver/profiler/memory.py`
+  (5-A); the `_ = np` suppression was vestigial.
+
+### Internal
+
+- `__version__` bumped to `0.5.2` (PATCH).
+- Three-agent fan-out with non-overlapping file ownership; `hunl.py`
+  edited by both Agent A (header + low-line unreachable annotation) and
+  Agent B (`:326` SHOWDOWN predicate); line ranges disjoint and
+  auto-merged trivially. No manual conflict-resolution commits.
+
+### Out of scope (deferred)
+
+- K-means quality tuning (post-PR-6 Rust port enables full enumeration).
+- `save_abstraction` byte-determinism design (no current consumer).
+- 6 skip-marked PR 5 TURN tests (PR 6 Rust `lookup_bucket` resolves).
+- Spec-amendment items (`HUNLState.config` source-of-truth; `d=2` jam
+  landmark; strategic-equivalence collapse).
+- `_canonicalize` rename, CLI integration items, test coverage adds.
+
 ## [0.5.1] - 2026-05-22
 
 PR 7: River-spot diff vs Noam Brown's MIT-licensed `noambrown/poker_solver`
@@ -363,12 +425,13 @@ and a hybrid exact / Monte Carlo equity calculator.
 - Initial Texas Hold'em equity solver scaffold (`023956e`):
   hand evaluator, Monte Carlo equity, range parser, CLI.
 
-[Unreleased]: ./
-[0.5.1]: ./
-[0.5.0]: ./
-[0.4.0]: ./
-[0.3.1]: ./
-[0.3.0]: ./
-[0.2.0]: ./
-[0.1.0]: ./
-[0.0.1]: ./
+[Unreleased]: https://github.com/amaster97/poker_solver/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/amaster97/poker_solver/releases/tag/v0.5.2
+[0.5.1]: https://github.com/amaster97/poker_solver/releases/tag/v0.5.1
+[0.5.0]: https://github.com/amaster97/poker_solver/releases/tag/v0.5.0
+[0.4.0]: https://github.com/amaster97/poker_solver/releases/tag/v0.4.0
+[0.3.1]: https://github.com/amaster97/poker_solver/releases/tag/v0.3.1
+[0.3.0]: https://github.com/amaster97/poker_solver/releases/tag/v0.3.0
+[0.2.0]: https://github.com/amaster97/poker_solver/releases/tag/v0.2.0
+[0.1.0]: https://github.com/amaster97/poker_solver/releases/tag/v0.1.0
+[0.0.1]: https://github.com/amaster97/poker_solver/releases/tag/v0.0.1

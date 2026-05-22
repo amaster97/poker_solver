@@ -16,7 +16,7 @@ from functools import lru_cache
 from importlib import resources
 from typing import TYPE_CHECKING, Final, Literal, cast
 
-from poker_solver.card import RANK_VALUE, RANKS
+from poker_solver.card import RANK_VALUE
 
 if TYPE_CHECKING:
     from poker_solver.hunl import HUNLConfig
@@ -26,7 +26,7 @@ Position = Literal["sb_jam", "bb_call_vs_jam"]
 
 PUSHFOLD_MIN_BB: Final[int] = 2
 PUSHFOLD_MAX_BB: Final[int] = 15
-PUSHFOLD_CHART_VERSIONS: Final[frozenset[str]] = frozenset({"v1", "v1-placeholder"})
+PUSHFOLD_CHART_VERSIONS: Final[frozenset[str]] = frozenset({"v1"})
 _EXPLOITABILITY_GATE_BB_PER_100: Final[float] = 0.05
 _VALID_POSITIONS: Final[frozenset[str]] = frozenset({"sb_jam", "bb_call_vs_jam"})
 _CHART_RESOURCE: Final[str] = "pushfold_v1.json"
@@ -179,8 +179,11 @@ def solve_pushfold(config: HUNLConfig) -> SolveResult:
             ``[PUSHFOLD_MIN_BB, PUSHFOLD_MAX_BB]`` (= [2, 15] BB).
 
     Returns:
-        ``SolveResult`` with ``backend == "pushfold_chart"`` and
-        ``iterations == 0`` (the chart path is non-iterative).
+        ``SolveResult`` with ``backend == "pushfold_chart"``,
+        ``iterations == 0`` (non-iterative path), ``exploitability_history``
+        as a single-element list of the depth-specific residual exploitability
+        from chart metadata, and ``game_value == 0.0`` placeholder (chart JSON
+        does not yet persist per-depth SB EV; spec §6 line 212).
 
     Raises:
         ValueError: ``eff_stack_bb > PUSHFOLD_MAX_BB`` (caller should use the
@@ -220,6 +223,7 @@ def solve_pushfold(config: HUNLConfig) -> SolveResult:
         payload.get("exploitability_bb_per_100", {}),
     )
     expl = float(per_depth_expl.get(str(eff_bb), 0.0))
+    # game_value=0.0 is a documented placeholder (see docstring Returns).
     return SolveResult(
         average_strategy=strategy,
         exploitability_history=[expl],
@@ -272,24 +276,6 @@ def _get_chart_cell(stack_bb: int, position: Position) -> dict[str, float]:
             f"Chart file missing depth {stack_bb} BB for position {position!r}."
         )
     return cell
-
-
-def _canonical_hand_classes() -> list[str]:
-    """Return all 169 strategically-distinct preflop hand classes.
-
-    Ordered pairs first (AA..22), then suited (AKs..32s), then offsuit
-    (AKo..32o) for deterministic iteration.
-    """
-    hands: list[str] = []
-    for r in range(12, -1, -1):
-        hands.append(RANKS[r] * 2)
-    for hi in range(12, -1, -1):
-        for lo in range(hi - 1, -1, -1):
-            hands.append(RANKS[hi] + RANKS[lo] + "s")
-    for hi in range(12, -1, -1):
-        for lo in range(hi - 1, -1, -1):
-            hands.append(RANKS[hi] + RANKS[lo] + "o")
-    return hands
 
 
 __all__ = [
