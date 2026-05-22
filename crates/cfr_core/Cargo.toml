@@ -1,12 +1,40 @@
 [package]
 name = "cfr_core"
-version = "0.2.0"
+version = "0.5.0"
 edition = "2021"
 license = "MIT"
 
 [lib]
-name = "_rust"
-crate-type = ["cdylib"]
+# Crate name matches the package so `cargo test` integration tests in
+# `crates/cfr_core/tests/*.rs` import via `use cfr_core::...`. Maturin
+# remaps the output `.so` to `poker_solver._rust` per pyproject.toml's
+# `[tool.maturin] module-name`.
+name = "cfr_core"
+# `cdylib` produces the PyO3 extension; `rlib` lets integration tests in
+# `crates/cfr_core/tests/*.rs` import the crate as `cfr_core::*` per PR 6
+# Agent C's test layout (`tests/test_hunl_rust.rs`).
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# Default features are empty so `cargo build --tests` (which links to a real
+# libpython via `auto-initialize`) doesn't try to also enable
+# `pyo3/extension-module` (incompatible — extension-module skips libpython
+# linking). Maturin enables this feature explicitly via `[tool.maturin]
+# features = ["pyo3/extension-module"]` in pyproject.toml.
+default = []
 
 [dependencies]
-pyo3 = { version = "0.23", features = ["extension-module"] }
+pyo3 = { version = "0.23" }
+# PR 6 — HUNL postflop port additions. All MIT/Apache 2.0 dual-licensed;
+# verified via `cargo tree --package cfr_core` license audit in check_pr.sh.
+ndarray = "0.16"
+ndarray-npy = { version = "0.9", default-features = false, features = ["compressed_npz"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+arrayvec = "0.7"
+
+[dev-dependencies]
+# PR 6 Agent C — integration tests call Python via PyO3 for canonicalization
+# parity. `auto-initialize` so `Python::with_gil` works from `cargo test`
+# without setting up an explicit interpreter.
+pyo3 = { version = "0.23", features = ["auto-initialize"] }
