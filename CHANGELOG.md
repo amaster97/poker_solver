@@ -13,6 +13,57 @@ In-flight on feature branches; not yet merged to `main`.
 - v1.5/v2 follow-ups (Q3 exploitability slider reframe; range-based
   dealing; Rust callbacks; full-tree preflop).
 
+## [1.4.1] - 2026-05-23
+
+### Fixed — Asymmetric initial-contributions (PR 22)
+
+- `HUNLPoker.initial_state` (and the Rust mirror in
+  `crates/cfr_core/src/hunl.rs`) now honors asymmetric
+  `initial_contributions` for postflop subgames. Previously the
+  postflop branch hardcoded `to_call=0`, `street_aggressor=-1`, and
+  `cur_player=1` regardless of contribution asymmetry, so passing
+  `initial_contributions=(1000, 500)` to model "P0 bet half-pot, P1
+  faces the c-bet" silently produced an opening-strategy state instead
+  of a facing-bet state (spec: `docs/pr_proposals/v1_4_asymmetric_contributions.md`).
+- With the fix, `(1000, 500)` yields `to_call=500`, `cur_player=1`
+  (BB faces the bet), `street_aggressor=0` (SB put more in). Symmetric
+  `(c, c)` continues to yield `to_call=0`, `cur_player=1`,
+  `street_aggressor=-1`, `street_num_raises=0` — bit-identical to
+  v1.4.0 behavior, locked by a regression test.
+- `HUNLConfig.__post_init__` now raises `ValueError` on negative
+  contributions and on a contribution exceeding `starting_stack`,
+  rather than letting the Rust backend reach a segfault path (the
+  segfault was first observed in `docs/pr13_prep/v1_3_1_s4_retest.md`).
+- Engine fix in `_apply_player`: when an over-shove all-in is "called"
+  by an opponent who is already all-in for less, the excess (uncalled)
+  chips are now refunded to the over-shover and the street closes
+  rather than tripping an assertion in `enumerate_legal_actions`. This
+  is a latent engine bug made reachable by the asymmetric-contribution
+  facing-bet branch (spec §7 "expect 0-2 such bugs during Fix A").
+- New `tests/test_asymmetric_contributions.py` (13 tests) covers
+  symmetric regression, P0/P1 facing-bet asymmetry, fold-loss
+  accounting, ValueError on every invalid-config flavor, and the
+  `default_tiny_subgame` fixture invariance.
+
+### Persona workflows unblocked (3 of the documented set)
+
+- W3.4 (Daniel) — BB-defends-vs-half-pot-c-bet MDF check: facing-bet
+  subgames now compose, so the aggregator returns a fold/call/raise
+  strategy rather than the v1.4.0 100%-opening artifact.
+- W2.3 (Sarah) — "KK on Q-high vs c-bet range."
+- W1.2 (Marcus) — Bluff-catcher MDF on river vs pot-sized bet.
+
+### Honest framing
+
+- v1.4.1 PATCH (not MINOR): the public API surface is unchanged —
+  `HUNLConfig` already accepted `initial_contributions`; the fix is
+  that the engine now interprets asymmetric values correctly. No
+  caller code that worked on v1.4.0 needs to change.
+- The Fix B `ValueError`s are stricter than v1.4.0 (which accepted
+  some invalid configs silently and either ignored them or segfaulted
+  on solve). Callers that relied on the silent-accept path will now
+  get an early, clear error.
+
 ## [1.4.0] - 2026-05-23
 
 ### Added — Node locking (marquee feature; PR 21)
