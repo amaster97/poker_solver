@@ -114,10 +114,11 @@ poker-solver solve --game hunl --hunl-mode tiny_subgame --iterations 500
 poker-solver solve --game hunl --hunl-mode tiny_subgame --iterations 1000 --backend rust
 ```
 
-Reading the output: `Game value` is P1's EV in chips per hand (positive
-= P1 winning). `Exploitability (final)` is the residual distance from
-Nash; smaller is better. `Average strategy` lists each infoset with a
-probability vector across its legal actions.
+Reading the output: `Game value` is **P0's EV in BB per hand** (positive
+= P0 winning). The `solver._game_value` returns `ev[0]`, i.e. P0's EV;
+`HUNLPoker.utility` divides by big blind. `Exploitability (final)` is
+the residual distance from Nash; smaller is better. `Average strategy`
+lists each infoset with a probability vector across its legal actions.
 
 To solve your own river spot, build a custom `HUNLConfig` in Python
 (see §5).
@@ -172,7 +173,96 @@ today, drop down to the CLI in §3.
 
 ---
 
-## 5. Library mode (caching solves)
+## 5. Building a custom range-vs-range solve
+
+§3b runs the bundled `default_tiny_subgame` fixture (one hand vs one
+hand). For real range-vs-range analysis on a board of your choice,
+construct a `HUNLConfig` directly. Leaving `initial_hole_cards=()` tells
+the solver to enumerate the full range; the engine handles the chance
+node over hole-card pairs.
+
+```python
+from poker_solver import Card, HUNLPoker, solve
+from poker_solver.hunl import HUNLConfig, Street
+
+board = tuple(Card.from_str(c) for c in ("As", "7c", "2d", "Kh", "5s"))
+
+cfg = HUNLConfig(
+    starting_stack=10_000,          # integer cents; 10_000 = 100 BB
+    starting_street=Street.RIVER,
+    initial_board=board,
+    initial_pot=1_000,
+    initial_contributions=(500, 500),
+    initial_hole_cards=(),          # empty -> enumerate full range
+)
+
+result = solve(HUNLPoker(cfg), iterations=500, backend="rust")
+
+print(f"game value (BB):       {result.game_value:+.4f}")
+print(f"final exploitability:  {result.exploitability_history[-1]:.6f}")
+print(f"infosets in strategy:  {len(result.average_strategy)}")
+```
+
+Field notes (from `poker_solver.hunl.HUNLConfig`):
+
+- `starting_stack` — integer cents; `10_000` is 100 BB (1 BB = 100 cents).
+  Floating-point chip arithmetic is forbidden in the engine.
+- `starting_street` — `Street.FLOP`, `Street.TURN`, or `Street.RIVER` for
+  postflop subgames. Preflop full solves are not yet shipped (§7).
+- `initial_board` — tuple of `Card`s matching the chosen street (3 for
+  flop, 4 for turn, 5 for river).
+- `initial_pot` / `initial_contributions` — chips already in the pot at
+  subgame start. Either `contributions` sums to `initial_pot`, or
+  `(0, 0)` for a dead-money subgame.
+- `initial_hole_cards` — leave as `()` for range vs. range; pass a
+  `((c0, c1), (c2, c3))` tuple to pin both hands (this is what
+  `default_tiny_subgame` does).
+- `rake_rate` / `rake_cap` — must remain `0.0` / `0` in v1.0.0;
+  non-zero values raise `ValueError` (rake lands in PR 9).
+
+Result fields:
+
+- `game_value` — P0's EV in BB per hand (positive = P0 winning). The
+  solver returns `ev[0]`; `HUNLPoker.utility` divides by big blind.
+- `exploitability_history` — exploitability sample at each `log_every`
+  iteration, plus a final entry.
+- `average_strategy` — `{infoset_key: [prob, ...]}` over the legal
+  actions at that infoset.
+
+**Honest caveats.** Only `default_tiny_subgame` (the river hand-vs-hand
+fixture in §3b) is production-validated against `noambrown/poker_solver`
+via `tests/test_river_diff.py`. Custom range-vs-range solves run
+bit-exact between the Python reference tier and the Rust backend on toy
+ranges, but a full standard-flop / standard-range solve has not yet been
+run to convergence on this engine (see §6 known limitations).
+
+**⚠️ Honest perf caveat (v1.x.y):** The `initial_hole_cards=()` "full range
+enumeration" path exists in the code (used by `test_river_diff.py` for
+diff-testing against Brown's solver), but is NOT practical for interactive
+analysis as of v1.1.0:
+
+- Empirically tested: 500 Rust iters + 2 bet sizes ran >10 minutes without
+  completing the post-solve `exploitability()` walk (~1M combo lossless tree).
+- Stripped-down test (1 bet size, no raises, 50 iters) still ran >5 minutes
+  without finishing.
+- The bottleneck is the Python-tier exploitability walk, not the Rust solve
+  itself; the solver gets the strategy, but the exploitability number takes
+  forever.
+
+**For interactive range-vs-range analysis, use the per-hand subgame pattern:**
+1. Solve the spot for each hand class you care about (16-169 solves)
+2. Aggregate per-hand frequencies weighted by combo counts
+3. Sum into a range-level frequency (the "Pluribus blueprint" pattern)
+
+This is the v1.3+ planned work; the per-hand path runs in seconds per hand.
+
+For now: build configs with FIXED hole cards (e.g., `(Card.from_str("As"), Card.from_str("Kh"))`)
+for ad-hoc spots, or use the push/fold charts (≤15 BB) and equity calculator
+(any street). The river subgame fixture solves in seconds.
+
+---
+
+## 6. Library mode (caching solves)
 
 For re-examining the same spots over time, library mode stores solve
 results in a local SQLite file. Default location is
@@ -205,15 +295,15 @@ description, so the same configuration always resolves to the same row.
 
 ---
 
-## 6. Known limitations (v1.0.0)
+## 7. Known limitations (v1.0.0)
 
 - **UI is mock mode.** Clicking **Solve** returns fixture data, not
   real strategies. Wait for PR 10b (expected v1.1) or use the CLI.
 - **No HUNL solving above 15 BB yet.** `--hunl-mode full` raises
-  `NotImplementedError`, pointing at PR 9. Working paths today: the
-  river subgame solver (`--hunl-mode tiny_subgame`) and ad-hoc postflop
-  subgames (`--hunl-mode postflop`). Short stacks: use the charts in
-  §3a.
+  `NotImplementedError`; full preflop is shipping in v1.1.0. Working
+  paths today: the river subgame solver (`--hunl-mode tiny_subgame`) and
+  ad-hoc postflop subgames (`--hunl-mode postflop`). Short stacks: use
+  the charts in §3a.
 - **Production-scale flop/turn solves not validated end-to-end.** The
   postflop solver works on toy ranges and is bit-exact between Python
   and Rust, but a full standard-flop / standard-range solve has not
@@ -228,12 +318,12 @@ description, so the same configuration always resolves to the same row.
 
 ---
 
-## 7. What's coming
+## 8. What's coming
 
 The three items most likely to matter:
 
 - **PR 9 — full HUNL preflop solve.** Replaces the `NotImplementedError`
-  above 15 BB. ~2 weeks.
+  above 15 BB. Shipping in v1.1.0.
 - **PR 10b — real solver bindings in the UI.** Mechanical swap of
   `ui/mock_solver.py` for the real `solve_hunl_postflop` (and PR 9's
   preflop solver). ~1 week, lands after PR 9. Makes the UI produce real
@@ -247,7 +337,7 @@ explicitly-approximate mode.
 
 ---
 
-## 8. Getting help
+## 9. Getting help
 
 - Bug reports / feature requests: GitHub issues.
 - Release notes: see [`CHANGELOG.md`](CHANGELOG.md) and the v1.0.0
