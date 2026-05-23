@@ -33,6 +33,7 @@ def solve(
     backend: str = "python",
     log_every: int | None = None,
     force_tree_solve: bool = False,
+    locked_strategies: Mapping[str, Sequence[float]] | None = None,
     **dcfr_kwargs: Any,
 ) -> SolveResult:
     """Solve `game` via DCFR.
@@ -49,8 +50,40 @@ def solve(
             always run the tree-builder solver. Power-user escape hatch per
             spec §13 risk row R4; useful for validation runs that need to
             cross-check chart values against a fresh DCFR solve.
+        locked_strategies: v1.4 node-locking — pin a player's strategy at a
+            specific infoset (or set of infosets) to a fixed probability
+            distribution over its legal actions. The other side updates
+            against the locked strategy as if it were part of the game's
+            structure. Keys are infoset keys (matching
+            ``game.infoset_key(state, player)``); values are probability
+            vectors aligned with the engine's ``legal_actions`` ordering at
+            that node. ``None`` and ``{}`` are bit-identical to the v1.3
+            behavior. Returned ``result.average_strategy`` contains the
+            locked vectors bit-identically (spec §2.2 / §3.3). When
+            ``locked_strategies`` is non-empty and the game is ≤15 BB HUNL
+            preflop, this function raises ``ValueError`` (the push/fold
+            chart short-circuit is non-trainable; use
+            ``force_tree_solve=True`` to override per spec Appendix #3).
         **dcfr_kwargs: forwarded to `DCFRSolver` (alpha, beta, gamma, seed).
     """
+    # v1.4 node-locking: refuse locks under the push/fold chart fast path
+    # (spec §Appendix #3). Chart values are precomputed and non-trainable;
+    # silently routing through them would ignore the lock. Power user can
+    # bypass via `force_tree_solve=True` (escape hatch already in the API
+    # for chart validation runs).
+    if (
+        locked_strategies
+        and not force_tree_solve
+        and isinstance(game, HUNLPoker)
+        and game.config.starting_street == Street.PREFLOP
+        and is_pushfold_mode(game.config.starting_stack, game.config.big_blind)
+    ):
+        raise ValueError(
+            "locked_strategies is incompatible with the push/fold chart "
+            "short-circuit (≤15 BB HUNL preflop). The chart is precomputed "
+            "and non-trainable; locks would be silently ignored. Pass "
+            "`force_tree_solve=True` to run the tree-builder solver instead."
+        )
     # PR 9 §6 canonical dispatch composition (PR 6 inherits):
     #   1. push/fold short-circuit (PR 3.5 — ≤15 BB HUNL preflop → chart)
     #   2. HUNL postflop Rust branch (PR 6 — backend == "rust", postflop)
@@ -81,7 +114,12 @@ def solve(
         and isinstance(game, HUNLPoker)
         and Street.FLOP <= game.config.starting_street < Street.SHOWDOWN
     ):
-        return _solve_rust(game, iterations, **dcfr_kwargs)
+        return _solve_rust(
+            game,
+            iterations,
+            locked_strategies=locked_strategies,
+            **dcfr_kwargs,
+        )
     # PR 5: HUNL postflop Python dispatch. See PR 9 spec §6 for the
     # canonical full dispatch composition; PR 5 adds the postflop branch
     # only; the push/fold short-circuit above takes precedence; the Rust
@@ -104,6 +142,7 @@ def solve(
             iterations=iterations,
             log_every=log_every,
             dcfr_kwargs=remainder or None,
+            locked_strategies=locked_strategies,
             **direct_kwargs,
         )
     # PR 9: HUNL preflop Rust dispatch (opt-in). Composes AFTER push/fold
@@ -116,7 +155,12 @@ def solve(
         and game.config.starting_street == Street.PREFLOP
         and game.config.initial_hole_cards
     ):
-        return _solve_rust(game, iterations, **dcfr_kwargs)
+        return _solve_rust(
+            game,
+            iterations,
+            locked_strategies=locked_strategies,
+            **dcfr_kwargs,
+        )
     # PR 9: HUNL preflop Python dispatch. Composes AFTER push/fold (≤15 BB
     # routed to the chart above) and AFTER the postflop branch (which only
     # fires for starting_street >= FLOP). Subgame-only — `initial_hole_cards`
@@ -146,16 +190,25 @@ def solve(
             iterations=iterations,
             log_every=log_every,
             dcfr_kwargs=remainder_pf or None,
+            locked_strategies=locked_strategies,
             **direct_kwargs_pf,
         )
     if backend == "rust":
-        return _solve_rust(game, iterations, **dcfr_kwargs)
+        return _solve_rust(
+            game,
+            iterations,
+            locked_strategies=locked_strategies,
+            **dcfr_kwargs,
+        )
     if backend != "python":
         raise NotImplementedError(
             f"Backend {backend!r} not yet wired in the Python tier."
         )
 
-    solver = DCFRSolver(game, **dcfr_kwargs)
+    solver_kwargs: dict[str, Any] = dict(dcfr_kwargs)
+    if locked_strategies is not None:
+        solver_kwargs["locked_strategies"] = locked_strategies
+    solver = DCFRSolver(game, **solver_kwargs)
     history: list[float] = []
     chunks = 1 if log_every is None else max(1, iterations // log_every)
     per_chunk = iterations if log_every is None else log_every
@@ -412,17 +465,37 @@ def _compute_exploitability_rust(
     return expl, float(out["game_value"])
 
 
-def _solve_rust(game: Game, iterations: int, **dcfr_kwargs: Any) -> SolveResult:
+def _solve_rust(
+    game: Game,
+    iterations: int,
+    *,
+    locked_strategies: Mapping[str, Sequence[float]] | None = None,
+    **dcfr_kwargs: Any,
+) -> SolveResult:
     """Run the Rust DCFR production tier and adapt its output to `SolveResult`.
 
     Routes Kuhn → `_rust.solve_kuhn`, Leduc → `_rust.solve_leduc`, HUNL
     postflop → `_rust.solve_hunl_postflop` (PR 6), HUNL preflop (subgame
     mode) → `_rust.solve_hunl_preflop` (PR 9). Other games raise
     `NotImplementedError` so callers fall back to the Python tier.
+
+    v1.4: ``locked_strategies`` threads through the PyO3 boundary as a
+    plain ``dict[str, list[float]]`` (PyO3 auto-marshals). The Rust DCFR
+    loop reads the lock map per infoset visit and skips both
+    ``regret_sum`` and ``strategy_sum`` updates for locked entries
+    (mirrors Python tier, spec §3.2).
     """
     alpha = float(dcfr_kwargs.get("alpha", 1.5))
     beta = float(dcfr_kwargs.get("beta", 0.0))
     gamma = float(dcfr_kwargs.get("gamma", 2.0))
+    # Marshal `locked_strategies` to the wire format the PyO3 binding
+    # accepts: `dict[str, list[float]]`. Validation against the engine's
+    # legal-action shape is lazy in the Rust loop (matches Python tier).
+    locked_wire: dict[str, list[float]] | None
+    if locked_strategies is None or len(locked_strategies) == 0:
+        locked_wire = None
+    else:
+        locked_wire = {k: [float(p) for p in v] for k, v in locked_strategies.items()}
 
     # PR 6/9: HUNL Rust branch. Composes AFTER the push/fold short-circuit
     # in `solve()` (which routes ≤15-BB preflop configs to the chart fast
@@ -454,6 +527,7 @@ def _solve_rust(game: Game, iterations: int, **dcfr_kwargs: Any) -> SolveResult:
                 gamma,
                 dcfr_kwargs.get("target_exploitability"),
                 dcfr_kwargs.get("seed"),
+                locked_wire,
             )
             avg_pf = {k: list(v) for k, v in raw_pf["average_strategy"].items()}
             # Use the equity-leaf wrapper for exploitability + game_value
@@ -505,6 +579,7 @@ def _solve_rust(game: Game, iterations: int, **dcfr_kwargs: Any) -> SolveResult:
             gamma,
             dcfr_kwargs.get("target_exploitability"),
             dcfr_kwargs.get("seed"),
+            locked_wire,
         )
         avg = {k: list(v) for k, v in raw["average_strategy"].items()}
         # PR 15 — recompute exploitability + game_value via the Rust port
@@ -537,7 +612,7 @@ def _solve_rust(game: Game, iterations: int, **dcfr_kwargs: Any) -> SolveResult:
             "Rust backend currently supports Kuhn, Leduc, and HUNL postflop. "
             f"Got {type(game).__name__}; use backend='python' instead."
         )
-    result = _rust_solve(int(iterations), alpha, beta, gamma)
+    result = _rust_solve(int(iterations), alpha, beta, gamma, locked_wire)
     avg = {k: list(v) for k, v in result["average_strategy"].items()}
     # Recompute exploitability and game value via the Python reference
     # functions so the diff test compares like-for-like. The strategies are

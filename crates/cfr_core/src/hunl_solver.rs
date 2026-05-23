@@ -114,17 +114,69 @@ struct HUNLDcfr {
     gamma: f64,
     iteration: u32,
     infosets: HashMap<String, InfosetData>,
+    /// v1.4 node-locking: map of infoset key → fixed probability vector.
+    /// Locked infosets bypass regret-matching; the unlocked side updates
+    /// against them as if they were part of the game's structure.
+    locked_strategies: HashMap<String, Vec<f64>>,
+    /// Cache of locked keys validated on first visit (length + non-
+    /// negative + sum-to-one).
+    validated_locked_keys: std::collections::HashSet<String>,
 }
 
 impl HUNLDcfr {
+    /// v1.3-compat constructor (no locks). Kept for symmetry with
+    /// `DCFRSolver::new`; the lock-aware variant is `with_locked`.
+    #[allow(dead_code)]
     fn new(alpha: f64, beta: f64, gamma: f64) -> Self {
+        Self::with_locked(alpha, beta, gamma, HashMap::new())
+    }
+
+    fn with_locked(
+        alpha: f64,
+        beta: f64,
+        gamma: f64,
+        locked_strategies: HashMap<String, Vec<f64>>,
+    ) -> Self {
         Self {
             alpha,
             beta,
             gamma,
             iteration: 0,
             infosets: HashMap::new(),
+            locked_strategies,
+            validated_locked_keys: std::collections::HashSet::new(),
         }
+    }
+
+    /// Validate a locked-strategy entry on first visit (mirrors
+    /// `dcfr.rs::DCFRSolver::validate_locked_entry`).
+    fn validate_locked_entry(
+        key: &str,
+        vec: &[f64],
+        num_actions: usize,
+    ) -> Result<(), String> {
+        if vec.len() != num_actions {
+            return Err(format!(
+                "locked_strategies['{key}'] has length {} but the engine \
+                 emits {num_actions} legal actions; usually means \
+                 bet_size_fractions changed since the lock was created.",
+                vec.len()
+            ));
+        }
+        if vec.iter().any(|&p| p < 0.0) {
+            return Err(format!(
+                "locked_strategies['{key}'] contains a negative entry \
+                 ({vec:?}); probabilities must be non-negative."
+            ));
+        }
+        let total: f64 = vec.iter().sum();
+        if (total - 1.0).abs() > 1e-9 {
+            return Err(format!(
+                "locked_strategies['{key}'] sums to {total}, not 1.0 \
+                 (tolerance 1e-9); normalize before passing in."
+            ));
+        }
+        Ok(())
     }
 
     /// Lazy DCFR discount catch-up (mirrors `dcfr.rs`'s `discount_info`
@@ -247,6 +299,39 @@ impl HUNLDcfr {
         let actions = state.legal_actions();
         let num_actions = actions.len();
 
+        // v1.4 node-locking: if this infoset is locked, READ the strategy
+        // from the lock map and SKIP both `update_regret_sum` and
+        // `update_strategy_sum`. The locked vector IS the average strategy
+        // at output time (spec §2.2 / §3.2). One HashMap lookup per
+        // infoset visit; allocation-free in the locked branch.
+        if let Some(locked_vec) = self.locked_strategies.get(&key) {
+            if !self.validated_locked_keys.contains(&key) {
+                if let Err(msg) =
+                    Self::validate_locked_entry(&key, locked_vec, num_actions)
+                {
+                    panic!("{msg}");
+                }
+                self.validated_locked_keys.insert(key.clone());
+            }
+            let strategy = locked_vec.clone();
+            let mut node_value = [0.0_f64; 2];
+            for (idx, &action) in actions.iter().enumerate() {
+                let mut new_reach = reach;
+                new_reach[player_idx] *= strategy[idx];
+                let v = self.cfr(
+                    &state.apply(action),
+                    abstraction,
+                    new_reach,
+                    iteration,
+                    sampling,
+                    rng,
+                );
+                node_value[0] += strategy[idx] * v[0];
+                node_value[1] += strategy[idx] * v[1];
+            }
+            return node_value;
+        }
+
         let info = self
             .infosets
             .entry(key.clone())
@@ -317,6 +402,12 @@ impl HUNLDcfr {
             };
             out.insert(key.clone(), probs);
         }
+        // v1.4 node-locking: merge locked vectors bit-identically into
+        // the output (spec §3.3). Locked infosets are never inserted into
+        // `self.infosets`, so this is the canonical passthrough.
+        for (key, vec) in &self.locked_strategies {
+            out.insert(key.clone(), vec.clone());
+        }
         out
     }
 }
@@ -355,6 +446,7 @@ pub fn solve_hunl_postflop(
     gamma: f64,
     _target_exploitability: Option<f64>,
     _seed: Option<u64>,
+    locked_strategies: Option<HashMap<String, Vec<f64>>>,
 ) -> Result<HUNLSolveOutput, HUNLSolveError> {
     validate_config(config)?;
 
@@ -379,7 +471,10 @@ pub fn solve_hunl_postflop(
         SamplingStrategy::Full
     };
     let solver_beta = effective_beta(sampling, beta);
-    let mut solver = HUNLDcfr::new(alpha, solver_beta, gamma);
+    // v1.4: route lock map into the solver. Empty/`None` is bit-identical
+    // to v1.3 (the lock branch in `cfr` short-circuits on `get` -> None).
+    let locked_map = locked_strategies.unwrap_or_default();
+    let mut solver = HUNLDcfr::with_locked(alpha, solver_beta, gamma, locked_map);
     // PCS RNG seeded from caller (default 7 if unset). Determinism: fixed
     // seed → fixed outcome trace → fixed `average_strategy` across runs.
     let mut rng = PcsRng::new(_seed.unwrap_or(7));

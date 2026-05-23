@@ -35,6 +35,7 @@ code copied.
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -292,6 +293,7 @@ def solve_hunl_preflop(
     allow_pushfold_range: bool = False,
     on_progress: OnProgressFn | None = None,
     should_stop: ShouldStopFn | None = None,
+    locked_strategies: Mapping[str, Sequence[float]] | None = None,
 ) -> PreflopSolveResult:
     """First end-to-end HUNL preflop solver in the Python reference tier.
 
@@ -362,6 +364,8 @@ def solve_hunl_preflop(
     extra_kwargs: dict[str, Any] = dict(dcfr_kwargs or {})
     if seed is not None and "seed" not in extra_kwargs:
         extra_kwargs["seed"] = seed
+    if locked_strategies is not None and len(locked_strategies) > 0:
+        extra_kwargs["locked_strategies"] = locked_strategies
     solver = DCFRSolver(game, **extra_kwargs)
     probe = MemoryProbe(solver, include_abstraction=abstraction)
 
