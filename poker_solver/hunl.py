@@ -138,10 +138,23 @@ class HUNLConfig:
                 raise ValueError(
                     "initial_board must be non-empty when starting_street > PREFLOP"
                 )
+            # PR 22 Fix B: graceful error on invalid asymmetric configs (was a
+            # Rust-side segfault path in v1.3.1 S4 retest).
+            c0, c1 = self.initial_contributions
+            if c0 < 0 or c1 < 0:
+                raise ValueError(
+                    f"initial_contributions must be non-negative; got ({c0}, {c1})"
+                )
+            if c0 > self.starting_stack or c1 > self.starting_stack:
+                raise ValueError(
+                    f"initial_contributions ({c0}, {c1}) must not exceed "
+                    f"starting_stack ({self.starting_stack}); a player cannot "
+                    f"have contributed more than their starting stack"
+                )
             # When initial_contributions != (0, 0) they must sum to initial_pot;
             # (0, 0) is accepted as a "dead money" pot whose chips don't count
             # toward either player's fold-loss accounting (subgame analysis).
-            contrib_sum = sum(self.initial_contributions)
+            contrib_sum = c0 + c1
             if contrib_sum != 0 and contrib_sum != self.initial_pot:
                 raise ValueError(
                     "initial_contributions must sum to initial_pot (or be (0,0) "
@@ -264,7 +277,30 @@ class HUNLPoker:
         stacks = (cfg.starting_stack, cfg.starting_stack)
         all_in_flags = (stacks[0] == 0, stacks[1] == 0)
         hole = cfg.initial_hole_cards
-        cur_player = -1 if any(all_in_flags) or not hole else 1
+        # PR 22 Fix A: honor asymmetric initial_contributions for facing-bet
+        # postflop subgames. Player with less in is facing a pending bet of
+        # `to_call = abs(c0 - c1)`; the other is the street aggressor. When
+        # contributions are symmetric (c0 == c1), we preserve the historical
+        # behavior exactly: to_call=0, street_aggressor=-1, cur_player=1 (BB).
+        c0, c1 = contributions
+        if c0 == c1:
+            to_call = 0
+            street_aggressor = -1
+            postflop_first_actor = 1
+        elif c0 < c1:
+            # P0 has less in; P0 faces the bet, P1 is the aggressor.
+            to_call = c1 - c0
+            street_aggressor = 1
+            postflop_first_actor = 0
+        else:
+            # P1 has less in; P1 faces the bet, P0 is the aggressor.
+            to_call = c0 - c1
+            street_aggressor = 0
+            postflop_first_actor = 1
+        # street_num_raises = 1 when there is a pending bet (the aggressor's
+        # bet counts as one raise for raise-cap accounting), 0 otherwise.
+        street_num_raises = 1 if to_call > 0 else 0
+        cur_player = -1 if any(all_in_flags) or not hole else postflop_first_actor
         return HUNLState(
             hole_cards=hole,
             board=tuple(cfg.initial_board),
@@ -272,9 +308,9 @@ class HUNLPoker:
             contributions=contributions,
             stacks=stacks,
             street_history=(),
-            street_aggressor=-1,
-            street_num_raises=0,
-            to_call=0,
+            street_aggressor=street_aggressor,
+            street_num_raises=street_num_raises,
+            to_call=to_call,
             cur_player=cur_player,
             folded=(False, False),
             all_in=all_in_flags,
@@ -468,6 +504,26 @@ class HUNLPoker:
             return replace(new_state, cur_player=-1)
         if self._street_complete(state, action, new_state):
             return self._begin_street_transition(new_state)
+        # PR 22: if the next-to-act player is already all-in (stack 0), they
+        # cannot act. This arises when an over-shove all-in is "called" by
+        # an opponent who is already all-in for less; the excess (uncalled)
+        # chips must be refunded to the over-shover and the street closes.
+        if new_all_in[1 - player]:
+            opp = 1 - player
+            refund = max(0, contributions[player] - contributions[opp])
+            if refund > 0:
+                contributions[player] -= refund
+                stacks[player] += refund
+                # Player came off the all-in (received refund of uncalled chips).
+                all_in[player] = stacks[player] == 0
+            new_state_to_runout = replace(
+                new_state,
+                contributions=(contributions[0], contributions[1]),
+                stacks=(stacks[0], stacks[1]),
+                all_in=(all_in[0], all_in[1]),
+                to_call=0,
+            )
+            return self._begin_street_transition(new_state_to_runout)
         return replace(new_state, cur_player=1 - player)
 
     def _apply_chance(self, state: HUNLState, action: Action) -> HUNLState:

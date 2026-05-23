@@ -322,10 +322,29 @@ impl HUNLState {
         let stacks = [config.starting_stack, config.starting_stack];
         let all_in = [stacks[0] == 0, stacks[1] == 0];
         let hole_cards = config.initial_hole_cards;
+        // PR 22 Fix A: mirror Python `HUNLPoker.initial_state` postflop branch
+        // — honor asymmetric `initial_contributions` so facing-bet subgames
+        // (MDF / c-bet response / bluff-catcher workflows) compose. Symmetric
+        // `[c, c]` continues to yield `to_call=0`, `street_aggressor=-1`,
+        // `street_num_raises=0`, `cur_player=1` (existing behavior unchanged).
+        let c0 = contributions[0];
+        let c1 = contributions[1];
+        let (to_call, street_aggressor, postflop_first_actor): (i32, i8, i8) = if c0
+            == c1
+        {
+            (0, -1, 1)
+        } else if c0 < c1 {
+            // P0 has less in; P0 faces the bet, P1 is the aggressor.
+            (c1 - c0, 1, 0)
+        } else {
+            // P1 has less in; P1 faces the bet, P0 is the aggressor.
+            (c0 - c1, 0, 1)
+        };
+        let street_num_raises: u8 = if to_call > 0 { 1 } else { 0 };
         let cur_player: i8 = if all_in[0] || all_in[1] || hole_cards.is_none() {
             -1
         } else {
-            1
+            postflop_first_actor
         };
         let initial_board = config.initial_board.clone();
         Self {
@@ -335,9 +354,9 @@ impl HUNLState {
             contributions,
             stacks,
             street_history: Vec::new(),
-            street_aggressor: -1,
-            street_num_raises: 0,
-            to_call: 0,
+            street_aggressor,
+            street_num_raises,
+            to_call,
             cur_player,
             folded: [false, false],
             all_in,
@@ -731,6 +750,23 @@ impl HUNLState {
             return new_state;
         }
         if self.street_complete(action, &new_state) {
+            return self.begin_street_transition(new_state);
+        }
+        // PR 22: if the next-to-act player is already all-in, they cannot act.
+        // Refund any uncalled excess (over-shove) to the aggressor and close
+        // the street. Reachable when an over-shove all-in is "called" by an
+        // opponent who is already all-in for less, via the asymmetric
+        // facing-bet branch.
+        let next_player = 1 - player;
+        if new_state.all_in[next_player] {
+            let opp = next_player;
+            let refund = (new_state.contributions[player] - new_state.contributions[opp]).max(0);
+            if refund > 0 {
+                new_state.contributions[player] -= refund;
+                new_state.stacks[player] += refund;
+                new_state.all_in[player] = new_state.stacks[player] == 0;
+            }
+            new_state.to_call = 0;
             return self.begin_street_transition(new_state);
         }
         new_state.cur_player = (1 - player) as i8;
