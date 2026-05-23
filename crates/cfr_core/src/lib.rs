@@ -386,6 +386,85 @@ fn compute_exploitability(
     Ok(dict.into())
 }
 
+/// PR 23 — Vector-form DCFR for true range-vs-range Nash solves, exposed
+/// to Python as `_rust.solve_range_vs_range_rust`.
+///
+/// Mirrors the `solve_hunl_postflop` PyO3 shape (JSON config in, dict out)
+/// but takes the `initial_hole_cards = None` path and walks Brown's
+/// vector-form CFR through the betting tree (see
+/// `crates/cfr_core/src/dcfr_vector.rs` module docs for the load-bearing
+/// references).
+///
+/// **v1.5.0 scope (spec §8 Q2):** postflop only — Flop / Turn / River with
+/// the full 1326-collapsed-by-board hand vector per player. Preflop and
+/// EMD bucketing are v1.5.1.
+///
+/// Arguments:
+///   - `config_json`: serialized `HUNLConfig` (Python emits via
+///     `_serialize_hunl_config` in `poker_solver/hunl.py`).
+///   - `iterations`, `alpha`, `beta`, `gamma`: DCFR hyperparameters.
+///
+/// Returns: dict with
+///   - `average_strategy`: `dict[str, list[float]]` — `<hole_string>|<key_suffix>`
+///     per-(infoset, hand) row, mirroring the lossless Python format
+///     `HUNLState.infoset_key(player, abstraction=None)`.
+///   - `iterations`, `wallclock_seconds`, `decision_node_count`,
+///     `hand_count_per_player`, `backend = "rust_vector"`.
+///
+/// Q3 default (spec §8): Python's `solve_range_vs_range` aggregator is NOT
+/// rewired to this entrypoint in v1.5.0 — the binding stands alone for
+/// downstream code (and v1.5.1) to wire in.
+#[pyfunction]
+#[pyo3(signature = (
+    config_json,
+    iterations,
+    alpha,
+    beta,
+    gamma,
+))]
+fn solve_range_vs_range_rust(
+    py: Python<'_>,
+    config_json: &str,
+    iterations: u32,
+    alpha: f64,
+    beta: f64,
+    gamma: f64,
+) -> PyResult<PyObject> {
+    let config: hunl::HUNLConfig = serde_json::from_str(config_json)
+        .map_err(|e| PyValueError::new_err(format!("invalid HUNLConfig JSON: {e}")))?;
+
+    let started = std::time::Instant::now();
+    // Release the GIL for the pure-Rust solve. CPU-bound, no Python callbacks.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        py.allow_threads(|| {
+            dcfr_vector::solve_range_vs_range_postflop(&config, iterations, alpha, beta, gamma)
+        })
+    }));
+    let result = result.map_err(|payload| PyValueError::new_err(panic_message(&payload)))?;
+    let out = result.map_err(PyValueError::new_err)?;
+    let wallclock_seconds = started.elapsed().as_secs_f64();
+
+    let dict = PyDict::new(py);
+    let strat = PyDict::new(py);
+    for (key, probs) in &out.average_strategy {
+        strat.set_item(key, probs.clone())?;
+    }
+    dict.set_item("average_strategy", strat)?;
+    dict.set_item("iterations", out.iterations)?;
+    dict.set_item("wallclock_seconds", wallclock_seconds)?;
+    dict.set_item("decision_node_count", out.decision_node_count)?;
+    dict.set_item("strategy_entry_count", out.strategy_entry_count)?;
+    dict.set_item(
+        "hand_count_per_player",
+        [
+            out.hand_count_per_player[0] as u32,
+            out.hand_count_per_player[1] as u32,
+        ],
+    )?;
+    dict.set_item("backend", "rust_vector")?;
+    Ok(dict.into())
+}
+
 #[pymodule]
 fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_version, m)?)?;
@@ -394,5 +473,6 @@ fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(solve_hunl_postflop, m)?)?;
     m.add_function(wrap_pyfunction!(solve_hunl_preflop, m)?)?;
     m.add_function(wrap_pyfunction!(compute_exploitability, m)?)?;
+    m.add_function(wrap_pyfunction!(solve_range_vs_range_rust, m)?)?;
     Ok(())
 }
