@@ -13,6 +13,31 @@ In-flight on feature branches; not yet merged to `main`.
 - v1.5/v2 follow-ups (Q3 exploitability slider reframe; range-based
   dealing; Rust callbacks; full-tree preflop).
 
+## [1.4.2] - 2026-05-23
+
+### Fixed — Docs honesty + test marker
+
+- `poker_solver/range_aggregator.py`: the `hero_player` parameter
+  docstring and the module-level docstring both described P0 as the
+  player making the "first postflop decision," which is backwards.
+  In HUNL, slot 0 is the SB seat (button) — first to act PREFLOP, last
+  to act POSTFLOP. Slot 1 is the BB seat — last to act PREFLOP, first
+  to act POSTFLOP. Both docstrings now state the position semantics
+  correctly and include a note on the BB-defending workflow
+  (`hero_player=1` AND `hero_range=bb_range` so the BB cards land in
+  the BB seat).
+- `tests/test_river_parity_vs_brown.py::test_river_parity_vs_brown`
+  now carries `@pytest.mark.slow` so it is excluded from the default
+  CI suite (which runs `-m 'not slow'`) and only executes when
+  developers explicitly opt in. Formalizes the opt-in posture that
+  was already implicit in CI config.
+
+### Honest framing
+
+- v1.4.2 PATCH: no API or behavior changes. Docs say what the code
+  has always done; the slow-test marker formalizes existing opt-in
+  posture. Safe drop-in upgrade.
+
 ## [1.4.1] - 2026-05-23
 
 ### Fixed — Asymmetric initial-contributions (PR 22)
