@@ -273,6 +273,15 @@ def _on_solve(state: AppState) -> None:
     ``state.runner.start(...)``. UI event handler is NOT awaited on solve
     completion (the worker runs in a background thread; progress polls via
     the ``ui.timer``).
+
+    PR 24a §3.2: when ``spot.rvr_mode`` is set, routes through the
+    range-vs-range aggregator. Hero / villain ranges are extracted via
+    ``Spot.to_rvr_call_args()`` which already handles the
+    ``hero_player``-driven swap.
+
+    PR 24a §3.7: ``state.runner._pending_target_expl`` (set by the run
+    panel's ``_wrap_solve``) is forwarded to ``SolveRunner.start`` so the
+    tier-slider value reaches the engine.
     """
     from nicegui import ui
 
@@ -300,17 +309,66 @@ def _on_solve(state: AppState) -> None:
             timeout=5000,
         )
 
-    game = HUNLPoker(config=config)
     iterations = state.current_solve.iterations if state.current_solve else 1000
     backend = state.current_solve.backend if state.current_solve else "python"
     log_every = state.current_solve.log_every if state.current_solve else 50
+    # PR 24a §3.7: pull the tier-slider target out of the
+    # runner-side pending attribute. None means "use the default".
+    target_exploitability = getattr(state.runner, "_pending_target_expl", None)
 
+    # ----- Range-vs-range branch (PR 24a §3.2) -----
+    if spot.rvr_mode:
+        try:
+            rvr_config, hero_range, villain_range = spot.to_rvr_call_args()
+        except ValueError as exc:
+            ui.notify(
+                f"Invalid RvR spot: {exc}",
+                type="negative",
+                position="top",
+            )
+            return
+        if not hero_range or not villain_range:
+            ui.notify(
+                "Range-vs-range solve needs at least one hand class per side.",
+                type="warning",
+                position="top",
+            )
+            return
+        rvr_game = HUNLPoker(config=rvr_config)
+        try:
+            state.runner.start(
+                rvr_game,
+                iterations=iterations,
+                log_every=log_every,
+                backend=backend,
+                target_exploitability=target_exploitability,
+                rvr_mode=True,
+                rvr_hero_range=hero_range,
+                rvr_villain_range=villain_range,
+                rvr_hero_player=spot.hero_player,
+            )
+        except RuntimeError as exc:
+            ui.notify(f"Solve already running: {exc}", type="warning", position="top")
+            return
+        state.current_solve = SolveSession(
+            spot=spot,
+            iterations=iterations,
+            log_every=log_every,
+            backend=backend,
+            started_at=state.runner.started_at,
+            runner=state.runner,
+        )
+        return
+
+    # ----- Concrete-vs-concrete branch (existing behaviour) -----
+    game = HUNLPoker(config=config)
     try:
         state.runner.start(
             game,
             iterations=iterations,
             log_every=log_every,
             backend=backend,
+            target_exploitability=target_exploitability,
         )
     except RuntimeError as exc:
         ui.notify(f"Solve already running: {exc}", type="warning", position="top")

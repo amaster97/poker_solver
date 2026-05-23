@@ -620,6 +620,12 @@ class SolveRunner:
         # ``per_class_strategy`` onto the 13x13 grid instead of the
         # point-pair concrete strategy.
         self.rvr_result: RangeVsRangeResult | None = None
+        # PR 24a §3.7: tier-slider plumbing. ``run_panel._wrap_solve``
+        # sets these on each click; ``ui/app.py:_on_solve`` reads them
+        # when calling ``start(...)``. Kept off ``SolveSession`` to avoid
+        # widening that dataclass for one PR.
+        self._pending_target_expl: float | None = None
+        self._pending_tier_label: str = "Standard"
         # ETA-extrapolation fields (smoke 20 / pr10a_spec.md §6 edge #1).
         # Defaults are `None` so `compute_eta()` returns `None` when the
         # runner is idle; the worker sets them once it starts.

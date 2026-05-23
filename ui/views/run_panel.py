@@ -56,6 +56,33 @@ _DEFAULT_ITERATIONS: int = 1000
 # log_every cadence: chart points per 1000 iters (~20 snapshots feels live).
 _DEFAULT_LOG_EVERY: int = 50
 
+# PR 24a exploitability-tier slider defaults. Each tier maps to a
+# recommended (iteration_count, target_mBB_per_pot) pair.
+#
+# Iteration counts are the **measured** convergence ladder per
+# ``docs/v1_5_slider_tier_defaults_measured.md`` §1: the DCFR + PR 8 SIMD
+# perf stack converges faster than the PLAN.md §1 industry-standard %
+# pot targets assumed, so the iteration ladder is the operative
+# wall-clock differentiator. The mBB/pot label is preserved as the
+# user-facing description (per PLAN.md §1 industry-standard guesses and
+# the measurement doc §8 Option A — under-promise / over-deliver).
+#
+# Per the no-extrapolate rule, the displayed % pot label is the
+# nominal target — measured performance is documented in the
+# measurement doc, NOT the slider tooltip.
+_TIER_DEFAULTS: tuple[tuple[str, int, float], ...] = (
+    # (label, iterations, target_mBB_per_pot)
+    ("Draft", 200, 10.0),     # 1% pot
+    ("Standard", 500, 5.0),   # 0.5% pot
+    ("Tight", 1000, 2.5),     # 0.25% pot
+    ("Library", 2000, 1.0),   # 0.1% pot
+)
+_TIER_LABELS: tuple[str, ...] = tuple(t[0] for t in _TIER_DEFAULTS)
+_TIER_INDEX: dict[str, tuple[int, float]] = {
+    label: (iters, target_mBB) for label, iters, target_mBB in _TIER_DEFAULTS
+}
+_DEFAULT_TIER: str = "Standard"
+
 
 def render(
     state: AppState,
@@ -135,39 +162,75 @@ def render(
             ).classes("w-20")
 
         ui.separator()
-        # ----- Iterations (Q3 LOCKED default 1000) + target-expl toggle -----
+        # ----- Exploitability tier slider (PR 24a §3.7) -----
+        # Replaces the single ``target-exploitability-input`` widget with a
+        # 4-tier picker plus a read-only target label. The numeric iter
+        # ladder (200/500/1000/2000) comes from the measurement pass at
+        # ``docs/v1_5_slider_tier_defaults_measured.md``; the % pot label
+        # is the PLAN.md §1 industry-standard nominal target. Both are
+        # honest framings (measurement doc §8 Option A).
+        ui.label("Exploitability tier").classes("font-medium")
         with ui.row().classes("gap-2 items-center"):
-            iters_input = ui.number(
-                label="Iterations",
-                value=_DEFAULT_ITERATIONS,
-                min=1,
-                max=10_000_000,
-                step=100,
-            ).classes("w-32")
-            iters_input.mark("iterations-input")
-            handles["iters_input"] = iters_input
-
-        with ui.row().classes("gap-2 items-center"):
-            target_toggle = ui.checkbox(
-                "Target exploitability mode (opt-in)",
-                value=False,
+            tier_slider = ui.toggle(
+                list(_TIER_LABELS),
+                value=_DEFAULT_TIER,
             )
-            target_toggle.mark("target-exploitability-toggle")
-            target_input = ui.number(
-                label="Target expl (mBB/pot)",
-                value=0.5,
-                step=0.1,
-                min=0.0,
-            ).classes("w-32")
-            target_input.mark("target-exploitability-input")
-            target_input.visible = False
+            tier_slider.mark("tier-slider")
+            ui.tooltip(
+                "Preliminary tier defaults; final measured values land in "
+                "PR 24b. Each tier sets both an iteration ceiling and a "
+                "target exploitability (mBB/pot). Higher tiers solve longer "
+                "for tighter convergence."
+            )
+            handles["tier_slider"] = tier_slider
 
-            def _on_target_toggle(e: Any) -> None:
-                target_input.visible = bool(e.value)
+        # Read-only label that reflects the active tier's iter/target pair.
+        # Updated in ``_on_tier_change`` and read by ``_wrap_solve``.
+        default_iters, default_mBB = _TIER_INDEX[_DEFAULT_TIER]
+        tier_target_label = ui.label(
+            _format_tier_label(_DEFAULT_TIER, default_iters, default_mBB)
+        ).classes("text-xs font-mono text-gray-600 dark:text-gray-400")
+        tier_target_label.mark("tier-target-label")
+        handles["tier_target_label"] = tier_target_label
 
-            target_toggle.on_value_change(_on_target_toggle)
-            handles["target_toggle"] = target_toggle
-            handles["target_input"] = target_input
+        # ----- Iterations override (custom; advanced users) -----
+        # Behind an expansion. Default value tracks the active tier; if
+        # the user overrides it explicitly, that overrides the tier's
+        # iteration count at solve time.
+        with ui.expansion(
+            "Custom (advanced)", icon="tune", value=False
+        ).classes("w-full").mark("custom-tier-expansion"):
+            with ui.row().classes("gap-2 items-center"):
+                iters_input = ui.number(
+                    label="Iterations",
+                    value=default_iters,
+                    min=1,
+                    max=10_000_000,
+                    step=100,
+                ).classes("w-32")
+                iters_input.mark("iterations-input")
+                handles["iters_input"] = iters_input
+
+                target_input = ui.number(
+                    label="Target expl (mBB/pot)",
+                    value=default_mBB,
+                    step=0.1,
+                    min=0.0,
+                ).classes("w-32")
+                target_input.mark("target-exploitability-input")
+                handles["target_input"] = target_input
+
+        # Wire tier slider to refresh the read-only label + custom defaults.
+        def _on_tier_change(e: Any) -> None:
+            tier = str(e.value) if e.value else _DEFAULT_TIER
+            iters, target_mBB = _TIER_INDEX.get(tier, _TIER_INDEX[_DEFAULT_TIER])
+            tier_target_label.set_text(_format_tier_label(tier, iters, target_mBB))
+            # Push the tier-recommended values into the custom inputs so a
+            # solve click without expanding "Custom" uses them.
+            iters_input.set_value(iters)
+            target_input.set_value(target_mBB)
+
+        tier_slider.on_value_change(_on_tier_change)
 
         ui.separator()
         # ----- Backend toggle (Python default) -----
@@ -177,6 +240,31 @@ def render(
         )
         backend_toggle.mark("backend-toggle")
         handles["backend_toggle"] = backend_toggle
+
+        # ----- Solve-mode toggle (RvR vs Concrete) (PR 24a §3.2) -----
+        # Routes through ``poker_solver.solve_range_vs_range`` when set to
+        # ``Range-vs-range``. The Pluribus-blueprint aggregator is slower
+        # per spot but honestly framed — see chart subtitle for the
+        # "blueprint approximation" caveat.
+        with ui.row().classes("gap-2 items-center"):
+            ui.label("Solve mode:").classes("text-xs")
+            rvr_toggle = ui.toggle(
+                ["Concrete", "Range-vs-range"],
+                value="Concrete",
+            )
+            rvr_toggle.mark("rvr-mode-toggle")
+            ui.tooltip(
+                "Slower aggregator pass; honest framing — see Plan C Stage C1."
+            )
+            handles["rvr_toggle"] = rvr_toggle
+
+            def _on_rvr_toggle(e: Any) -> None:
+                state.current_spot.rvr_mode = (
+                    str(e.value) == "Range-vs-range"
+                )
+                save_state()
+
+            rvr_toggle.on_value_change(_on_rvr_toggle)
 
         ui.separator()
         # ----- Solve / Pause / Stop -----
@@ -210,8 +298,13 @@ def render(
         ui.separator()
         # ----- Live exploitability chart (log Y by default) -----
         chart_log_state = {"log": state.prefs.chart_log_scale}
+        initial_quality_label = _chart_quality_label(state)
         chart = ui.echart(
-            options=_chart_options([], log_scale=chart_log_state["log"]),
+            options=_chart_options(
+                [],
+                log_scale=chart_log_state["log"],
+                quality_label=initial_quality_label,
+            ),
         ).classes("w-full h-48")
         chart.mark("expl-chart")
         handles["chart"] = chart
@@ -229,7 +322,7 @@ def render(
                 chart_log_state["log"] = bool(e.value)
                 state.prefs.chart_log_scale = chart_log_state["log"]
                 save_state()
-                _redraw_chart(handles)
+                _redraw_chart(handles, state=state)
 
             log_toggle.on_value_change(_on_log_toggle)
 
@@ -314,7 +407,7 @@ def refresh_progress(state: AppState) -> None:
 
     # Chart update.
     if runner.expl_history:
-        _redraw_chart(handles, history=runner.expl_history)
+        _redraw_chart(handles, history=runner.expl_history, state=state)
 
     # Status-error surface: when runner.status == "error", show notify.
     if status == "error" and not handles.get("_error_shown"):
@@ -329,29 +422,49 @@ def _wrap_solve(
     handles: dict[str, Any],
     on_solve: Callable[[], None],
 ) -> None:
-    """Read the iterations/backend toggles into state then invoke on_solve."""
+    """Read the tier slider / backend toggles into state then invoke on_solve.
+
+    PR 24a §3.7: the tier slider is the primary control; the ``Custom
+    (advanced)`` expansion's ``iters_input`` + ``target_input`` are
+    optional overrides. The tier slider's ``on_value_change`` already
+    pushes the tier-recommended values into those inputs, so reading
+    ``iters_input.value`` alone correctly captures both the tier default
+    and any user override. The same logic applies to ``target_input``.
+    """
     iters_input = handles.get("iters_input")
-    backend_toggle = handles.get("backend_toggle")
-    target_toggle = handles.get("target_toggle")
     target_input = handles.get("target_input")
-    iters = (
-        int(iters_input.value)
-        if iters_input is not None and iters_input.value
-        else _DEFAULT_ITERATIONS
+    backend_toggle = handles.get("backend_toggle")
+    tier_slider = handles.get("tier_slider")
+    # Resolve tier (for downstream logging only — the tier's iter +
+    # target values are mirrored to the custom inputs).
+    tier = (
+        str(tier_slider.value) if tier_slider is not None and tier_slider.value
+        else _DEFAULT_TIER
     )
+    tier_iters, tier_target_mBB = _TIER_INDEX.get(tier, _TIER_INDEX[_DEFAULT_TIER])
+    # Iterations: prefer the custom input (which the tier slider has
+    # already populated). Falling back to the tier default keeps the
+    # solve sane if the user manually cleared the input.
+    iters = tier_iters
+    if iters_input is not None and iters_input.value:
+        try:
+            iters = max(1, int(iters_input.value))
+        except (TypeError, ValueError):
+            iters = tier_iters
+    # Target exploitability: same mirroring pattern. Convert mBB/pot to
+    # the BB/pot units the engine consumes (target_exploitability is
+    # passed to ``solve_hunl_postflop`` which uses BB units; the slider's
+    # display unit is mBB/pot per PLAN.md §1).
+    target_mBB = tier_target_mBB
+    if target_input is not None and target_input.value is not None:
+        try:
+            target_mBB = float(target_input.value)
+        except (TypeError, ValueError):
+            target_mBB = tier_target_mBB
+    target_expl = target_mBB / 1000.0
     backend = (
         str(backend_toggle.value).lower() if backend_toggle is not None else "python"
     )
-    target_expl = None
-    if (
-        target_toggle is not None
-        and target_input is not None
-        and bool(target_toggle.value)
-    ):
-        try:
-            target_expl = float(target_input.value)
-        except (TypeError, ValueError):
-            target_expl = None
     state.current_solve = SolveSession(
         spot=state.current_spot,
         iterations=iters,
@@ -360,11 +473,15 @@ def _wrap_solve(
         started_at=time.time(),
         runner=state.runner,
     )
+    # Store the target_exploitability on a runner-side attribute so the
+    # caller's ``on_solve`` (ui/app.py:_on_solve) can pick it up. We
+    # avoid widening SolveSession's dataclass for a single PR 24a-scoped
+    # field; instead, the convention is "if state.runner._pending_target
+    # is set, use it on the next start". The default-None semantics fall
+    # through to existing behaviour.
+    state.runner._pending_target_expl = target_expl
+    state.runner._pending_tier_label = tier
     handles["backend_label"].set_text(f"Backend: {backend}")
-    # Note: target_expl passes through SolveSession then SolveRunner.start
-    # in the dedicated kwarg path; on_solve reads SolveSession + the
-    # current_spot to build the call.
-    _ = target_expl  # reserved; SolveRunner.start surfaces it
     on_solve()
 
 
@@ -415,19 +532,36 @@ def _set_cap(state: AppState, which: str, value: int) -> None:
 
 
 def _chart_options(
-    history: list[tuple[int, float]], *, log_scale: bool
+    history: list[tuple[int, float]],
+    *,
+    log_scale: bool,
+    quality_label: str = "",
 ) -> dict[str, Any]:
     """Build an echarts options dict for the exploitability curve.
 
     Y-axis log by default (Q3-adjacent: log Y scale per spec §13 decision 8).
+
+    PR 24a §3.4: ``quality_label`` is rendered as the echarts ``subtext``
+    field so the user can distinguish "true Nash" (concrete-vs-concrete +
+    Rust BR walk) from "blueprint approximation" (RvR aggregator). The
+    mapping is centralized in :func:`_chart_quality_label`.
+
+    Note: ``echarts`` top spacing is widened from 30 to 50 px when a
+    subtitle is present so the subtext doesn't overlap the plot area.
     """
     data = [[h[0], h[1]] for h in history]
+    title_block: dict[str, Any] = {
+        "text": "Exploitability (mBB/pot)",
+        "textStyle": {"fontSize": 12},
+        "left": "center",
+    }
+    grid_top = 30
+    if quality_label:
+        title_block["subtext"] = quality_label
+        title_block["subtextStyle"] = {"fontSize": 10, "color": "#888"}
+        grid_top = 50
     return {
-        "title": {
-            "text": "Exploitability (mBB/pot)",
-            "textStyle": {"fontSize": 12},
-            "left": "center",
-        },
+        "title": title_block,
         "xAxis": {
             "type": "value",
             "name": "iter",
@@ -447,27 +581,76 @@ def _chart_options(
                 "smooth": False,
             }
         ],
-        "grid": {"left": 50, "right": 20, "top": 30, "bottom": 40},
+        "grid": {"left": 50, "right": 20, "top": grid_top, "bottom": 40},
     }
+
+
+def _chart_quality_label(state: AppState) -> str:
+    """Return the chart subtitle for the current solve mode + backend.
+
+    Per PR 24a §3.4:
+      * concrete + Rust  -> "true Nash (Rust best-response walk, v1.3.2)"
+      * concrete + Python -> "true Nash (Python best-response walk, slow)"
+      * RvR (any backend) -> "blueprint approximation (Pluribus-style
+                              aggregator, v1.3.0; not Nash)"
+
+    Reads ``state.current_spot.rvr_mode`` and ``state.current_solve.backend``
+    (falling back to ``"python"`` when no solve has run yet — the chart
+    is rendered at page-open with empty history so this default must be
+    safe). The label is recomputed every ``_redraw_chart`` call.
+    """
+    rvr_mode = bool(getattr(state.current_spot, "rvr_mode", False))
+    if rvr_mode:
+        return (
+            "blueprint approximation "
+            "(Pluribus-style aggregator, v1.3.0; not Nash)"
+        )
+    backend = "python"
+    solve = state.current_solve
+    if solve is not None:
+        backend = str(getattr(solve, "backend", "python")).lower()
+    if backend == "rust":
+        return "true Nash (Rust best-response walk, v1.3.2)"
+    return "true Nash (Python best-response walk, slow)"
+
+
+def _format_tier_label(tier: str, iterations: int, target_mBB: float) -> str:
+    """Render the read-only tier-target label.
+
+    Format: ``"Standard: 500 iters / target 5.0 mBB/pot"``. The mBB/pot
+    is the nominal PLAN.md §1 target; the iters value is the measured
+    convergence ladder per ``docs/v1_5_slider_tier_defaults_measured.md``.
+    """
+    return f"{tier}: {iterations} iters / target {target_mBB:.1f} mBB/pot"
 
 
 def _redraw_chart(
     handles: dict[str, Any],
     *,
     history: list[tuple[int, float]] | None = None,
+    state: AppState | None = None,
 ) -> None:
-    """Re-render the chart with the current history + log/linear toggle."""
+    """Re-render the chart with the current history + log/linear toggle.
+
+    PR 24a §3.4: when ``state`` is supplied, the subtitle is recomputed via
+    :func:`_chart_quality_label`. Callers should pass it on every redraw
+    so the label flips correctly when ``spot.rvr_mode`` or ``backend``
+    changes mid-session.
+    """
     chart = handles.get("chart")
     if chart is None:
         return
     log_scale = bool(handles.get("chart_log", {"log": True})["log"])
     if history is None:
         history = []
+    quality_label = _chart_quality_label(state) if state is not None else ""
     # NiceGUI 3.x: `EChart.options` is read-only; mutate the underlying dict
     # in place rather than reassigning the property (which raises
     # AttributeError under 3.x). The chart's update_method='update_chart'
     # will pick up the mutation on the next tick.
-    new_options = _chart_options(history, log_scale=log_scale)
+    new_options = _chart_options(
+        history, log_scale=log_scale, quality_label=quality_label
+    )
     chart.options.clear()
     chart.options.update(new_options)
     try:
