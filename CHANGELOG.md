@@ -183,6 +183,24 @@ explicit migration paths for v2. PATCH and MINOR semantics resume from
   B: macOS packaging + signing pipeline; C: tests + batch_solve.py)
   plus a post-implementation audit pass.
 
+## [0.6.1] - 2026-05-23
+
+PR 10a.5: UI conformance follow-up to v0.6.0. Resolves the 5 fail + 7 xfail
+markers left over from PR 10a so the full UI smoke suite ships green (22/22
+passing, was 8/22). Migrates the four UI views from `.props("data-marker=…")`
+to NiceGUI 3.x `.mark()` with whitespace-tokenized multi-tag strings, wires
+the seven UX surfaces the PR 10a tests already expected (DISPLAY_PALETTE +
+cell colorization, blocker overlays, INPUT_PALETTE, expl-chart linear toggle,
+OOM bet-size reducer, push/fold switch stub, progress ETA + SolveRunner.
+compute_eta), and patches two NiceGUI 3.x bugs (FixturePreset repr leaking
+into the UI, EChart.options read-only mutation). Also includes an audit-found
+f-string bug fix in `spot_input.py` (push/fold toast was rendering literal
+`{bb}` instead of the stack size). Defers 2 should-fix items to a v0.6.2
+backlog: `run_panel` unbounded `bet_sizes_checked` prune (needs design
+decision on clamp policy) and `state.compute_eta` dead-code path (needs
+production ETA wiring + own audit pass). PATCH bump: zero behavior change in
+the solver / spec; UI-only polish; same public API.
+
 ## [0.6.0] - 2026-05-22
 
 PR 10a: NiceGUI browser UI scaffold backed by a mock solver layer. Ships
