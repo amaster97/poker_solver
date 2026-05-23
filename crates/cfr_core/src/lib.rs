@@ -481,6 +481,23 @@ fn solve_range_vs_range_rust(
             out.hand_count_per_player[1] as u32,
         ],
     )?;
+    // Per-street memory profile (spec §4). Surfaced as a nested dict so
+    // the Python diff test + downstream tooling can compare against the
+    // back-of-envelope estimates in the spec.
+    let memory_dict = PyDict::new(py);
+    memory_dict.set_item("total_bytes", out.memory_profile.total_bytes)?;
+    memory_dict.set_item("infoset_count", out.memory_profile.infoset_count)?;
+    let by_street = PyDict::new(py);
+    for (street, bytes) in &out.memory_profile.by_street {
+        by_street.set_item(street, *bytes)?;
+    }
+    memory_dict.set_item("bytes_by_street", by_street)?;
+    let count_by_street = PyDict::new(py);
+    for (street, count) in &out.memory_profile.infoset_count_by_street {
+        count_by_street.set_item(street, *count)?;
+    }
+    memory_dict.set_item("infoset_count_by_street", count_by_street)?;
+    dict.set_item("memory_profile", memory_dict)?;
     dict.set_item("backend", "rust_vector")?;
     Ok(dict.into())
 }

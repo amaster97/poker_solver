@@ -99,6 +99,32 @@ impl VectorInfosetData {
     }
 }
 
+/// Per-street memory profile for the vector-form solver.
+///
+/// Matches PR 5's per-street profiler pattern (Python side:
+/// `poker_solver.profiler`) so downstream tooling (`PLAN.md:29-30`'s
+/// per-street memory report) can consume the same dict shape. Reported
+/// numbers come from `VectorInfosetData::regret + strategy_sum` byte
+/// sizes; the surrounding overheads (HashMap nodes, tree nodes) are
+/// not included because they're dwarfed by the regret tables at scale.
+///
+/// `pub` so the differential test + the PyO3 binding's eventual
+/// memory-report PyDict export can read it directly.
+#[derive(Debug, Default)]
+pub struct VectorMemoryProfile {
+    /// Total bytes used for regret + strategy_sum across all infosets.
+    pub total_bytes: u64,
+    /// Per-street breakdown: keys are `"flop" | "turn" | "river" |
+    /// "showdown"`. Values are total bytes for infosets on that street.
+    pub by_street: std::collections::HashMap<String, u64>,
+    /// Total infoset count.
+    pub infoset_count: u32,
+    /// Per-street infoset count.
+    pub infoset_count_by_street: std::collections::HashMap<String, u32>,
+    /// Hand count per player (the vector dimension).
+    pub hand_count: [usize; 2],
+}
+
 /// Output of a vector-form DCFR solve.
 ///
 /// `per_hand_strategy` maps `(node_idx, hand_idx)` rows back to the
@@ -122,6 +148,9 @@ pub struct VectorSolveOutput {
     /// Per-player hand count (the vector dimension). Useful for the
     /// memory profiler and the Python diff test.
     pub hand_count_per_player: [usize; 2],
+    /// Per-street memory profile (spec §4). Populated after solve;
+    /// matches PR 5's per-street memory report pattern.
+    pub memory_profile: VectorMemoryProfile,
 }
 
 /// Vector-form DCFR solver — Brown's `Trainer` (MIT) restated in safe Rust.
@@ -774,13 +803,90 @@ pub fn solve_range_vs_range_postflop_with_hands(
         .filter(|s| s.is_some())
         .count() as u32;
     let strategy_entry_count = average_strategy.len() as u32;
+    let memory_profile = build_memory_profile(&solver, &tree, &eval_ctx);
     Ok(VectorSolveOutput {
         average_strategy,
         decision_node_count,
         strategy_entry_count,
         iterations,
         hand_count_per_player: eval_ctx.hand_count,
+        memory_profile,
     })
+}
+
+/// Compute the per-street memory profile for a finished solve.
+///
+/// Each infoset contributes
+/// `2 * (hand_count × action_count × 8 bytes)` (regret + strategy_sum,
+/// both `f64`). The street label is read from the decision node's
+/// `key_suffix` (`"|<board>|<street_token>|<history>"`) — the second
+/// `|`-separated token. Spec §4 expectations:
+///
+/// | Street | hand_count | num_actions | bytes / infoset |
+/// |---|---|---|---|
+/// | Flop (bucketed) | 256 | 14 | 57 KB |
+/// | Turn (bucketed) | 128 | 14 | 28 KB |
+/// | River (bucketed) | 64 | 14 | 14 KB |
+/// | Preflop (lossless) | 1326 | 14 | 297 KB |
+///
+/// v1.5.0 ships without bucketing engaged in the vector form so actual
+/// per-infoset memory is closer to `hand_count = C(deck-board, 2)`
+/// (1081 for river, 1128 for turn). The profile is honest about what
+/// it measures (see `feedback_no_extrapolate.md` in user memory: "no
+/// per-layer extrapolation without measurement").
+pub(crate) fn build_memory_profile(
+    solver: &VectorDCFR,
+    tree: &BettingTree,
+    ctx: &EvalContext,
+) -> VectorMemoryProfile {
+    let mut total_bytes: u64 = 0;
+    let mut by_street: std::collections::HashMap<String, u64> =
+        std::collections::HashMap::new();
+    let mut infoset_count_by_street: std::collections::HashMap<String, u32> =
+        std::collections::HashMap::new();
+    let mut infoset_count: u32 = 0;
+    for (node_idx, slot) in solver.infosets.iter().enumerate() {
+        let info = match slot {
+            Some(info) => info,
+            None => continue,
+        };
+        let node = &tree.nodes[node_idx];
+        let key_suffix = match node {
+            FlatNode::Decision { key_suffix, .. } => key_suffix.as_str(),
+            _ => continue,
+        };
+        // Parse the street token out of "|<board>|<street>|<history>".
+        let street = key_suffix
+            .split('|')
+            .nth(2)
+            .map(street_label_from_token)
+            .unwrap_or("unknown");
+        let bytes = (info.regret.len() as u64 + info.strategy_sum.len() as u64) * 8;
+        total_bytes += bytes;
+        *by_street.entry(street.to_string()).or_insert(0) += bytes;
+        *infoset_count_by_street.entry(street.to_string()).or_insert(0) += 1;
+        infoset_count += 1;
+    }
+    VectorMemoryProfile {
+        total_bytes,
+        by_street,
+        infoset_count,
+        infoset_count_by_street,
+        hand_count: ctx.hand_count,
+    }
+}
+
+/// Map a `HUNLState::infoset_key` street token to a human-readable name.
+/// Mirrors `Street::token()` in `hunl.rs:73-81`.
+fn street_label_from_token(token: &str) -> &'static str {
+    match token {
+        "p" => "preflop",
+        "f" => "flop",
+        "t" => "turn",
+        "r" => "river",
+        "s" => "showdown",
+        _ => "unknown",
+    }
 }
 
 #[cfg(test)]
