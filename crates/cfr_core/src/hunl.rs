@@ -420,13 +420,21 @@ impl HUNLState {
     ///
     /// `next_cur` matches the Python contract:
     ///   * preflop start → P0 (SB) acts first;
-    ///   * postflop start → P1 (BB) acts first.
+    ///   * postflop start (symmetric or P1 facing bet) → P1 (BB) acts first;
+    ///   * postflop start (P0 facing bet via PR 22 asymmetric branch) → P0.
     ///
     /// Caller is responsible for not handing in hole cards that conflict
     /// with `state.board`; the exploit walk's `enumerate_hole_card_pairs`
     /// already filters out board collisions.
     pub fn clone_with_hole_cards(&self, hole: [[u8; 2]; 2]) -> Self {
-        let next_cur: i8 = if self.street == Street::Preflop { 0 } else { 1 };
+        let next_cur: i8 = if self.street == Street::Preflop {
+            0
+        } else if self.contributions[0] < self.contributions[1] {
+            // PR 22: P0 faces the bet → acts first postflop.
+            0
+        } else {
+            1
+        };
         let mut next = self.clone();
         next.hole_cards = Some(hole);
         next.cur_player = next_cur;
