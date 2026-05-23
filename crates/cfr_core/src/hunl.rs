@@ -394,6 +394,26 @@ impl HUNLState {
         }
     }
 
+    /// PR 15 — given a chance-enum root state (`hole_cards = None`,
+    /// `cur_player = -1`), produce the child state with the supplied
+    /// hand-pair dealt to both players. Mirrors Python's
+    /// `_apply_chance(state, hole_action)` hole-card branch.
+    ///
+    /// `next_cur` matches the Python contract:
+    ///   * preflop start → P0 (SB) acts first;
+    ///   * postflop start → P1 (BB) acts first.
+    ///
+    /// Caller is responsible for not handing in hole cards that conflict
+    /// with `state.board`; the exploit walk's `enumerate_hole_card_pairs`
+    /// already filters out board collisions.
+    pub fn clone_with_hole_cards(&self, hole: [[u8; 2]; 2]) -> Self {
+        let next_cur: i8 = if self.street == Street::Preflop { 0 } else { 1 };
+        let mut next = self.clone();
+        next.hole_cards = Some(hole);
+        next.cur_player = next_cur;
+        next
+    }
+
     /// Build the action context consumed by `enumerate_legal_actions` and the
     /// bet/raise size helpers. `pub` so integration tests
     /// (`crates/cfr_core/tests/hunl_state_unit.rs`) and downstream consumers
