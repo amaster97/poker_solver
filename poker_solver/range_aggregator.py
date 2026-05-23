@@ -38,16 +38,19 @@ solves so callers can surface this).
 
 **Hero position (v1.3.1).** The ``hero_player`` parameter of
 :func:`solve_range_vs_range` controls which engine seat hero occupies:
-``0`` (default) places hero as the aggressor (P0, first postflop
-decision after BB acts); ``1`` places hero as the defender (P1, BB)
-so the returned frequencies are hero's defense (call / fold / raise)
-against villain's lead. The :class:`RangeVsRangeResult.position` field
-reflects this choice (``"aggressor"`` or ``"defender"``). v1.3.0
+``hero_player=0`` (default) places hero at slot 0 (SB seat / button —
+first to act PREFLOP, last to act POSTFLOP); this is the "aggressor"
+position and the result's ``position`` field reports ``"aggressor"``.
+``hero_player=1`` places hero at slot 1 (BB seat — last to act
+PREFLOP, first to act POSTFLOP); the result's ``position`` field
+reports ``"defender"`` and the returned frequencies are hero's
+defense (call / fold / raise) against villain's lead. v1.3.0
 hardcoded the aggressor seat and silently returned ~100% check on
 defending spots; the v1.3.1 fix is to expose ``hero_player`` so MDF /
-calling-frequency queries work. See
-``docs/pr16_prep/stress_test_results.md`` S4 for the bug that drove
-this patch.
+calling-frequency queries work. For a "BB defending" workflow, set
+``hero_player=1`` AND ``hero_range=bb_range`` so the BB-range cards
+land in the BB seat. See ``docs/pr16_prep/stress_test_results.md``
+S4 for the bug that drove this patch.
 """
 
 from __future__ import annotations
