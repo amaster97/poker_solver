@@ -21,8 +21,15 @@ locking. Goalpost: PioSolver-class HU local solving on a MacBook.
   source-build only.
 - **Python:** 3.9+. Rust toolchain required (stable channel).
 - **Working install path:** source build (`pip install -e .`).
-- **`.dmg` installer:** experimental — see Known issues. The CLI from
-  source is the recommended path today.
+- **`.dmg` installer:** experimental — see "macOS install (.dmg,
+  experimental)" below and Known issues. The CLI from source is the
+  recommended path today.
+
+### macOS install (.dmg, experimental)
+
+Apple silicon (arm64) only. See [`docs/dmg_install_guide.md`](docs/dmg_install_guide.md)
+for download, SHA256 verification, and first-launch Gatekeeper bypass
+instructions (adhoc-signed; not notarized).
 
 ## Install (from source)
 
