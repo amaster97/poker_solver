@@ -76,8 +76,8 @@ from poker_solver.action_abstraction import (
     ACTION_RAISE_150,
     ACTION_RAISE_200,
 )
-from poker_solver.card import RANK_VALUE, RANKS, Card
-from poker_solver.hunl import HUNLConfig, HUNLPoker, Street
+from poker_solver.card import RANK_VALUE, RANKS, Card, card_to_int
+from poker_solver.hunl import HUNLConfig, HUNLPoker, Street, _serialize_hunl_config
 from poker_solver.range import Range
 from poker_solver.solver import SolveResult, solve
 
@@ -776,9 +776,472 @@ def _aggregate_range(
     return {k: v / total_weight for k, v in weighted_sum.items()}
 
 
+# ---------------------------------------------------------------------------
+# v1.7.0 — true Nash vector-form entry point (PR 23 wrapper)
+# ---------------------------------------------------------------------------
+#
+# `solve_range_vs_range_nash` delegates to PR 23's
+# `_rust.solve_range_vs_range_rust` (vector-form CFR — Brown's algorithm bit
+# for bit). Distinct from the blueprint aggregator above because the
+# vector form solves the JOINT imperfect-information Nash of the supplied
+# ranges (hands as a vector dimension *inside* each infoset), not the
+# per-combo perfect-info aggregation pattern. See
+# ``docs/aggregator_vs_true_nash_explainer.md`` for the long-form
+# distinction.
+
+
+@dataclass
+class RangeVsRangeNashResult:
+    """True joint-Nash result for a range-vs-range query (vector-form CFR).
+
+    Distinct from :class:`RangeVsRangeResult` because the underlying
+    algorithm produces **per-(history, hand) strategies**, not per-class
+    aggregated frequencies. See ``docs/aggregator_vs_true_nash_explainer.md``
+    for the long-form distinction.
+
+    Attributes:
+        per_history_strategy: ``{infoset_key: list[float]}`` mapping
+            ``<hole_string>|<board>|<street>|<history>`` (the lossless
+            Python/Rust format from ``HUNLState.infoset_key`` and PR 23's
+            vector emit) to action-probability rows. Hand order within an
+            infoset matches the Rust binding's emit order (deterministic).
+        per_class_strategy: ``{hand_class: {action_label: probability}}``
+            — root-decision projection of ``per_history_strategy`` onto
+            hand classes (pair / suited / offsuit), combo-averaged. Provided
+            as a convenience for callers that want the 13x13-style display.
+            **Caveat:** This projection collapses the per-history mixing,
+            so it is informative but not a full strategy description; for
+            real Nash analysis use ``per_history_strategy``.
+        range_aggregate: Root-decision range-aggregated action frequencies
+            (combo-weighted across classes). Mirrors
+            :class:`RangeVsRangeResult.range_aggregate` for
+            source-compatibility.
+        exploitability: Computed via ``_rust.compute_exploitability`` on
+            the returned strategy when
+            ``compute_exploitability_at_end=True``. Float in chips/hand
+            (same units as ``_rust.compute_exploitability``); ``0.0`` when
+            the flag is False.
+        iterations: Iteration count actually run.
+        wall_clock_s: Total wall-clock for the solve (Rust solve only;
+            Python overhead excluded).
+        decision_node_count: Number of decision nodes in the betting tree
+            (from Rust dict).
+        hand_count_per_player: ``(p0_count, p1_count)`` of hands enumerated
+            after board-collision filtering.
+        memory_profile: Per-street memory breakdown from PR 23.
+        backend: ``"rust_vector"`` (literal; matches PR 23 emit).
+        position: ``"aggressor"`` if ``hero_player == 0`` else ``"defender"``
+            (mirrors :class:`RangeVsRangeResult.position` semantics).
+        warnings: Human-readable warnings (memory fallbacks, etc.).
+    """
+
+    per_history_strategy: dict[str, list[float]] = field(default_factory=dict)
+    per_class_strategy: dict[HandClass, dict[str, float]] = field(default_factory=dict)
+    range_aggregate: dict[str, float] = field(default_factory=dict)
+    exploitability: float = 0.0
+    iterations: int = 0
+    wall_clock_s: float = 0.0
+    decision_node_count: int = 0
+    hand_count_per_player: tuple[int, int] = (0, 0)
+    memory_profile: dict[str, Any] = field(default_factory=dict)
+    backend: str = "rust_vector"
+    position: str = "aggressor"
+    warnings: list[str] = field(default_factory=list)
+
+
+def _hole_string_rust(combo: tuple[Card, Card]) -> str:
+    """Render a ``(Card, Card)`` combo as Rust's ``hole_string`` format.
+
+    Mirrors ``crates/cfr_core/src/exploit.rs`` ``hole_string`` (referenced
+    by ``dcfr_vector.rs:660-661``): sort by ``card_to_int`` ascending,
+    then concatenate ``rank+suit`` characters. RANKS = ``"23456789TJQKA"``,
+    SUITS = ``"shdc"`` (suit 0 = s, 1 = h, 2 = d, 3 = c).
+    """
+    ranks = "23456789TJQKA"
+    suits = "shdc"
+
+    def fmt(card: Card) -> tuple[int, str]:
+        return card_to_int(card), f"{ranks[card.rank - 2]}{suits[card.suit]}"
+
+    a, b = fmt(combo[0]), fmt(combo[1])
+    if a[0] <= b[0]:
+        return a[1] + b[1]
+    return b[1] + a[1]
+
+
+def solve_range_vs_range_nash(
+    config_template: HUNLConfig,
+    hero_range: Sequence[HandClass] | Range,
+    villain_range: Sequence[HandClass] | Range,
+    *,
+    iterations: int = 500,
+    alpha: float = 1.5,
+    beta: float = 0.0,
+    gamma: float = 2.0,
+    hero_player: int = 0,
+    compute_exploitability_at_end: bool = True,
+    on_progress: Callable[[int, int, str], None] | None = None,
+) -> RangeVsRangeNashResult:
+    """Solve a range-vs-range query via PR 23's vector-form CFR (true Nash).
+
+    Unlike :func:`solve_range_vs_range` (which is the Pluribus-blueprint
+    aggregation workaround — see that function's docstring), this routine
+    solves the **joint imperfect-information Nash** of the supplied ranges
+    using vector-form CFR. Hands are a vector dimension *inside* each
+    infoset; the betting tree is walked once per iteration with full-range
+    bluff-catching dynamics.
+
+    Use this when you need:
+      - True bluff-catching frequencies (e.g. "should JJ fold facing pot
+        odds with 93% equity in this range?").
+      - Polarized bet-sizing driven by range composition.
+      - Brown / commercial-solver parity comparisons.
+
+    Use :func:`solve_range_vs_range` instead when you need:
+      - A fast 13x13 matrix Pluribus-style display.
+      - Per-combo correctness on dry boards where the value-vs-air dynamic
+        dominates and the approximation is tight.
+
+    See ``docs/aggregator_vs_true_nash_explainer.md`` for the long-form
+    distinction.
+
+    Args:
+        config_template: ``HUNLConfig`` with ``starting_street >= FLOP``.
+            ``initial_hole_cards`` is ignored — the vector form enumerates
+            hands per-player from the supplied ranges (after board-collision
+            filtering, identical to the aggregator's filter).
+        hero_range: hand-class labels or a ``Range``. Expanded to concrete
+            combos for the Rust binding's ``p0_holes`` / ``p1_holes`` args.
+        villain_range: Same.
+        iterations: DCFR iterations. Default 500 (one vector-form solve
+            replaces ~N per-class subsolves the aggregator runs).
+        alpha, beta, gamma: DCFR hyperparameters; PLAN.md defaults
+            (α=1.5 / β=0 / γ=2.0).
+        hero_player: ``0`` (aggressor) or ``1`` (defender). Controls which
+            player slot hero's range fills. The ``per_class_strategy``
+            projection extracts that player's first-decision strategy.
+        compute_exploitability_at_end: When True (default), invoke
+            ``_rust.compute_exploitability`` once on the converged strategy
+            and populate ``result.exploitability``. Skip when you only
+            need the strategy.
+        on_progress: Optional callback ``(iter_done, total_iter, phase_label)``.
+            Currently fires once at start and once at end (vector CFR does
+            not stream per-iteration progress in v1.7.0).
+
+    Returns:
+        ``RangeVsRangeNashResult`` with both the raw per-history strategy
+        AND a per-class projection for UI compatibility.
+
+    Raises:
+        ValueError: hero/villain range empty; ``hero_player`` not in
+            ``(0, 1)``; ``config_template.starting_street == PREFLOP``
+            (vector-form preflop deferred); both ranges have zero
+            board-feasible combos after collision filter.
+        ImportError: ``poker_solver._rust`` does not expose
+            ``solve_range_vs_range_rust`` (i.e. the Rust binding was not
+            built with the v1.5+ PR 23 entry).
+    """
+    # ---- Argument validation (mirrors aggregator at lines 309-320) -----
+    if hero_player not in (0, 1):
+        raise ValueError(
+            f"hero_player must be 0 (aggressor) or 1 (defender); got {hero_player!r}"
+        )
+    if config_template.starting_street == Street.PREFLOP:
+        raise ValueError(
+            "solve_range_vs_range_nash does not support preflop range-vs-range "
+            "(vector-form preflop deferred per dcfr_vector.rs:49-50). For "
+            "preflop subgame solves with fixed hole cards, call "
+            "solve_hunl_preflop directly."
+        )
+
+    hero_classes = _normalize_range(hero_range)
+    villain_classes = _normalize_range(villain_range)
+    if not hero_classes:
+        raise ValueError("hero_range is empty after parsing")
+    if not villain_classes:
+        raise ValueError("villain_range is empty after parsing")
+
+    # ---- Import the Rust binding lazily ---------------------------------
+    try:
+        from poker_solver import _rust as _rust_module
+    except ImportError as exc:  # pragma: no cover - defensive
+        raise ImportError(
+            "poker_solver._rust extension not available. "
+            "Rebuild via `maturin develop --release` from the project root."
+        ) from exc
+
+    rust_solve = getattr(_rust_module, "solve_range_vs_range_rust", None)
+    if rust_solve is None:
+        raise ImportError(
+            "poker_solver._rust.solve_range_vs_range_rust not found. "
+            "The Rust extension was built without PR 23's vector-form "
+            "entry (v1.5.0+). Rebuild via `maturin develop --release`."
+        )
+
+    # ---- Expand classes to concrete combos and board-filter -------------
+    board_cards = set(config_template.initial_board)
+
+    def _expand(classes: list[HandClass]) -> list[tuple[Card, Card]]:
+        out: list[tuple[Card, Card]] = []
+        for cls in classes:
+            combos = _enumerate_combos(cls)
+            for c in combos:
+                if c[0] in board_cards or c[1] in board_cards:
+                    continue
+                out.append(c)
+        return out
+
+    hero_combos = _expand(hero_classes)
+    villain_combos = _expand(villain_classes)
+    if not hero_combos:
+        raise ValueError(
+            f"hero_range has zero board-feasible combos on board "
+            f"{sorted(board_cards)!r}"
+        )
+    if not villain_combos:
+        raise ValueError(
+            f"villain_range has zero board-feasible combos on board "
+            f"{sorted(board_cards)!r}"
+        )
+
+    # ---- Build per-player hand lists for the Rust binding ---------------
+    # Convention: hero_player == 0 → hero combos become p0_holes; hero == 1
+    # → hero combos become p1_holes. The vector form enumerates both
+    # players' hand vectors from these lists.
+    if hero_player == 0:
+        p0_combos: list[tuple[Card, Card]] = hero_combos
+        p1_combos: list[tuple[Card, Card]] = villain_combos
+    else:
+        p0_combos = villain_combos
+        p1_combos = hero_combos
+
+    p0_holes: list[list[int]] = [
+        [card_to_int(c[0]), card_to_int(c[1])] for c in p0_combos
+    ]
+    p1_holes: list[list[int]] = [
+        [card_to_int(c[0]), card_to_int(c[1])] for c in p1_combos
+    ]
+
+    # ---- Serialize config + call Rust binding ---------------------------
+    # The vector form requires `initial_hole_cards = None` (per
+    # `dcfr_vector.rs:746-750`); strip whatever the caller passed.
+    nash_config = replace(config_template, initial_hole_cards=())
+    config_json = _serialize_hunl_config(nash_config)
+
+    if on_progress is not None:
+        on_progress(0, iterations, "solve_start")
+
+    t0 = time.perf_counter()
+    rust_out = rust_solve(
+        config_json,
+        iterations,
+        alpha,
+        beta,
+        gamma,
+        p0_holes,
+        p1_holes,
+    )
+    wall_clock_s = time.perf_counter() - t0
+
+    if on_progress is not None:
+        on_progress(iterations, iterations, "solve_done")
+
+    average_strategy: dict[str, list[float]] = dict(rust_out["average_strategy"])
+    hand_counts_raw = rust_out["hand_count_per_player"]
+    hand_count_per_player = (int(hand_counts_raw[0]), int(hand_counts_raw[1]))
+
+    # ---- Optional exploitability walk -----------------------------------
+    exploit_val = 0.0
+    if compute_exploitability_at_end and len(average_strategy) > 0:
+        compute_expl = getattr(_rust_module, "compute_exploitability", None)
+        if compute_expl is not None:
+            expl_out = compute_expl(config_json, average_strategy)
+            exploit_val = float(expl_out["exploitability"])
+
+    # ---- Per-history → per-class projection (hero's first decision) -----
+    # Walk from the initial state, following villain's modal action when
+    # villain acts first, until we reach hero_player's first decision.
+    # Look up the per-(hand, action) rows in average_strategy for each
+    # hero combo, then group by hand class and average within the class.
+    per_class, range_agg, action_labels = _project_to_hand_classes(
+        config=nash_config,
+        average_strategy=average_strategy,
+        hero_combos=hero_combos,
+        hero_classes=hero_classes,
+        hero_player=hero_player,
+    )
+
+    # ---- Memory profile unpack ------------------------------------------
+    memory_profile_raw = rust_out.get("memory_profile", {})
+    memory_profile: dict[str, Any] = {}
+    if isinstance(memory_profile_raw, dict):
+        # Defensive shallow copy — PyO3 returns a PyDict which is dict-like.
+        for k, v in memory_profile_raw.items():
+            memory_profile[str(k)] = v
+
+    warnings_list: list[str] = []
+    if not per_class:
+        warnings_list.append(
+            "per_class_strategy projection produced no entries — hero may "
+            "never reach a decision on the betting tree's modal villain "
+            "line, or every hero combo was filtered by board collision."
+        )
+
+    # `action_labels` is captured for future use; not stored on the
+    # result dataclass per spec §3.1 schema lock, but is reflected in
+    # `range_aggregate` / `per_class_strategy` keys.
+    del action_labels
+
+    return RangeVsRangeNashResult(
+        per_history_strategy=average_strategy,
+        per_class_strategy=per_class,
+        range_aggregate=range_agg,
+        exploitability=exploit_val,
+        iterations=int(rust_out.get("iterations", iterations)),
+        wall_clock_s=wall_clock_s,
+        decision_node_count=int(rust_out.get("decision_node_count", 0)),
+        hand_count_per_player=hand_count_per_player,
+        memory_profile=memory_profile,
+        backend=str(rust_out.get("backend", "rust_vector")),
+        position="aggressor" if hero_player == 0 else "defender",
+        warnings=warnings_list,
+    )
+
+
+def _project_to_hand_classes(
+    *,
+    config: HUNLConfig,
+    average_strategy: dict[str, list[float]],
+    hero_combos: list[tuple[Card, Card]],
+    hero_classes: list[HandClass],
+    hero_player: int,
+) -> tuple[dict[HandClass, dict[str, float]], dict[str, float], list[str]]:
+    """Project the per-(history, hand) Nash strategy onto hand classes.
+
+    Walks the betting tree from the initial state through the engine's
+    legal-action enumeration; when the current player is NOT hero, follow
+    villain's modal action under the solved strategy (matches the
+    aggregator's ``_extract_first_decision_freqs`` convention). When the
+    current player IS hero, look up the per-(hand, action) rows for every
+    hero combo at that infoset key, group by hand class, and average.
+
+    Returns ``(per_class_strategy, range_aggregate, action_labels)`` where
+    ``action_labels`` is the engine's labelling for the hero infoset.
+    """
+    # Need a placeholder hole-cards pair so HUNLPoker can walk the state
+    # machine. We use the first hero/villain combo each; the tree shape
+    # is hole-independent except for showdown utility, which we don't
+    # touch here.
+    game = HUNLPoker(config)
+    state = game.initial_state()
+    visited = 0
+    while visited < 100:
+        if game.is_terminal(state):
+            return {}, {}, []
+        cur = game.current_player(state)
+        if cur == -1:
+            outcomes = game.chance_outcomes(state)
+            if not outcomes:
+                return {}, {}, []
+            state = game.apply(state, outcomes[0][0])
+            visited += 1
+            continue
+        if cur != hero_player:
+            # Follow villain's modal action. Look up villain's strategy
+            # row for the FIRST villain combo (or any combo present in
+            # the strategy dict at this infoset — they should all see
+            # consistent decision sequencing).
+            actions = game.legal_actions(state)
+            key_suffix = _key_suffix_for_state(game, state, cur)
+            modal_idx = _modal_action_index(
+                average_strategy=average_strategy,
+                key_suffix=key_suffix,
+                player=cur,
+                action_count=len(actions),
+            )
+            state = game.apply(state, actions[modal_idx])
+            visited += 1
+            continue
+        # Hero's first decision — extract per-combo rows and project.
+        actions = game.legal_actions(state)
+        action_labels = [
+            _label_for_action(a, config.bet_size_fractions) for a in actions
+        ]
+        key_suffix = _key_suffix_for_state(game, state, hero_player)
+        per_class: dict[HandClass, list[list[float]]] = {}
+        for combo in hero_combos:
+            hole_str = _hole_string_rust(combo)
+            full_key = hole_str + key_suffix
+            row = average_strategy.get(full_key)
+            if row is None or len(row) != len(actions):
+                continue
+            cls = _combo_to_hand_class(combo)
+            per_class.setdefault(cls, []).append([float(x) for x in row])
+        # Average within class.
+        per_class_avg: dict[HandClass, dict[str, float]] = {}
+        for cls, rows in per_class.items():
+            if not rows:
+                continue
+            n = len(rows)
+            avg = [sum(r[i] for r in rows) / n for i in range(len(action_labels))]
+            per_class_avg[cls] = dict(zip(action_labels, avg, strict=True))
+        range_agg = _aggregate_range(per_class_avg, hero_classes)
+        return per_class_avg, range_agg, action_labels
+    return {}, {}, []
+
+
+def _key_suffix_for_state(game: HUNLPoker, state: Any, player: int) -> str:
+    """Compute the ``|<board>|<street>|<history>`` portion of an infoset key.
+
+    The Rust vector form emits keys as ``<hole>|<board>|<street>|<history>``.
+    Python's ``HUNLState.infoset_key`` produces the same lossless format
+    (per PR 23 spec). To look up rows for a specific hand we need the
+    suffix only — we strip the hole prefix from the engine's full key.
+    """
+    full = game.infoset_key(state, player)
+    idx = full.find("|")
+    if idx < 0:
+        return full
+    return full[idx:]
+
+
+def _modal_action_index(
+    *,
+    average_strategy: dict[str, list[float]],
+    key_suffix: str,
+    player: int,
+    action_count: int,
+) -> int:
+    """Pick the action index with the highest average probability at this
+    infoset, averaged across all hands present in the strategy dict for
+    this key suffix.
+
+    The strategy dict is keyed by ``<hole>|<key_suffix>``; we scan for
+    any entries ending in the supplied ``key_suffix`` and use them to
+    pick a modal action. Falls back to index 0 when no rows are found
+    (matches the aggregator's defensive fallback).
+    """
+    _ = player  # captured for future use; not part of the current logic.
+    sums = [0.0] * action_count
+    count = 0
+    for key, row in average_strategy.items():
+        if not key.endswith(key_suffix):
+            continue
+        if len(row) != action_count:
+            continue
+        for i in range(action_count):
+            sums[i] += row[i]
+        count += 1
+    if count == 0:
+        return 0
+    return max(range(action_count), key=lambda i: sums[i])
+
+
 __all__ = [
     "DEFAULT_TIME_BUDGET_PER_SOLVE_S",
     "HandClass",
+    "RangeVsRangeNashResult",
     "RangeVsRangeResult",
     "solve_range_vs_range",
+    "solve_range_vs_range_nash",
 ]

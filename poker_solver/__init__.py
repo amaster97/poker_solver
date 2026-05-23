@@ -93,8 +93,10 @@ from poker_solver.pushfold import (
 from poker_solver.range import Range, parse_range
 from poker_solver.range_aggregator import (
     DEFAULT_TIME_BUDGET_PER_SOLVE_S,
+    RangeVsRangeNashResult,
     RangeVsRangeResult,
     solve_range_vs_range,
+    solve_range_vs_range_nash,
 )
 from poker_solver.solver import SolveResult, exploitability, solve
 
@@ -123,8 +125,10 @@ __all__ = [
     "Range",
     "parse_range",
     "DEFAULT_TIME_BUDGET_PER_SOLVE_S",
+    "RangeVsRangeNashResult",
     "RangeVsRangeResult",
     "solve_range_vs_range",
+    "solve_range_vs_range_nash",
     "Game",
     "KuhnPoker",
     "KuhnState",
