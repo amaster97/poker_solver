@@ -57,12 +57,13 @@ In-flight on feature branches; not yet merged to `main`.
   vector-form CFR (v1.5.0+) (PR 32). Docs-only edit; no assertion or
   test-behavior change.
 
-### Deferred to v1.5.2
+### Deferred to v1.6.1
 - **Engine bundle** (PR 33 Python delegate + PR 34 off-by-one fix +
   PR 35 canonicalization + caveats) is HELD pending per-action
   divergence diagnosis on the v1.5.0 acceptance test. v1.5.1 ships
   docs/test rigor improvements WITHOUT engine changes; the empirical
-  Brown apples-to-apples claim remains v1.5.2's gating responsibility.
+  Brown apples-to-apples claim remains v1.6.1's gating responsibility
+  (engine bundle ships after v1.6.0 GUI per LEG 18 sequencing).
 
 ### Honest scope
 - PATCH bump: test infrastructure + comment edit. NO public API

@@ -1,103 +1,27 @@
 # poker_solver
 
 A Texas Hold'em equity calculator and GTO solver, written in Python with
-a Rust performance tier. Ships a hybrid exact / Monte Carlo equity
-engine, a hand evaluator, a range parser, closed-form-verified Kuhn and
-Leduc solvers, a Heads-Up No-Limit Hold'em (HUNL) game tree with a
-14-action abstraction, DCFR-generated push/fold charts for 2-15 BB
-short-stack play, and a full HUNL postflop solver (Python + Rust).
-Goalpost: PioSolver-class HU local solving on a MacBook.
-
-**v1.0.0 released 2026-05-22 — GA milestone.** HUNL postflop solver
-(Python + Rust tiers, ~24x speedup, bit-exact parity), mock-first
-NiceGUI scaffold, library mode, EMD card abstraction, external Nash
-validation vs `noambrown/poker_solver`, macOS `.dmg` packaging.
+a Rust performance tier. Ships an exact / Monte Carlo equity engine, a
+hand evaluator and range parser, closed-form-verified Kuhn and Leduc
+solvers, a Heads-Up No-Limit Hold'em (HUNL) game tree with a 14-action
+abstraction, DCFR-generated push/fold charts for 2-15 BB short stacks,
+HUNL preflop + postflop solvers (Python + Rust), a range-vs-range API
+in two forms (per-combo aggregator and joint vector-form CFR), and node
+locking. Goalpost: PioSolver-class HU local solving on a MacBook.
 
 ## Status
 
-- **Current version:** 1.0.0 (GA) — see [`CHANGELOG.md`](CHANGELOG.md).
+- **Latest tagged release:** v1.5.1 (test rigor + docs honesty). The
+  v1.0 → v1.5.1 trajectory is documented in [`CHANGELOG.md`](CHANGELOG.md).
 - **License:** MIT.
-- **Platform:** macOS / Linux; M-series MacBook is the primary target.
-- **Python:** 3.9+ (developed on 3.13). Rust toolchain required for the
-  perf-tier extension.
+- **Platforms:** macOS (Apple Silicon primary), Linux. Intel Mac is
+  source-build only.
+- **Python:** 3.9+. Rust toolchain required (stable channel).
+- **Working install path:** source build (`pip install -e .`).
+- **`.dmg` installer:** experimental — see Known issues. The CLI from
+  source is the recommended path today.
 
-## Features (v1.0)
-
-- **Texas Hold'em equity calculator** — hybrid exact-enumeration +
-  Monte Carlo. Concrete-hand spots with a small remaining-board space
-  auto-enumerate (e.g. 990 flop runouts in ~60 ms, no sampling noise);
-  ranges and large state spaces fall back to MC at 250k iterations
-  by default (~0.1% SE/hand). See `poker_solver/equity.py` and
-  `tests/test_equity.py`.
-- **Hand evaluator** — 5- to 7-card hands ranked into the nine standard
-  categories with kickers. See `poker_solver/evaluator.py` and
-  `tests/test_evaluator.py`.
-- **Range parser** — standard notation (`AA`, `AKs`, `AKo`, `KK-TT`,
-  `76s+`, comma-combined). See `poker_solver/range.py` and
-  `tests/test_range.py`.
-- **Kuhn poker solver** — DCFR (Brown & Sandholm 2019) converges to the
-  closed-form Nash value of -1/18. Python and Rust backends agree within
-  1e-4 per action probability. See `poker_solver/dcfr.py`,
-  `crates/cfr_core/src/kuhn.rs`, and `tests/test_dcfr_diff.py`.
-- **Leduc poker solver** — 288 infosets, multi-round with mid-game
-  chance node. Both Python and Rust backends ship and are diff-tested.
-  See `poker_solver/games.py::LeducPoker`, `crates/cfr_core/src/leduc.rs`,
-  and `tests/test_leduc_diff.py`.
-- **HUNL game state + tree** — full state machine across preflop, flop,
-  turn, river, showdown. 14-action abstraction (fold / check / call /
-  five bet sizes / five raise sizes / all-in) with raise caps
-  (preflop 4, postflop 3) and ante support. Integer-cents chip
-  arithmetic throughout. See `poker_solver/hunl.py`,
-  `poker_solver/action_abstraction.py`, and the 41 tests in
-  `tests/test_hunl_core.py`, `tests/test_hunl_tree.py`, and
-  `tests/test_action_abstraction.py`. A tiny river-only fixture
-  (`default_tiny_subgame()`) is solvable end-to-end today.
-- **Push/fold charts (2-15 BB)** — real DCFR-generated Nash equilibria
-  for every integer stack depth in `[2, 15]` BB, both `sb_jam` and
-  `bb_call_vs_jam` positions, 169 hand classes per cell.
-  Exploitability after convergence is essentially 0 BB/100 (spec target
-  was < 0.05). `solve()` auto-dispatches to chart lookup when the
-  effective stack lands in this range. See `poker_solver/pushfold.py`,
-  `poker_solver/charts/pushfold_v1.json`, and `tests/test_pushfold.py`.
-- **Card abstraction (EMD bucketing)** — imperfect-recall EMD-based
-  clustering at 256/128/64 buckets (flop/turn/river) with
-  suit-isomorphism canonicalization. Slumbot-MIT inspired kmeans++ +
-  1-D EMD via cumulative-sum closed form. Persisted as a `.npz`
-  artifact and looked up via `AbstractionRef`. See
-  `poker_solver/abstraction/`, the `poker-solver precompute-abstraction`
-  CLI, and `tests/test_abstraction_*.py`.
-- **HUNL postflop solver (Python + Rust)** — Python reference plus a
-  Rust port at ~24x speedup (3.88 s Rust vs 92.9 s Python at 100k iters,
-  Apple M4 Pro), bit-exact diff-tested on shared seeds. Selectable via
-  `--backend rust` on the `solve` CLI.
-- **External Nash validation** — river-spot diff test against
-  third-party `noambrown/poker_solver` (MIT) confirms strategy agreement
-  on shared seeds. See `tests/test_noambrown_diff.py`.
-- **NiceGUI app (mock-first scaffold)** — browser UI with 13x13 range
-  matrix, board picker, solver controls, and decision-tree browser.
-  Ships against a fixture-backed mock solver behind a banner; a future
-  PR swaps in the real solver via a single DI point.
-- **Library mode** — clean Python API surface (`equity`, `solve`,
-  `get_pushfold_strategy`, `HUNLPoker`, `HUNLConfig`, ...) so the engine
-  is usable as a dependency, not just a CLI.
-- **macOS packaging** — codesigned + notarized `.dmg` for M-series
-  MacBooks; double-click installs the CLI and launches the UI. See the
-  v1.0.0 release artifacts.
-
-## What's coming next
-
-**v1.x (post-GA):** spec-conformance audit (PR 10a.5), NEON SIMD +
-cache-blocking + public chance sampling (PR 8), HUNL preflop full solve
-(PR 9, replacing the push/fold lookup above 15 BB), mock -> real solver
-swap in the UI (PR 10b, one-line DI flip once PR 9 lands).
-
-**Stretch (post-v1):** 3-handed postflop (PR 12), explicitly approximate
-since CFR has no convergence guarantee for >=3 players.
-
-`poker-solver solve --game hunl --hunl-mode full` above 15 BB still
-raises `NotImplementedError` today, pointing at PR 9.
-
-## Installation
+## Install (from source)
 
 A Rust toolchain is required because the project ships a PyO3 extension
 module via `maturin`.
@@ -107,17 +31,30 @@ module via `maturin`.
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
 source "$HOME/.cargo/env"
 
-# Build and install (compiles both Python and Rust):
+# Build + install the Python package (compiles the Rust extension via maturin):
 pip install -e .
 
-# With dev tools (pytest, ruff, black, maturin):
+# Optional dev tools (pytest, ruff, black, maturin):
 pip install -e ".[dev]"
+
+# Optional UI extra (NiceGUI):
+pip install -e ".[ui]"
 ```
+
+If you prefer building the Rust crate standalone (e.g. for benchmarks
+that don't need the Python wrapper):
+
+```bash
+cargo build --release --manifest-path crates/cfr_core/Cargo.toml
+```
+
+After install, the `poker-solver` CLI is on your PATH, and the
+`poker_solver` package is importable from Python.
 
 ## Quick start
 
 ```bash
-# Equity — exact enumeration (auto, ~60 ms for a flop):
+# Equity — exact enumeration (auto, ~60 ms on a flop):
 poker-solver equity AhKh QdQc --board 2h7h9d
 
 # Equity — Monte Carlo (range vs hand, 250k iter default):
@@ -126,81 +63,109 @@ poker-solver equity "AA,KK,AKs" QdQc
 # Custom precision:
 poker-solver equity AhKh QdQc -n 1000000 --seed 0
 
-# Kuhn poker (closed-form Nash):
+# Kuhn poker — closed-form Nash value -1/18:
 poker-solver solve --game kuhn --iterations 50000 --backend python
 
-# Leduc poker (both backends; rust is faster):
+# Leduc poker — both backends; Rust is faster:
 poker-solver solve --game leduc --iterations 5000 --backend rust
 
-# HUNL tiny river subgame (deterministic AhKc vs QdQh, board As7c2dKh5s):
+# HUNL river subgame (deterministic AhKc vs QdQh on As 7c 2d Kh 5s):
 poker-solver solve --game hunl --hunl-mode tiny_subgame --iterations 500
 
-# Same river subgame on the Rust tier (v1.0.0):
+# Same river subgame on the Rust tier (~24x faster):
 poker-solver solve --game hunl --hunl-mode tiny_subgame --iterations 1000 --backend rust
 
-# Perf demo (M4 Pro, 10k iters): python ~9 s vs rust ~0.4 s (~23x).
-# Short-stack push/fold lookup is automatic inside solve():
-#   solve(HUNLPoker(HUNLConfig(starting_stack=1000)))  -> backend="pushfold"
-
-# Card abstraction — build once, reuse from --abstraction:
-poker-solver precompute-abstraction --bucket-counts 256,128,64 \
-    --mc-iterations 200000 --output abstraction_v1.npz
+# Ad-hoc postflop subgame from CLI flags (100 BB flop, custom bet menu):
+poker-solver solve --game hunl --hunl-mode postflop \
+    --board "As 7c 2d" --stacks 100 --bet-sizes "33,75,150" \
+    --iterations 500 --backend rust
 ```
 
-Python API:
+Short-stack push/fold is invoked through the library (no dedicated CLI
+subcommand — see Known issues):
+
+```python
+from poker_solver import get_pushfold_strategy, get_full_range
+print(get_pushfold_strategy(stack_bb=10, position="sb_jam", hand="AKs"))
+chart = get_full_range(stack_bb=8, position="bb_call_vs_jam")
+```
+
+A full HUNL config under 15 BB effective auto-routes to the chart
+through `solve()` — `result.backend == "pushfold"`.
+
+## Python API
+
+The engine is usable as a library — `equity`, `solve`,
+`solve_hunl_postflop`, `solve_hunl_preflop`, `solve_range_vs_range`,
+`get_pushfold_strategy`, `HUNLConfig`, `HUNLPoker`, `Range`, etc. are
+all importable from the top-level `poker_solver`. A few patterns beyond
+what the CLI exposes:
 
 ```python
 from poker_solver import (
-    HUNLConfig, HUNLPoker, default_tiny_subgame,
-    equity, get_full_range, get_pushfold_strategy,
-    KuhnPoker, parse_board, parse_hand, solve,
+    HUNLConfig, HUNLPoker, Range, solve, solve_range_vs_range,
 )
 
-# Equity (exact when feasible, MC otherwise):
-hands = [parse_hand("AhKh"), parse_hand("QdQc")]
-board = parse_board("2h7h9d")
-for i, r in enumerate(equity(hands, board=board)):
-    print(f"hand {i}: equity = {r.equity:.2%}")
+# Node locking — pin a strategy at one or more infosets:
+locked = {"<infoset_key>": [0.6, 0.4]}
+r = solve(HUNLPoker(HUNLConfig(starting_stack=10000)),
+          iterations=2000, locked_strategies=locked)
 
-# Kuhn -> closed-form Nash value -1/18:
-r = solve(KuhnPoker(), iterations=50_000, backend="rust")
-print(f"Game value: {r.game_value:+.6f}")
+# Range-vs-range (aggregator — fast per-combo blueprint pooling):
+hero, villain = Range("AA, KK, AKs"), Range("QQ-99, AKo")
+agg = solve_range_vs_range(template_config, hero, villain, iterations=200)
 
-# Push/fold lookup:
-freq = get_pushfold_strategy(stack_bb=10, position="sb_jam", hand="AKs")
-chart = get_full_range(stack_bb=8, position="bb_call_vs_jam")
-
-# Automatic short-stack dispatch (10 BB effective -> chart lookup):
-short = HUNLPoker(HUNLConfig(starting_stack=1000))
-r = solve(short, iterations=0)
-assert r.backend == "pushfold"
+# Range-vs-range (vector form — joint range Nash via the Rust tier):
+from poker_solver._rust import solve_range_vs_range_rust
+vec = solve_range_vs_range_rust(template_json, iters=200,
+                                alpha=1.5, beta=0.0, gamma=2.0,
+                                p0_holes=p0_combos, p1_holes=p1_combos)
 ```
 
-## UI (mock)
+The two range-vs-range entry points solve **different objects**:
+
+- **`solve_range_vs_range`** (aggregator;
+  `poker_solver/range_aggregator.py`) — runs a 1v1 full-info Nash per
+  (hero combo, villain combo) pair and pools by combo weight. Fast
+  (~5 s for a 14×14 query) but produces basket-selection strategies
+  that diverge from true range Nash on polarized spots.
+- **`solve_range_vs_range_rust`** (vector form, v1.5.0;
+  `crates/cfr_core/src/dcfr_vector.rs` via PyO3) — joint range Nash via
+  Brown's vector-form CFR. Structurally a port of `noambrown/poker_solver`'s
+  `cpp/src/trainer.cpp:138-240` per three independent code reviews,
+  but empirical acceptance against Brown's binary still diverges on
+  deep-cap facing-raise spots (33-pp on bottom-pair-Ace cells in the
+  A83 spot at `b1000r3000`); shallow-cap behavior matches — see Known
+  issues.
+
+See [`docs/aggregator_vs_true_nash_explainer.md`](docs/aggregator_vs_true_nash_explainer.md)
+for when to use which, and [`USAGE.md`](USAGE.md) for custom subgames,
+library mode, and asymmetric-contribution examples.
+
+## UI
 
 ```bash
-pip install -e .[ui]
+pip install -e ".[ui]"
 poker-solver ui
 ```
 
-Launches NiceGUI on `http://127.0.0.1:8080` with a 13x13 range matrix
-(Pio palette), board picker, solver controls with live exploitability,
-and a decision-tree browser. v1 ships behind a "Mock mode" banner
-(fixture-backed) which will downgrade to a subtle `(mock)` chip when a
-future PR swaps in the real solver.
+Launches NiceGUI on `http://127.0.0.1:8080` with a 13x13 range matrix,
+board picker, solver controls, and a decision-tree browser. As of
+v1.2.0 the UI drives the real solver. The packaged `.dmg` GUI does not
+currently work — see Known issues. **Use the CLI / Python API for now.**
 
 ## Architecture (brief)
 
-Two-tier with differential testing: the Python package `poker_solver/` is
-the readable spec / ground truth; the Rust crate `crates/cfr_core/`
+Two-tier with differential testing. The Python package `poker_solver/`
+is the readable spec / ground truth; the Rust crate `crates/cfr_core/`
 (exposed as `poker_solver._rust` via PyO3 / maturin) is the workhorse.
 Every algorithm lands in Python first, ports to Rust, and is gated by
-diff tests in `tests/test_dcfr_diff.py` / `tests/test_leduc_diff.py`
-before the Rust side is trusted. The algorithm is tabular DCFR
-(Brown & Sandholm 2019) with paper-default hyperparameters
-(alpha=1.5, beta=0, gamma=2.0). See [`DEVELOPER.md`](DEVELOPER.md) for
-the full architectural breakdown including the bucketed card
-abstraction and HUNL solver layout.
+diff tests (`tests/test_dcfr_diff.py`, `tests/test_leduc_diff.py`,
+`tests/test_preflop_diff.py`, `tests/test_range_vs_range_rust_diff.py`)
+before the Rust tier is trusted. The scalar algorithm is tabular DCFR
+(Brown & Sandholm 2019) with paper defaults (`alpha=1.5`, `beta=0`,
+`gamma=2.0`). See [`DEVELOPER.md`](DEVELOPER.md) for the full breakdown
+including the EMD card abstraction and HUNL solver layout.
 
 ## Development
 
@@ -209,69 +174,88 @@ abstraction and HUNL solver layout.
 pytest
 cargo test --all --manifest-path crates/cfr_core/Cargo.toml
 
-# Lint + format checks:
+# Lint + format:
 ruff check
 ruff format --check
 cargo clippy --all-targets --manifest-path crates/cfr_core/Cargo.toml -- -D warnings
 
-# Pre-PR check battery (tests, lint, types, diff-tests, license audit,
-# perf gate, references integrity; writes pr_report.md):
+# Pre-PR check battery (tests, lint, types, diff-tests, perf gate, etc.):
 sh scripts/check_pr.sh
 ```
 
-From PR 3 onward every change ships on its own feature branch
-(`pr-N-<title>`), passes `scripts/check_pr.sh`, and receives a fresh-agent
-audit reviewing the diff with no implementation context. Both
-`pr_report.md` and `audit_report.md` must be clean before merge.
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the PR-flow contract.
 
-## Contributing
+## Known issues
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the dev-environment, test,
-and PR-flow contract. The TL;DR: this is a personal solo build right
-now; the surface area is small and the design choices are deliberately
-load-bearing. Before opening a PR, please review the locked design
-decisions (algorithm, abstraction, stack range, license posture) and
-skim the per-PR audit pattern in `CONTRIBUTING.md`. Reference-first
-rule: every technical claim in this repo cites a paper, a competitor
-repo, or a test — please match the norm.
+- **`.dmg` installer does not currently work.** The v1.4.0 universal2
+  `.dmg` ships on the GitHub Release, but on a clean Mac the launched
+  app exits at `ui/app.py:362` with `ModuleNotFoundError: No module
+  named 'nicegui'` — the GUI dependency is missing from the PyInstaller
+  bundle. Additional defects: adhoc-signed (not notarized; Gatekeeper
+  will block by default), `arm64`-only despite the `universal2` label
+  (Intel Macs can't run it at all), and the `Info.plist` version stamp
+  reads `0.6.0` on a v1.4.0 tag. A packaging-fix PR is queued. **Use
+  the source install above** until that lands. Full smoke-verification
+  report: [`docs/dmg_v1_4_0_smoke_verification.md`](docs/dmg_v1_4_0_smoke_verification.md).
+- **v1.5.0 Brown acceptance test currently FAILS — v1.6.1 ship HELD
+  pending investigation.** Three code reviews verified the Rust
+  vector-form CFR is structurally faithful to Brown's
+  `cpp/src/trainer.cpp:138-240` (iteration loop, DCFR weights, regret
+  matching all match line-by-line). PR 40 confirmed and fixed three
+  test-side encoding artifacts (action-axis column ordering,
+  range-to-player-slot inversion, hand-string suit-order). **But a
+  v1.6.1-bundle dry-run (PR 33+34+35-A+B+40 composed, 2000-DCFR-iter)
+  empirically re-confirms a residual algorithmic divergence at
+  deep-cap facing-raise** (not yet localized): on A83 at `b1000r3000`,
+  bottom-pair-Ace cells (3sAs, 3cAc) show 33-pp call-frequency
+  divergence (Brown ~0.36, Rust ~0.69), max |diff| 0.33. K72 max
+  |diff| ~0.07. Affected: deep-cap facing-raise on bottom-pair-Ace at
+  large raise sizes. Unaffected: river single-shot, shallow-cap
+  postflop, push/fold preflop. The structural reviews verified CODE
+  matches Brown's algorithm; they did not verify the algorithm
+  produces Brown's empirical OUTPUT at this scenario — a
+  label-vs-semantics gap. Investigation in flight: best-response
+  cross-check + iteration sweep + facing-raise path re-read. Full
+  report: [`docs/v1_6_1_dryrun_verification.md`](docs/v1_6_1_dryrun_verification.md).
+- **`Range` fractional frequencies** (e.g. `AKo:0.25` syntax) not yet
+  supported — `Range` has no `weight` field. Set-membership operations
+  (`Range.diff`) work today; mixed-frequency operations require a
+  refactor scoped for v1.8+ (was previously tracked as W2.2).
+- **CLI ergonomic gaps.** Push/fold has no dedicated `poker-solver
+  pushfold` subcommand — use the library API in Quick start. River
+  hero-vs-range and parity-check CLI subcommands are also not wired;
+  drop to the Python API in the meantime.
+- **CLI batch-solve on chance-enum-at-root is slow.** The chance-node
+  enumeration at the betting-tree root dominates for full flop/turn
+  range-on-both-sides queries (W2.4). Mitigations: use the aggregator
+  for interactive queries; the vector-form path for production-grade
+  joint range Nash.
+- **`poker-solver batch-solve` CSV quoting.** Multi-value `bet_sizes`
+  cells must be CSV-quoted (`"0.5,1.0"`), and the CSV schema has no
+  hole-cards columns — use `solve_hunl_postflop` directly for
+  fixed-hole-card spots.
 
 ## References
 
-The CFR / DCFR / HUNL literature and competitor codebases are kept
-local under `references/` (the entire `references/` tree is gitignored)
-— papers are not redistributed, AGPL repos are read-only inspiration
-only, and MIT / Apache 2.0 repos are eligible for porting with
-attribution. To clone the public references for your own study:
+The CFR / DCFR / HUNL literature and competitor codebases live under
+`references/` (gitignored; not redistributed). To clone the public
+references for your own study: `sh scripts/setup_references.sh`.
 
-```bash
-sh scripts/setup_references.sh
-```
-
-Algorithmic foundations: DCFR (Brown & Sandholm 2019, *Solving
-Imperfect-Information Games via Discounted Regret Minimization*);
-CFR+ (Tammelin 2014); vanilla CFR (Zinkevich, Johanson, Bowling,
-Piccione 2007); Libratus (Brown & Sandholm 2017, *Science*); Pluribus
-(Brown & Sandholm 2019, *Science*). Correctness oracles: DeepMind's
-`open_spiel` (Apache 2.0) for Kuhn / Leduc; `noambrown/poker_solver`
-(MIT) for river spots (PR 7).
+Algorithmic foundations: DCFR (Brown & Sandholm 2019); CFR+ (Tammelin
+2014); vanilla CFR (Zinkevich, Johanson, Bowling, Piccione 2007);
+Libratus (Brown & Sandholm 2017); Pluribus (Brown & Sandholm 2019).
+Correctness oracles: DeepMind's `open_spiel` (Apache 2.0) for Kuhn /
+Leduc; `noambrown/poker_solver` (MIT) for river spots and the
+vector-form CFR algorithm port.
 
 ## Notation
 
 - Ranks: `2 3 4 5 6 7 8 9 T J Q K A`
 - Suits: `s h d c` (spades, hearts, diamonds, clubs)
-- A card is two characters, rank then suit (e.g. `Ah`, `Ts`, `2c`)
-- Range notation:
-  - `AA` — pocket aces
-  - `AKs` — ace-king suited
-  - `AKo` — ace-king offsuit
-  - `AK` — both suited and offsuit
-  - `KK-TT` — pocket pairs from KK down to TT
-  - `76s+` — suited connectors at or above 76s (76s, 87s, ..., KQs)
-  - Comma-combined: `AA, KK-TT, AKs, AKo`
+- Card: rank+suit, e.g. `Ah`, `Ts`, `2c`
+- Range: `AA`, `AKs`, `AKo`, `AK` (both), `KK-TT`, `76s+`, comma-combined
 
 ## License
 
-MIT. No AGPL-licensed code is copied into this repository; AGPL solvers
-in `references/` are read-only inspiration. See [`LICENSE`](LICENSE).
-</content>
-</invoke>
+MIT. AGPL solvers in `references/` are read-only inspiration; no
+AGPL-licensed code is copied in. See [`LICENSE`](LICENSE).
