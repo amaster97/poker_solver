@@ -13,6 +13,56 @@ In-flight on feature branches; not yet merged to `main`.
 - v1.5/v2 follow-ups (Q3 exploitability slider reframe; range-based
   dealing; Rust callbacks; full-tree preflop).
 
+## [1.5.1] - 2026-05-23
+
+### Added
+- **Equity test helper** (`tests/_equity_helpers.py`): rigorous
+  exact-enumeration wrapper exposing `equity_of`, `equity_vs_range`,
+  and `assert_equity_close` for use in persona acceptance tests.
+  Re-exported via `tests/conftest.py`. Prevents hand-waved equity
+  estimates from passing review (PR 37). NO source-code change;
+  tests/conftest scaffolding only.
+- **Memory profiler test rigor** (`tests/test_memory_profiler.py`):
+  4 new tests upgrade the return-non-empty-without-crashing baseline
+  to genuine external oracles: closed-form 3-action x 4-infoset toy
+  fixture, real-config closed-form calibration on a small river solve,
+  golden-file check, and structure-invariant check on per-street
+  partitioning (PR 36). NO source-code change; tests-only.
+
+### Changed
+- **Docs honesty** in `tests/test_river_diff_self_sanity.py`: replaced
+  the aspirational "<10s/spot on a typical dev box" comment (PR 7 /
+  v0.5.1, never empirically validated) with a rigorous framing that
+  references the river-parity timeout investigation
+  (`docs/river_parity_timeout_investigation_2026-05-23.md`) — the
+  canonical parity test takes >660s on the Python tier due to
+  chance-enum-at-root (1.6M hole-card combos per iter); the test was
+  marked `@pytest.mark.slow` in v1.4.2; a full runtime fix awaits
+  vector-form CFR (v1.5.0+) (PR 32). Docs-only edit; no assertion or
+  test-behavior change.
+
+### Deferred to v1.5.2
+- **Engine bundle** (PR 33 Python delegate + PR 34 off-by-one fix +
+  PR 35 canonicalization + caveats) is HELD pending per-action
+  divergence diagnosis on the v1.5.0 acceptance test. v1.5.1 ships
+  docs/test rigor improvements WITHOUT engine changes; the empirical
+  Brown apples-to-apples claim remains v1.5.2's gating responsibility.
+
+### Honest scope
+- PATCH bump: test infrastructure + comment edit. NO public API
+  change, NO behavior change, NO Rust source change, NO `poker_solver/`
+  source change.
+- v1.5.0 `_rust.cpython-313-darwin.so` is reused byte-identically
+  (no Rust rebuild). The shipped wheel reuses the v1.5.0 compiled
+  binding.
+- v1.5.0 acceptance-test status is unchanged. This release does NOT
+  address the per-action divergence observed in the v1.5.0 Brown
+  apples-to-apples acceptance test.
+- Smoke regression: `test_equity_helpers.py`,
+  `test_memory_profiler.py`, `test_range.py`, `test_dcfr_diff.py`,
+  `test_exploit_diff.py`, `test_range_vs_range_aggregator.py`,
+  `test_node_locking.py` — all 91 green (5 skipped, expected).
+
 ## [1.5.0] - 2026-05-23
 
 ### Added — Vector-form CFR + Brown apples-to-apples acceptance (PR 23 + PR 28)
