@@ -13,6 +13,47 @@ In-flight on feature branches; not yet merged to `main`.
 - v1.5/v2 follow-ups (Q3 exploitability slider reframe; range-based
   dealing; Rust callbacks; full-tree preflop).
 
+## [1.2.1] - 2026-05-23
+
+Patch release: build the Rust `_rust.cpython-313-darwin.so` as a
+**universal2** (arm64 + x86_64 lipo'd) binary so the v1.2.x macOS
+artifact loads under both Apple Silicon Python and x86_64 Python
+(e.g., pyenv-managed). Phase 1 persona test W1.4 caught `ImportError:
+incompatible architecture (have 'arm64', need 'x86_64')` when
+`poker-solver --backend rust` was invoked from x86_64 Python against
+the v1.2.0 arm64-only .so. PATCH bump: no public-API change; ships a
+new artifact `Poker-Solver-1.2.1-universal2.dmg` superseding
+`Poker-Solver-1.2.0-arm64.dmg`.
+
+### Fixed
+
+- **`scripts/build_macos_dmg.sh`** pre-flight now rejects a
+  single-arch `_rust.so` and instructs the operator to rebuild via
+  `maturin develop --release --target universal2-apple-darwin`. DMG
+  filename changes from `Poker-Solver-${VERSION}-arm64.dmg` to
+  `Poker-Solver-${VERSION}-universal2.dmg` to reflect the broadened
+  arch coverage.
+- **`docs/pr11_prep/leg4_repackage_now.md`** repackage runbook
+  documents the universal2 build step + a Step 1.5 verification that
+  the resulting .so reports both `arm64` and `x86_64` slices via
+  `file(1)`. Prerequisites add `rustup target add x86_64-apple-darwin
+  aarch64-apple-darwin` (one-time).
+- **`pyproject.toml`** `[tool.maturin]` section documents the
+  universal2 requirement (maturin does not accept `target` as a
+  pyproject field; CLI-only).
+
+### Tests
+
+- Local universal2 wheel build via `maturin build --release --target
+  universal2-apple-darwin -m crates/cfr_core/Cargo.toml` confirmed to
+  produce `Mach-O universal binary with 2 architectures: [x86_64:...]
+  [arm64:...]` per `file(1)`.
+
+### Affects
+
+- `ui+package` (packaging change; UI is downstream consumer of the
+  bundled .so).
+
 ## [1.2.0] - 2026-05-23
 
 PR 10b: replaces the PR 10a mock solver layer with **real-solver UI
@@ -1028,7 +1069,8 @@ and a hybrid exact / Monte Carlo equity calculator.
 - Initial Texas Hold'em equity solver scaffold (`023956e`):
   hand evaluator, Monte Carlo equity, range parser, CLI.
 
-[Unreleased]: https://github.com/amaster97/poker_solver/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/amaster97/poker_solver/compare/v1.2.1...HEAD
+[1.2.1]: https://github.com/amaster97/poker_solver/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/amaster97/poker_solver/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/amaster97/poker_solver/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/amaster97/poker_solver/compare/v1.0.0...v1.0.1
