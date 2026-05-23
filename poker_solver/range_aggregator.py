@@ -262,16 +262,26 @@ def solve_range_vs_range(
             improve accuracy at linear cost.
         villain_reps: Villain representative combos solved against per
             hero rep. Default 3.
-        hero_player: Which engine player slot hero occupies. ``0`` (the
-            aggressor / first-to-act postflop in HUNL) is the default and
-            matches v1.3.0's hardcoded behavior. Pass ``1`` to extract
-            hero's frequencies as the **defender** (e.g., for MDF /
-            calling-frequency queries against villain's lead). The
-            returned ``RangeVsRangeResult.position`` field reflects this
-            choice. **Caveat:** the per-hand solver picks villain's
-            most-likely opening action under the solved strategy, so
-            defender outputs reflect hero's response to villain's modal
-            line, not a true Nash defending mix.
+        hero_player: Engine slot for hero. ``hero_player=0`` (default)
+            places hero at slot 0 (SB seat / button — first to act
+            PREFLOP, last to act POSTFLOP); this is the "aggressor"
+            position and matches v1.3.0's hardcoded behavior. The
+            returned ``RangeVsRangeResult.position`` field reports
+            ``"aggressor"`` in this case. ``hero_player=1`` places hero
+            at slot 1 (BB seat — last to act PREFLOP, first to act
+            POSTFLOP); the result's ``position`` field reports
+            ``"defender"``. Use this for MDF / calling-frequency queries
+            against villain's lead.
+
+            NOTE: For a "BB defending" workflow, set ``hero_player=1``
+            AND ``hero_range=bb_range`` so the BB-range cards land in
+            the BB seat. Setting ``hero_player=0`` with BB-range cards
+            places them in the SB seat (wrong position).
+
+            **Caveat:** the per-hand solver picks villain's most-likely
+            opening action under the solved strategy, so defender
+            outputs reflect hero's response to villain's modal line,
+            not a true Nash defending mix.
         time_budget_per_solve_s: Hard wall-clock ceiling per subgame
             solve. Solves exceeding this are dropped with a warning;
             the aggregator continues with partial data.
