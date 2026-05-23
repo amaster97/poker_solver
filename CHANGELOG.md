@@ -10,7 +10,92 @@ and this project adheres to [semantic versioning](https://semver.org/spec/v2.0.0
 In-flight on feature branches; not yet merged to `main`.
 
 ### In progress
-- PR 10b mock→real solver swap; v1.5/v2 follow-ups.
+- v1.5/v2 follow-ups (Q3 exploitability slider reframe; range-based
+  dealing; Rust callbacks; full-tree preflop).
+
+## [1.2.0] - 2026-05-23
+
+PR 10b: replaces the PR 10a mock solver layer with **real-solver UI
+bindings**. The NiceGUI UI's `SolveRunner` now dispatches to the real
+engine via the canonical `solve()` ladder — push/fold short-circuit
+(≤15 BB) → HUNL postflop (`solve_hunl_postflop`) → HUNL preflop
+(`solve_hunl_preflop`). The yellow "Mock mode" banner is removed; the
+GUI now drives the same engine the CLI does. MINOR bump: replaces an
+internal UI-only seam (`ui/mock_solver.py` → real-solver imports)
+with no public-API change to `poker_solver` and zero behavior change
+to PRs 1-9. First complete v1.x release where the downloadable
+artifact (v1.0.0 .dmg) is superseded by a real-solver build (LEG 4
+.dmg repackage).
+
+### Changed
+
+- **`ui/state.py`** `SolveRunner` swaps the PR 10a `mock_solve`
+  import for the real solver entry points. Routing logic mirrors
+  `poker_solver.solver.solve` dispatch order: short-stack push/fold
+  → HUNL postflop solve → HUNL preflop solve. UI receives real
+  `HUNLSolveResult` objects with real `MemoryReport`, real game
+  values, and real exploitability traces.
+- **`poker_solver/preflop.py`** — `solve_hunl_preflop(...)` accepts
+  `on_progress: Callable[[ProgressEvent], None] | None = None` and
+  `should_stop: Callable[[], bool] | None = None` kwargs (the same
+  contract PR 5's `solve_hunl_postflop` already exposed). Callbacks
+  are invoked at natural DCFR chunk boundaries — best-effort, not
+  per-iteration, since the Rust preflop loop runs in a single PyO3
+  call per chunk. UI progress bar and Stop button now reflect real
+  preflop solve state instead of being no-ops.
+
+### Fixed
+
+- **`Spot.to_hunl_config()` hole-card + pot configuration**
+  (pre-existing bug surfaced by PR 10b real-solver wiring). The PR
+  10a mock layer accepted any `HUNLConfig`; the real solver does
+  not. Without the fix, the first real-solver smoke-test invocation
+  hung enumerating ~1.6M combos against an invalid config. The
+  patch corrects the hole-card / pot field population so
+  `Spot.to_hunl_config()` produces a HUNL config that the real
+  solver accepts on the first call.
+
+### Tests
+
+- **28/28 UI smoke tests** (`tests/test_ui_smoke.py`) green against
+  the real solver — same suite that ran against the mock in PR 10a
+  / v0.6.1, now passing without the mock layer.
+- **29/29 preflop tests** (`tests/test_preflop_python.py` +
+  `tests/test_preflop_diff.py`, non-slow) green — confirms the
+  `on_progress` / `should_stop` kwarg addition is additive and
+  preserves PR 9 contract.
+- **60/60 cargo tests** + **ruff clean** + **0 new mypy errors**
+  verified pre-cherry-pick on `pr-10b-ui-bindings`.
+
+### Out of scope (deferred)
+
+- **Q3 exploitability slider reframe** — PR 10a's iteration-count
+  slider stays as-is; the target-exploitability reframe Q-lock is
+  deferred to a v1.5 UX polish pass.
+- **Range-based dealing** in the UI — PR 9's point-hole-card-pairs
+  scope is unchanged here; UI range matrix input is still
+  display-only on the preflop solve path.
+- **Rust-side `on_progress` / `should_stop` callbacks** — the
+  current PyO3 preflop binding does not surface per-iteration
+  callbacks back to Python (chunk-boundary best-effort only). Full
+  Rust-side callback plumbing is deferred.
+- **Full-tree preflop** — same scope boundary as PR 9; subgame-only
+  with fixed initial hole cards.
+- **LEG 4 .dmg repackage** — the v1.0.0 macOS bundle still embeds
+  the mock UI; the LEG 4 follow-up rebuilds the .dmg against this
+  v1.2.0 commit so the downloadable artifact matches the public
+  release.
+
+### License compliance
+
+Zero new deps; NiceGUI optional extra unchanged; MIT-only posture
+preserved.
+
+### Internal
+
+- `__version__` bumped to `1.2.0` (MINOR — UI seam replacement,
+  additive kwarg on `solve_hunl_preflop`; no behavior change to
+  PRs 1-9 or v1 GA API).
 
 ## [1.1.0] - 2026-05-23
 
@@ -943,7 +1028,8 @@ and a hybrid exact / Monte Carlo equity calculator.
 - Initial Texas Hold'em equity solver scaffold (`023956e`):
   hand evaluator, Monte Carlo equity, range parser, CLI.
 
-[Unreleased]: https://github.com/amaster97/poker_solver/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/amaster97/poker_solver/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/amaster97/poker_solver/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/amaster97/poker_solver/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/amaster97/poker_solver/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/amaster97/poker_solver/releases/tag/v1.0.0
