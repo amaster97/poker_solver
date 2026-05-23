@@ -74,6 +74,11 @@ from poker_solver.library import (
     SpotDescription,
     SpotMetadata,
 )
+from poker_solver.preflop import (
+    PREFLOP_MAX_BB,
+    PreflopSolveResult,
+    solve_hunl_preflop,
+)
 from poker_solver.profiler.memory import MemoryProbe, MemoryReport, StreetMemoryEntry
 from poker_solver.pushfold import (
     PUSHFOLD_MAX_BB,
@@ -128,6 +133,9 @@ __all__ = [
     "Street",
     "default_tiny_subgame",
     "solve_hunl_postflop",
+    "PREFLOP_MAX_BB",
+    "PreflopSolveResult",
+    "solve_hunl_preflop",
     "MemoryProbe",
     "MemoryReport",
     "StreetMemoryEntry",

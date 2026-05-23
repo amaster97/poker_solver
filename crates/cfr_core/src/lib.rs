@@ -33,6 +33,9 @@ pub mod layout;
 pub mod pcs;
 pub mod simd;
 
+// PR 9 — HUNL preflop solver (subgame mode with equity-leaf substitution).
+pub mod preflop;
+
 use crate::solver::SolveOutput;
 
 /// Build-time version smoke check.
@@ -182,11 +185,75 @@ fn solve_hunl_postflop(
     Ok(dict.into())
 }
 
+/// PR 9 — HUNL preflop subgame solve entry exposed to Python as
+/// `_rust.solve_hunl_preflop`.
+///
+/// Mirrors the PR 6 `solve_hunl_postflop` shape: JSON-string config in,
+/// dict out. No abstraction parameter (preflop infoset keys are always
+/// lossless; PR 4 §7.12 decision).
+///
+/// Per D5, the returned `exploitability` and `game_value` are always `0.0`;
+/// the Python wrapper recomputes them from the average strategy via the
+/// reference tier (`poker_solver.solver.exploitability` / `_game_value`).
+#[pyfunction]
+#[pyo3(signature = (
+    config_json,
+    iterations,
+    alpha,
+    beta,
+    gamma,
+    target_exploitability=None,
+    seed=None,
+))]
+#[allow(clippy::too_many_arguments)]
+fn solve_hunl_preflop(
+    py: Python<'_>,
+    config_json: &str,
+    iterations: u32,
+    alpha: f64,
+    beta: f64,
+    gamma: f64,
+    target_exploitability: Option<f64>,
+    seed: Option<u64>,
+) -> PyResult<PyObject> {
+    let config: hunl::HUNLConfig = serde_json::from_str(config_json)
+        .map_err(|e| PyValueError::new_err(format!("invalid HUNLConfig JSON: {e}")))?;
+
+    // Release the GIL during the pure-Rust DCFR loop.
+    let result = py.allow_threads(|| {
+        preflop::solve_hunl_preflop(
+            &config,
+            iterations,
+            alpha,
+            beta,
+            gamma,
+            target_exploitability,
+            seed,
+        )
+    });
+    let out = result.map_err(|e| PyValueError::new_err(format!("{e}")))?;
+
+    let dict = PyDict::new(py);
+    let strat = PyDict::new(py);
+    for (key, probs) in &out.average_strategy {
+        strat.set_item(key, probs.clone())?;
+    }
+    dict.set_item("average_strategy", strat)?;
+    dict.set_item("exploitability", out.exploitability)?;
+    dict.set_item("game_value", out.game_value)?;
+    dict.set_item("iterations", out.iterations)?;
+    dict.set_item("wallclock_seconds", out.wallclock_seconds)?;
+    dict.set_item("infoset_count", out.infoset_count)?;
+    dict.set_item("backend", "rust")?;
+    Ok(dict.into())
+}
+
 #[pymodule]
 fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_version, m)?)?;
     m.add_function(wrap_pyfunction!(solve_kuhn, m)?)?;
     m.add_function(wrap_pyfunction!(solve_leduc, m)?)?;
     m.add_function(wrap_pyfunction!(solve_hunl_postflop, m)?)?;
+    m.add_function(wrap_pyfunction!(solve_hunl_preflop, m)?)?;
     Ok(())
 }

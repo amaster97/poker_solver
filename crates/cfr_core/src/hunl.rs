@@ -303,9 +303,15 @@ impl HUNLState {
     /// PyO3 boundary (Agent B's `solve_hunl_postflop`); this function will
     /// panic if called with `Street::Preflop`, matching that contract.
     pub fn initial(config: Arc<HUNLConfig>) -> Self {
+        // PR 9: preflop start is supported when `initial_hole_cards` is set
+        // (subgame mode). Without hole cards the chance enum is intractable
+        // (1.6M combos) and panics — that's the post-v1 follow-up.
+        if config.starting_street == Street::Preflop {
+            return Self::initial_preflop(config);
+        }
         assert!(
             config.starting_street as u8 >= Street::Flop as u8,
-            "HUNLState::initial: PR 6 supports postflop only; preflop is PR 9. \
+            "HUNLState::initial: postflop branch requires Street::Flop or later. \
              Got starting_street={:?}",
             config.starting_street
         );
@@ -332,6 +338,52 @@ impl HUNLState {
             street_aggressor: -1,
             street_num_raises: 0,
             to_call: 0,
+            cur_player,
+            folded: [false, false],
+            all_in,
+            config,
+            betting_tokens: Vec::new(),
+            current_street_tokens: Vec::new(),
+            pending_board_deals: 0,
+        }
+    }
+
+    /// PR 9 — initial state for HUNL preflop subgame mode.
+    ///
+    /// Mirrors `HUNLPoker.initial_state` Python preflop branch in
+    /// `poker_solver/hunl.py`: post the blinds + ante, set contributions,
+    /// to_call = BB - SB, BB is the "aggressor" via the forced blind, SB
+    /// (= P0) acts first.
+    ///
+    /// Requires `config.initial_hole_cards` to be set (full-tree mode with
+    /// the 1.6M-combo chance enum is a post-v1 follow-up). `solve_hunl_preflop`
+    /// validates this upstream; if reached without hole cards, cur_player is
+    /// set to -1 (chance) which would then try to enumerate hole cards and
+    /// panic in the caller.
+    fn initial_preflop(config: Arc<HUNLConfig>) -> Self {
+        let sb_contrib = config.small_blind + config.ante;
+        let bb_contrib = config.big_blind + config.ante;
+        let contributions = [sb_contrib, bb_contrib];
+        let stacks = [
+            config.starting_stack - sb_contrib,
+            config.starting_stack - bb_contrib,
+        ];
+        let to_call = bb_contrib - sb_contrib;
+        let hole_cards = config.initial_hole_cards;
+        let cur_player: i8 = if hole_cards.is_some() { 0 } else { -1 };
+        let all_in = [stacks[0] == 0, stacks[1] == 0];
+        Self {
+            hole_cards,
+            board: Vec::new(),
+            street: Street::Preflop,
+            contributions,
+            stacks,
+            street_history: Vec::new(),
+            // BB is the "aggressor" by virtue of posting the BB blind;
+            // street_num_raises = 1 (the BB blind counts as one raise).
+            street_aggressor: 1,
+            street_num_raises: 1,
+            to_call,
             cur_player,
             folded: [false, false],
             all_in,
@@ -868,21 +920,33 @@ fn min_raise_increment(ctx: &ActionContext) -> i32 {
     ctx.to_call.max(ctx.big_blind)
 }
 
-/// Banker's-rounding parity with Python's `round()` on positive integers:
-/// Python uses round-half-to-even, but for **positive** `x.5` (where x is a
-/// non-negative integer multiple of 0.5) and the values we deal with here
-/// (`pot * fraction` where `pot >= 0` and `fraction >= 0`), the simpler
-/// `(x + 0.5).floor()` matches Python's `int(round(...))` byte-for-byte —
-/// this is the convention PR 6 spec §9 #3 + risk-mitigation §10 locks in to
-/// avoid Rust's `f64::round()` round-half-away-from-zero drift on the few
-/// half-integer corner cases. We assume `value >= 0.0` here (true for all
-/// pot-fraction products in HUNL).
+/// Banker's-rounding parity with Python's `round()` on non-negative values.
+///
+/// Python's `round()` uses **round-half-to-even** (banker's rounding):
+///   - `round(0.5) == 0` (0 is even)
+///   - `round(1.5) == 2` (2 is even)
+///   - `round(2.5) == 2` (2 is even)
+///   - `round(622.5) == 622` (622 is even)
+///   - `round(623.5) == 624` (624 is even)
+///
+/// PR 9 update: the prior implementation `(value + 0.5).floor()` was
+/// **round-half-up**, NOT banker's. That matched Python for ~half of all
+/// `.5` cases by accident (odd integer parts) but disagreed for the other
+/// half (even integer parts), causing the PR 6 test
+/// `test_hunl_flop_dry_3size_diff_python_vs_rust_tiny_abstraction` to fail
+/// and the PR 9 diff test `test_diff_aa_vs_kk_100bb` to fail on
+/// preflop spots with `r1037` (Python) vs `r1038` (Rust) token drift.
+///
+/// We use Rust's `f64::round_ties_even()` (stable Rust 1.77+) which
+/// implements true banker's rounding directly. Falls back to a manual
+/// implementation if MSRV constrains us.
 fn python_round_positive(value: f64) -> i32 {
     debug_assert!(
         value >= 0.0,
         "python_round_positive expects non-negative input"
     );
-    (value + 0.5).floor() as i32
+    // round_ties_even is stable since Rust 1.77.
+    value.round_ties_even() as i32
 }
 
 fn bet_amount_for_fraction(ctx: &ActionContext, fraction: f64) -> i32 {
@@ -1174,17 +1238,20 @@ mod tests {
 
     #[test]
     fn banker_rounding_matches_python_on_half() {
-        // Python's round() rounds-half-to-even (so round(0.5) = 0,
-        // round(1.5) = 2). But for POSITIVE pot * fraction products,
-        // PR 6 spec §9 #3 + risk-mitigation §10 lock the parity convention
-        // as `(x + 0.5).floor()` (round-half-up, matching int(round(x))
-        // behavior for the values we deal with). Verify that convention.
-        // This is the convention; differences from Python's true bankers
-        // rounding on tied halves are documented and bounded by the diff
-        // test tolerance (1e-3 / 5e-3).
-        assert_eq!(python_round_positive(0.5), 1);
+        // Python's `round()` is banker's rounding (round-half-to-even).
+        // PR 9 aligned `python_round_positive` with that convention via
+        // `f64::round_ties_even`, fixing the prior round-half-up drift that
+        // surfaced as `r1037` (Python) vs `r1038` (Rust) on `.5` ties.
+        // The asserts below verify the new behavior matches Python exactly
+        // on the canonical half-integer inputs:
+        //   round(0.5) == 0  (0 is even)
+        //   round(1.5) == 2  (2 is even)
+        //   round(2.5) == 2  (2 is even)
+        //   round(3.5) == 4  (4 is even)
+        assert_eq!(python_round_positive(0.5), 0);
         assert_eq!(python_round_positive(1.5), 2);
-        assert_eq!(python_round_positive(2.5), 3);
+        assert_eq!(python_round_positive(2.5), 2);
+        assert_eq!(python_round_positive(3.5), 4);
         assert_eq!(python_round_positive(0.4999), 0);
         assert_eq!(python_round_positive(0.6), 1);
         // Standard non-half cases match Python's round() exactly.
