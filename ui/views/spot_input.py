@@ -194,10 +194,39 @@ def _remove_board_card(state: AppState, card: Card) -> None:
 
 
 def _render_ranges_section(state: AppState) -> None:
-    """Player tabs + matrix-input + string-mode toggle + live preview."""
+    """Player tabs + matrix-input + string-mode toggle + live preview.
+
+    PR 24a §3.3: emits a ``hero-seat-toggle`` between the section label
+    and the player tabs so the user can flip ``state.current_spot.hero_player``
+    between 0 (aggressor / SB / BTN) and 1 (defender / BB). This is
+    plumbed through ``Spot.to_rvr_call_args()`` (hero_range / villain_range
+    swap) and ``range_matrix.render`` (front-tab row swap so hero is
+    always on the visible front tab in RvR mode).
+    """
     from nicegui import ui
 
     ui.label("Ranges").classes("font-medium")
+
+    # PR 24a §3.3 — hero seat toggle.
+    with ui.row().classes("gap-2 items-center"):
+        ui.label("Hero seat:").classes("text-xs")
+        hero_toggle = ui.toggle(
+            ["P0", "P1"],
+            value=f"P{state.current_spot.hero_player}",
+        )
+        hero_toggle.mark("hero-seat-toggle")
+        ui.tooltip(
+            "Affects which side is shown as Hero in the matrix display and "
+            "which hero_player is passed to the range aggregator (matters "
+            "for MDF/defender queries)."
+        )
+
+        def _on_hero_change(e: Any) -> None:
+            val = str(e.value) if e.value else "P0"
+            state.current_spot.hero_player = 1 if val == "P1" else 0
+            save_state()
+
+        hero_toggle.on_value_change(_on_hero_change)
 
     with ui.tabs() as tabs:
         tab_p0 = ui.tab("P0 (SB / BTN)")

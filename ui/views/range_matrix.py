@@ -579,7 +579,31 @@ def _current_tree_snapshot(state: AppState) -> object:
 
 
 def _selected_player(state: AppState) -> int:
-    return int(_safe_state_field(state, "selected_player_for_input", 0))
+    """Return the player slot whose strategy the matrix is rendering.
+
+    PR 24a §3.3 + §8 Q5: the orchestrator flagged this function as a
+    suspected non-consumer of ``spot.hero_player``. Verified on
+    `2026-05-23` against the v1.5.0 baseline: the original implementation
+    read ``state.selected_player_for_input`` exclusively, ignoring
+    ``spot.hero_player`` entirely. Status: **swap was NOT present in
+    main; this commit adds it.**
+
+    Semantics with the new ``spot.hero_player`` field:
+      * ``hero_player == 0`` (default): no change; the matrix renders
+        ``selected_player_for_input`` directly. This preserves backward
+        compatibility for every test and existing workflow.
+      * ``hero_player == 1``: swap. ``selected_player_for_input == 0``
+        now resolves to ``1`` (hero on front tab); ``== 1`` resolves to
+        ``0`` (villain on the back tab). This matches the v1.3.1
+        ``range_aggregator.solve_range_vs_range`` ``hero_player=1``
+        convention where hero is the BB / defender.
+    """
+    selected = int(_safe_state_field(state, "selected_player_for_input", 0))
+    spot = _safe_state_field(state, "current_spot", None)
+    hero_player = int(getattr(spot, "hero_player", 0)) if spot is not None else 0
+    if hero_player == 1:
+        return 1 - selected
+    return selected
 
 
 def _show_frequencies(state: AppState) -> bool:
@@ -604,6 +628,16 @@ def _build_grid_summaries(
 ) -> list[_CellRender]:
     range_ = _current_range(state, _selected_player(state))
     board = _current_board(state)
+
+    # PR 24a §3.2: range-vs-range overlay. When the active solve produced
+    # a ``RangeVsRangeResult``, render its per-class strategy directly
+    # instead of the concrete-vs-concrete infoset-keyed strategy. The
+    # ``hero_player`` swap (above) already routes ``_selected_player`` to
+    # hero's slot so the front-tab view stays "hero's strategy."
+    rvr_result = _current_rvr_result(state)
+    if rvr_result is not None:
+        return _build_grid_summaries_rvr(state, rvr_result, range_, board)
+
     strategy = _current_strategy(state)
     snapshot = _current_tree_snapshot(state)
     tree_node_id = str(_safe_state_field(state, "current_tree_node_id", "root"))
@@ -623,6 +657,114 @@ def _build_grid_summaries(
                     tree_node_id=tree_node_id,
                     game_state_snapshot=snapshot,
                 )
+            rendered.append(
+                _CellRender(hand_class=hand_class, row=row, col=col, summary=summary)
+            )
+    return rendered
+
+
+def _current_rvr_result(state: AppState) -> object | None:
+    """Return the active ``RangeVsRangeResult`` if the spot is in RvR mode.
+
+    Returns None when:
+      * the spot is in concrete-vs-concrete mode (``rvr_mode == False``);
+      * no solve has run yet (``runner.rvr_result is None``);
+      * the solver is mid-run (``runner.status != 'done'``); we wait for
+        the final aggregator output rather than show partial per-class
+        data which would jump around as classes complete.
+
+    Duck-typed return so the renderer doesn't need to import the
+    dataclass directly (keeps module import surface narrow).
+    """
+    spot = _safe_state_field(state, "current_spot", None)
+    if spot is None or not getattr(spot, "rvr_mode", False):
+        return None
+    runner = _safe_state_field(state, "runner", None)
+    if runner is None:
+        return None
+    rvr = getattr(runner, "rvr_result", None)
+    if rvr is None:
+        return None
+    status = getattr(runner, "status", "idle")
+    # Only show once the aggregator has finished — partial mid-class
+    # outputs would render half the matrix in stale state.
+    if status not in ("done", "stopped"):
+        return None
+    return rvr
+
+
+def _build_grid_summaries_rvr(
+    state: AppState,
+    rvr_result: object,
+    range_: RangeWithFreqs | None,
+    board: Sequence[Card],
+) -> list[_CellRender]:
+    """Render the matrix from a ``RangeVsRangeResult`` (PR 24a §3.2).
+
+    Maps each hand class to an aggregated fold/call/raise summary by
+    bucketing the per-class action labels back onto the RYG triple per
+    the Pio convention:
+      * ``fold``                -> fold bucket
+      * ``check`` / ``call``    -> call bucket
+      * ``bet_*`` / ``raise_*`` / ``all_in`` -> raise bucket
+    Classes absent from ``per_class_strategy`` (skipped by the
+    aggregator due to all-combo board-block) render as ``blocked``.
+    Classes absent from the hero range render as ``out_of_range``.
+    """
+    per_class = getattr(rvr_result, "per_class_strategy", {})
+    board_cards = set(board)
+    rendered: list[_CellRender] = []
+    for row in range(13):
+        for col in range(13):
+            hand_class = _hand_class_at(row, col)
+            summary = CellSummary()
+            in_range = False
+            if range_ is not None:
+                combos = _enumerate_combos_for_class(hand_class)
+                for combo in combos:
+                    if range_.frequency_of(combo) > 0.0:
+                        in_range = True
+                        if combo[0] in board_cards or combo[1] in board_cards:
+                            summary.has_blocker = True
+                        else:
+                            summary.combo_count += 1
+            if not in_range:
+                summary.empty = True
+                summary.out_of_range = True
+                rendered.append(
+                    _CellRender(
+                        hand_class=hand_class, row=row, col=col, summary=summary
+                    )
+                )
+                continue
+            freqs = per_class.get(hand_class)
+            if freqs is None:
+                # Class was in the input range but the aggregator
+                # skipped it (every combo blocked, or all reps timed
+                # out). Mark blocked so the user sees a clear signal.
+                summary.blocked = True
+                rendered.append(
+                    _CellRender(
+                        hand_class=hand_class, row=row, col=col, summary=summary
+                    )
+                )
+                continue
+            fold = 0.0
+            call = 0.0
+            raise_ = 0.0
+            for label, prob in freqs.items():
+                if label == "fold":
+                    fold += float(prob)
+                elif label in ("check", "call"):
+                    call += float(prob)
+                else:
+                    # bet_* / raise_* / all_in / unknown -> raise bucket
+                    raise_ += float(prob)
+            total = fold + call + raise_
+            if total > 0.0:
+                summary.fold = fold / total
+                summary.call = call / total
+                summary.raise_ = raise_ / total
             rendered.append(
                 _CellRender(hand_class=hand_class, row=row, col=col, summary=summary)
             )
@@ -945,11 +1087,25 @@ def render(state: AppState) -> None:
 
 
 def _matrix_subtitle(state: AppState) -> str:
-    """Compose the small caption to the right of the MATRIX heading."""
+    """Compose the small caption to the right of the MATRIX heading.
+
+    PR 24a §3.2 / §3.3: when ``spot.rvr_mode`` is set, surface the
+    aggregator's ``position`` field ("aggressor" / "defender") so the
+    user can disambiguate between c-bet frequencies and defense
+    frequencies. The hero seat is also shown.
+    """
 
     node_id = _safe_state_field(state, "current_tree_node_id", "root")
     player = _selected_player(state)
-    return f"node {node_id} · player P{player} to act"
+    spot = _safe_state_field(state, "current_spot", None)
+    hero_player = int(getattr(spot, "hero_player", 0)) if spot is not None else 0
+    if spot is not None and getattr(spot, "rvr_mode", False):
+        position = "aggressor" if hero_player == 0 else "defender"
+        return (
+            f"RvR · hero P{hero_player} ({position}) · "
+            f"viewing P{player} · node {node_id}"
+        )
+    return f"node {node_id} · player P{player} to act · hero P{hero_player}"
 
 
 __all__ = [
