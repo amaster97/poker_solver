@@ -6,7 +6,7 @@ config file; you do not need to read Python or Rust source. The README
 is the developer-facing overview; this is the "what can I do with this
 today" companion.
 
-Document baseline: v1.0.0. Updates through v1.4.2 are layered in §5.3
+Document baseline: v1.0.0. Updates through v1.4.3 are layered in §5.3
 (node-locking), §5.4 (asymmetric contributions), §5.5 (range utilities),
 plus the new §7a (known CLI gaps) and §7b (known perf cliffs) sections.
 
@@ -472,12 +472,11 @@ worked configurations.
 
 `Range` (in `poker_solver.range`) accepts standard PioSolver notation
 (`"AA,KK,AKs,AKo"`) and exposes set-membership operations for
-range-arithmetic in scripts and notebooks. PR 27 (`pr-27-range-diff-utility`
-branch; not yet on `main` at v1.4.2) adds `Range.diff(other)` with
-strict set-membership semantics — useful for computing range
-intersections / complements without rebuilding combo lists by hand. If
-you are not on the PR 27 branch, fall back to manual set operations on
-the underlying combo iterable.
+range-arithmetic in scripts and notebooks. `Range.diff(other)` (available
+since v1.4.3) returns a new `Range` containing the combos in `self` that
+are not in `other`, with strict set-membership semantics — useful for
+computing range intersections / complements without rebuilding combo
+lists by hand.
 
 ---
 

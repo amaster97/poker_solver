@@ -63,12 +63,15 @@ equivalent across the full range of inputs.
   §7b for the user-facing framing). The Python tier is the readable
   spec; do not expect it to scale to full Nash range-vs-range.
 - **Rust tier — `solve_range_vs_range_rust` (v1.5.0+, PR 23).**
-  Vector-form CFR per Brown's `cpp/trainer.cpp:138-209` vector path.
-  Iterates over the full combo grid per chance node without enumerating
-  at the root, which is the algorithmic shift that closes the ~100x
-  DCFR slowdown observed in v1.4.1 W2b benchmarks. Diff against
-  Brown's solver lives in `docs/brown_apples_to_apples_2026-05-23.md`
-  for the algorithmic side-by-side.
+  Vector-form CFR per Brown's `cpp/trainer.cpp:138-209` vector path
+  (in the locally-cloned `noambrown/poker_solver` repo under
+  `references/code/`, which is gitignored). Iterates over the full
+  combo grid per chance node without enumerating at the root, which
+  is the algorithmic shift that closes the ~100x DCFR slowdown
+  observed in v1.4.1 W2b benchmarks. The vector path threads
+  per-combo reach probabilities through each infoset update rather
+  than re-solving the chance-rooted tree once per combo pair; that
+  is the source of the speedup.
 - **Implication.** Python `solve_hunl_postflop` and Rust
   `solve_range_vs_range_rust` are **not algorithmically equivalent**.
   The bit-exact diff tests cover the regimes they share (fixed-cards
