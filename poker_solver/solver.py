@@ -375,6 +375,43 @@ def _br_state_value(
     return value
 
 
+def _compute_exploitability_rust(
+    config: Any, strategy: Mapping[str, Sequence[float]]
+) -> tuple[float, float]:
+    """Compute exploitability + P0 game value via the Rust port (PR 15).
+
+    Returns ``(exploitability, game_value)``. Mirrors
+    ``exploitability(game, strategy)`` and ``_game_value(game, strategy)``
+    semantics but pushes the tree walk to ``_rust.compute_exploitability``
+    so the chance-enum-at-root range-vs-range path (`initial_hole_cards
+    = ()`) completes in seconds rather than minutes.
+
+    The Rust extension is required (HUNL postflop Rust path already
+    requires it). If the import fails for any reason we let the
+    ``ImportError`` propagate — silent fallback to the Python walk
+    would re-introduce the multi-minute hang.
+    """
+    from poker_solver._rust import (  # type: ignore[import-untyped]
+        compute_exploitability as _rust_compute_exploitability,
+    )
+    from poker_solver.hunl import _serialize_hunl_config
+
+    config_json = _serialize_hunl_config(config)
+    # Marshal the strategy mapping into a plain ``dict[str, list[float]]``;
+    # PyO3 accepts a ``dict[str, list[float]]`` directly.
+    plain: dict[str, list[float]] = {
+        str(k): [float(p) for p in v] for k, v in strategy.items()
+    }
+    out = _rust_compute_exploitability(config_json, plain)
+    expl = float(out["exploitability"])
+    # Tiny negative values from float rounding (~1e-9) are surface
+    # rounding errors — clamp to keep the API contract that
+    # exploitability is non-negative.
+    if -1e-9 < expl < 0.0:
+        expl = 0.0
+    return expl, float(out["game_value"])
+
+
 def _solve_rust(game: Game, iterations: int, **dcfr_kwargs: Any) -> SolveResult:
     """Run the Rust DCFR production tier and adapt its output to `SolveResult`.
 
@@ -470,10 +507,15 @@ def _solve_rust(game: Game, iterations: int, **dcfr_kwargs: Any) -> SolveResult:
             dcfr_kwargs.get("seed"),
         )
         avg = {k: list(v) for k, v in raw["average_strategy"].items()}
-        # D5 — Python recomputes exploitability + game_value from the Rust
-        # strategy. Matches the Kuhn/Leduc pattern below.
-        expl = exploitability(game, avg)
-        gv = _game_value(game, avg)
+        # PR 15 — recompute exploitability + game_value via the Rust port
+        # (`_rust.compute_exploitability`). Mirrors D5's "Python recomputes
+        # from strategy" contract but moves the bottleneck off the Python
+        # tree walk. For chance-enum-at-root configs (range-vs-range mode,
+        # `initial_hole_cards = ()`) the Python walk took >10 min; the
+        # Rust port closes that gap. For fixed-combo configs the two
+        # paths converge to the same value within 1e-6 BB/hand (verified
+        # by `tests/test_exploit_diff.py`).
+        expl, gv = _compute_exploitability_rust(game.config, avg)
         return SolveResult(
             average_strategy=avg,
             exploitability_history=[expl],

@@ -36,6 +36,13 @@ pub mod simd;
 // PR 9 — HUNL preflop solver (subgame mode with equity-leaf substitution).
 pub mod preflop;
 
+// PR 15 — HUNL exploitability + game-value walks. Range-vs-range solves
+// (`initial_hole_cards = ()`) bottleneck on the post-solve Python tree
+// walk; this module ports it to Rust with the same recursive shape and
+// float semantics so the diff test against `poker_solver.solver.exploitability`
+// stays bit-for-bit close.
+pub mod exploit;
+
 use crate::solver::SolveOutput;
 
 /// Build-time version smoke check.
@@ -248,6 +255,70 @@ fn solve_hunl_preflop(
     Ok(dict.into())
 }
 
+/// PR 15 — HUNL exploitability + P0 game-value computed from a Python
+/// strategy dict, exposed to Python as `_rust.compute_exploitability`.
+///
+/// Mirrors the Python reference walk in `poker_solver.solver.exploitability`
+/// / `poker_solver.solver._game_value`: best-response per player + on-strategy
+/// expected value, recombined into the standard NashConv-style
+/// exploitability metric for zero-sum two-player games (mean over players of
+/// `BR_value - on_strategy_value`).
+///
+/// Built for the v1.3 range-vs-range solve path: when the config has
+/// `initial_hole_cards = None`, the Rust walk enumerates the C(52,2) *
+/// C(50,2) ≈ 1.3M hand-pairs at the root and dispatches each combo into
+/// the existing HUNL state machine. This is the perf-critical pathway that
+/// the Python equivalent could not complete in a reasonable wall-clock.
+///
+/// Arguments:
+///   - `config_json`: serialized `HUNLConfig` (same shape as the existing
+///     `solve_hunl_postflop` PyO3 entry — see `_serialize_hunl_config` in
+///     `poker_solver/hunl.py`).
+///   - `strategy`: `dict[str, list[float]]` — infoset key → action prob
+///     vector. Mirrors the Python `solver.average_strategy()` output.
+///
+/// Returns: `dict` with keys `"exploitability"` (float) and `"game_value"`
+/// (float). The caller (`poker_solver.solver._solve_rust`) inserts these
+/// into the `SolveResult` directly.
+#[pyfunction]
+#[pyo3(signature = (config_json, strategy))]
+fn compute_exploitability(
+    py: Python<'_>,
+    config_json: &str,
+    strategy: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    let config: hunl::HUNLConfig = serde_json::from_str(config_json)
+        .map_err(|e| PyValueError::new_err(format!("invalid HUNLConfig JSON: {e}")))?;
+
+    // Marshal the Python `{infoset_key: [probs]}` dict into an owned Rust
+    // HashMap. We need to extract every entry under the GIL before we drop
+    // it to call into the pure-Rust walk.
+    let mut strategy_map: std::collections::HashMap<String, Vec<f64>> =
+        std::collections::HashMap::with_capacity(strategy.len());
+    for (k, v) in strategy.iter() {
+        let key: String = k
+            .extract()
+            .map_err(|e| PyValueError::new_err(format!("strategy key must be str: {e}")))?;
+        let probs: Vec<f64> = v.extract().map_err(|e| {
+            PyValueError::new_err(format!(
+                "strategy value for key {key:?} must be list[float]: {e}"
+            ))
+        })?;
+        strategy_map.insert(key, probs);
+    }
+
+    // Release the GIL for the pure-Rust walk. The exploitability tree walk
+    // is CPU-bound and does no Python callbacks, so dropping the GIL is
+    // safe + maximizes throughput on multi-threaded callers.
+    let out =
+        py.allow_threads(|| exploit::compute_exploitability_and_value(&config, &strategy_map));
+
+    let dict = PyDict::new(py);
+    dict.set_item("exploitability", out.exploitability)?;
+    dict.set_item("game_value", out.game_value)?;
+    Ok(dict.into())
+}
+
 #[pymodule]
 fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_version, m)?)?;
@@ -255,5 +326,6 @@ fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(solve_leduc, m)?)?;
     m.add_function(wrap_pyfunction!(solve_hunl_postflop, m)?)?;
     m.add_function(wrap_pyfunction!(solve_hunl_preflop, m)?)?;
+    m.add_function(wrap_pyfunction!(compute_exploitability, m)?)?;
     Ok(())
 }
