@@ -13,6 +13,49 @@ In-flight on feature branches; not yet merged to `main`.
 - v1.5/v2 follow-ups (Q3 exploitability slider reframe; range-based
   dealing; Rust callbacks; full-tree preflop).
 
+## [1.3.2] - 2026-05-23
+
+### Added — Rust port of exploitability + game-value walks (PR 15 / Option A)
+
+- New crate module `crates/cfr_core/src/exploit.rs` (1173 LOC): Rust-tier
+  exploitability and game-value walks; replaces the Python recursive walk
+  that was the W1.5 timeout bottleneck.
+- New PyO3 binding `compute_exploitability` in `crates/cfr_core/src/lib.rs`
+- `poker_solver/solver.py` wires `_solve_rust` to call the Rust walk for
+  HUNL postflop; `_compute_exploitability_rust` helper exposes the Rust path.
+
+### Performance (measured, not extrapolated)
+
+- W1.5 bench (turn subgame, chance-enum-at-root river): >10 min (killed at
+  3 min hard timeout pre-fix) -> **26.43 seconds end-to-end** post-fix
+  (25.96s on the post-cherry-pick re-verification).
+- Beats Plan C's <30s aspirational target; massively beats Option A's 60s gate.
+- PioSolver-class for standard-precision postflop solves.
+
+### Tests
+
+- 5 new Python diff tests (`tests/test_exploit_diff.py`): Python <-> Rust expl
+  walks bit-exact within 1e-6 BB/hand on fixed-combo, chance-enum, push/fold
+  short-circuit, and Kuhn/Leduc parity.
+- All existing tests (PR 6/7/9/Option B) stay GREEN.
+
+### What this does NOT ship (honest disclosure)
+
+- Rust DCFR solver still doesn't solve when `initial_hole_cards = ()`
+  (chance-enum-at-root is a 32-bit packed action that doesn't fit u8).
+  The Rust expl WALK handles the post-solve metric correctly; the full
+  RvR CFR solver remains a post-v1 follow-up. End-to-end timing reflects
+  this: DCFR returns immediately with empty strategy; the 26.43s is the
+  expl walk alone.
+- Plan C dense-slabs + vectorized showdown: parked on `pr-17-plan-c-dense-slabs`
+  branch for potential future v2.0 enhancement.
+
+### Closes the test->fix->retest loop
+
+- Original blocker: Phase 1 W1.5 (turn subgame range-vs-range expl walk
+  timeout @ 15 min) classified as Type C-CRITICAL.
+- This release resolves W1.5 perf gate; re-test post-ship.
+
 ## [1.3.1] - 2026-05-23
 
 PATCH bump on top of v1.3.0. Two narrow fixes to the range-vs-range
