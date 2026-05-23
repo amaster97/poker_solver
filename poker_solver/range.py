@@ -44,6 +44,25 @@ class Range:
     def __iter__(self):
         return iter(self.combos)
 
+    def diff(self, other: "Range") -> "Range":
+        """Return a new ``Range`` of combos in ``self`` that are NOT in ``other``.
+
+        Set-difference semantics, preserving combo order from ``self``. This is
+        a directional diff (``a.diff(b) != b.diff(a)`` in general).
+
+        Note: the current ``Range`` representation stores each combo with an
+        implicit frequency of 1.0 (membership-only). Boolean set-difference is
+        therefore equivalent to the frequency-aware definition ``max(self.freq
+        - other.freq, 0)`` when all frequencies are 1.0. If per-combo frequency
+        storage is added later, this method's per-combo accounting should be
+        extended at that point.
+        """
+        result = Range()
+        for combo in self.combos:
+            if combo not in other._combo_set:
+                result.add(combo)
+        return result
+
     def sample_excluding(self, excluded: set[Card], rng: random.Random) -> Combo | None:
         """Pick a random combo whose cards are not in `excluded`.
 
