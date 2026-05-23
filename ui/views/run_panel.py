@@ -56,20 +56,26 @@ _DEFAULT_ITERATIONS: int = 1000
 # log_every cadence: chart points per 1000 iters (~20 snapshots feels live).
 _DEFAULT_LOG_EVERY: int = 50
 
-# PR 24a exploitability-tier slider defaults. Each tier maps to a
-# recommended (iteration_count, target_mBB_per_pot) pair.
+# PR 24a/PR 24b exploitability-tier slider defaults. Each tier maps to
+# a recommended (iteration_count, target_mBB_per_pot) pair.
 #
 # Iteration counts are the **measured** convergence ladder per
-# ``docs/v1_5_slider_tier_defaults_measured.md`` §1: the DCFR + PR 8 SIMD
-# perf stack converges faster than the PLAN.md §1 industry-standard %
-# pot targets assumed, so the iteration ladder is the operative
-# wall-clock differentiator. The mBB/pot label is preserved as the
-# user-facing description (per PLAN.md §1 industry-standard guesses and
-# the measurement doc §8 Option A — under-promise / over-deliver).
+# ``docs/v1_5_slider_tier_defaults_measured.md`` §1 (PR 24b §5 swap):
+# - Draft = 200 iters (median 0.0036% pot reached on 15 measured fixtures)
+# - Standard = 500 iters (median 0.0002% pot)
+# - Tight = 1000 iters (median 0.00004% pot)
+# - Library = 2000 iters (median 0.000004% pot)
 #
-# Per the no-extrapolate rule, the displayed % pot label is the
-# nominal target — measured performance is documented in the
-# measurement doc, NOT the slider tooltip.
+# The DCFR + PR 8 SIMD perf stack converges 100x+ faster than the
+# PLAN.md §1 industry-standard % pot targets imply on every measured
+# fixture (15 spots: 12 river + 3 turn anchors). The iteration ladder
+# is the operative wall-clock differentiator; the mBB/pot label is
+# preserved as the user-facing nominal target per PLAN.md §1
+# (measurement doc §8 Option A — under-promise / over-deliver, kept
+# stable for v1.5).
+#
+# Per the no-extrapolate rule: the per-tier values are taken VERBATIM
+# from the measurement doc §1 — no interpolation or smoothing.
 _TIER_DEFAULTS: tuple[tuple[str, int, float], ...] = (
     # (label, iterations, target_mBB_per_pot)
     ("Draft", 200, 10.0),  # 1% pot
@@ -177,10 +183,13 @@ def render(
             )
             tier_slider.mark("tier-slider")
             ui.tooltip(
-                "Preliminary tier defaults; final measured values land in "
-                "PR 24b. Each tier sets both an iteration ceiling and a "
-                "target exploitability (mBB/pot). Higher tiers solve longer "
-                "for tighter convergence."
+                "Measured against the 12 PR 10a preset fixtures plus 3 "
+                "turn-anchor subgames (see "
+                "docs/v1_5_slider_tier_defaults_measured.md). Each tier "
+                "sets both an iteration ceiling and a target "
+                "exploitability (mBB/pot). Empirically each tier "
+                "converges to well below its mBB/pot label on every "
+                "measured spot; wall-clock is the operative differentiator."
             )
             handles["tier_slider"] = tier_slider
 
@@ -722,6 +731,7 @@ def _render_lock_list(state: AppState, container: Any) -> None:
     string + an "Unlock" button. Empty state shows a helper label.
     """
     from nicegui import ui
+
     from ui.views.node_lock_editor import remove_lock
 
     container.clear()

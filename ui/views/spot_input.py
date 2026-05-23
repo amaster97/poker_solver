@@ -311,6 +311,7 @@ def _enumerate_chart_presets() -> list[dict[str, Any]]:
     are skipped silently — the caller surfaces a single notify on
     selection if loading fails.
     """
+    import contextlib
     import glob
     import json
     from pathlib import Path
@@ -330,10 +331,9 @@ def _enumerate_chart_presets() -> list[dict[str, Any]]:
     # User: ~/.poker_solver/charts/*.json
     user_dir = Path.home() / ".poker_solver" / "charts"
     if user_dir.exists():
-        try:
+        # OSError -> skip silently; the built-in fallback still loads.
+        with contextlib.suppress(OSError):
             candidates.extend(Path(p) for p in glob.glob(str(user_dir / "*.json")))
-        except OSError:
-            pass
 
     for path in sorted(candidates):
         try:
@@ -378,7 +378,8 @@ def _load_preset_into_spot(state: AppState, preset: dict[str, Any]) -> None:
     spot.ranges = (ranges[0], ranges[1])
     save_state()
     n_combos = sum(
-        1 for combo in new_range.base_range.combos
+        1
+        for combo in new_range.base_range.combos
         if new_range.frequency_of(combo) > 0.0
     )
     ui.notify(
@@ -396,10 +397,14 @@ def _prompt_save_preset(state: AppState) -> None:
 
     with ui.dialog() as dialog, ui.card().classes("min-w-80"):
         ui.label("Save range as preset").classes("font-semibold")
-        name_input = ui.input(
-            label="Preset name",
-            placeholder="e.g. my_btn_open",
-        ).classes("w-full").mark("save-preset-name-input")
+        name_input = (
+            ui.input(
+                label="Preset name",
+                placeholder="e.g. my_btn_open",
+            )
+            .classes("w-full")
+            .mark("save-preset-name-input")
+        )
 
         def _save() -> None:
             name = (name_input.value or "").strip()
@@ -521,14 +526,13 @@ def _render_one_player_range(state: AppState, player: int) -> None:
             )
             cell.mark(f"range-matrix-cell-{label}")
             _color_input_cell(cell, state.current_spot.ranges[player], label)
+
             # PR 24b §3.1: right-click opens the per-combo frequency
             # dialog. NiceGUI 3.x's ``Element.on("contextmenu", ...)``
             # subscribes to the DOM contextmenu event; the dialog
             # exposes finer-grain control than the 4-step cycle. The
             # default cell-click cycle remains the fast-path affordance.
-            def _open_freq_dialog(
-                _e: Any, lbl: str = label, p: int = player
-            ) -> None:
+            def _open_freq_dialog(_e: Any, lbl: str = label, p: int = player) -> None:
                 _open_per_hand_dialog(state, p, lbl, counter_label, _refresh_string)
 
             try:
@@ -807,9 +811,11 @@ def _render_facing_bet_section(state: AppState) -> None:
 
     spot = state.current_spot
 
-    with ui.expansion(
-        "Facing bet (postflop subgame)", icon="trending_up", value=False
-    ).classes("w-full").mark("facing-bet-expansion"):
+    with (
+        ui.expansion("Facing bet (postflop subgame)", icon="trending_up", value=False)
+        .classes("w-full")
+        .mark("facing-bet-expansion")
+    ):
         ui.label(
             "Use these inputs when you're solving a subgame where one "
             "side has already bet (e.g. 'BB faces a half-pot c-bet'). "

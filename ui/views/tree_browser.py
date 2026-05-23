@@ -22,6 +22,7 @@ badges so the tree doubles as a readout (anti-pattern §3.8 mitigation).
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
@@ -45,6 +46,8 @@ from poker_solver.action_abstraction import (
 )
 from poker_solver.hunl import HUNLPoker, HUNLState
 from poker_solver.solver import SolveResult
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from ui.state import AppState
@@ -582,9 +585,7 @@ def _open_lock_for_node(
         )
         return
     # Build action labels via the existing _ACTION_LABELS table.
-    labels = [
-        _ACTION_LABELS.get(cast(int, a), str(a)) for a in node.legal_actions
-    ]
+    labels = [_ACTION_LABELS.get(cast(int, a), str(a)) for a in node.legal_actions]
     # Pre-populate sliders with the current avg-strategy frequencies
     # (which is what the live tree row already shows).
     initial = list(node.action_freqs) if node.action_freqs else None
@@ -718,10 +719,14 @@ def render(state: AppState) -> None:
         # below). Per the spec §8 Q4 + PR 24b prompt — documented
         # explicitly in the implementer notes.
         with ui_mod.row().style("align-items:center;gap:10px;margin-bottom:6px"):
-            lock_btn = ui_mod.button(
-                "Lock current node",
-                icon="lock",
-            ).props("flat dense").mark("tree-lock-current-button")
+            lock_btn = (
+                ui_mod.button(
+                    "Lock current node",
+                    icon="lock",
+                )
+                .props("flat dense")
+                .mark("tree-lock-current-button")
+            )
             lock_btn.tooltip(
                 "Open the node-lock editor for the currently selected "
                 "tree node (or root if none selected). Sets a fixed "
@@ -734,9 +739,9 @@ def render(state: AppState) -> None:
 
             lock_btn.on_click(_open_lock_for_current)
 
-            ui_mod.label(
-                f"{len(state.current_spot.locked_strategies)} lock(s)"
-            ).style("color:#9a9a9a;font-size:11px").mark("tree-lock-count-label")
+            ui_mod.label(f"{len(state.current_spot.locked_strategies)} lock(s)").style(
+                "color:#9a9a9a;font-size:11px"
+            ).mark("tree-lock-count-label")
 
         @ui_mod.refreshable  # type: ignore[untyped-decorator]
         def _tree_slot() -> None:

@@ -66,12 +66,12 @@ def open_range_freq_dialog(
     combo_pcts: list[float] = [rw.frequency_of(c) * 100.0 for c in combos]
 
     with ui.dialog().mark("range-freq-dialog") as dialog, ui.card().classes("min-w-96"):
-        ui.label(
-            f"Per-combo frequency: {hand_class} (P{player})"
-        ).classes("text-base font-semibold")
-        ui.label(
-            f"{len(combos)} combos. Sliders are 0-100% per combo."
-        ).classes("text-xs text-gray-500")
+        ui.label(f"Per-combo frequency: {hand_class} (P{player})").classes(
+            "text-base font-semibold"
+        )
+        ui.label(f"{len(combos)} combos. Sliders are 0-100% per combo.").classes(
+            "text-xs text-gray-500"
+        )
         ui.separator()
 
         slider_handles: list[Any] = []
@@ -82,9 +82,7 @@ def open_range_freq_dialog(
             master = ui.slider(min=0, max=100, step=1, value=100)
             master.mark("range-freq-master-slider")
             master.classes("flex-grow")
-            master_label = ui.label("100%").classes(
-                "text-xs font-mono w-12 text-right"
-            )
+            master_label = ui.label("100%").classes("text-xs font-mono w-12 text-right")
 
             def _on_master(e: Any) -> None:
                 val = float(e.value or 0)

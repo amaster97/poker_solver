@@ -171,9 +171,7 @@ def open_node_lock_dialog(
                         logger.exception("on_save callback failed")
                 dialog.close()
 
-            save_btn = ui.button("Save lock", on_click=_on_save).props(
-                "color=positive"
-            )
+            save_btn = ui.button("Save lock", on_click=_on_save).props("color=positive")
             save_btn.mark("node-lock-save")
             save_btn_holder["btn"] = save_btn
 
