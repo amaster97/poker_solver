@@ -1017,21 +1017,35 @@ def test_real_solve_ui_parity_with_direct_solve() -> None:
 
 
 def test_real_solve_error_surfaces_to_runner() -> None:
-    """PR 10b smoke: a config that the engine refuses (e.g. preflop
-    > 15 BB before PR 9 lands) surfaces as runner.status='error' with
-    runner.error populated. No crash; the worker thread exits cleanly.
+    """PR 10b smoke: a config the engine legitimately refuses surfaces as
+    ``runner.status='error'`` with ``runner.error`` populated. No crash;
+    the worker thread exits cleanly.
+
+    Post-PR-9 update: the preflop > 15 BB branch USED to raise
+    ``NotImplementedError`` because PR 9 hadn't landed yet. With PR 9
+    merged, that branch now solves successfully when ``initial_hole_cards``
+    is set. We pick a config that PR 9 explicitly rejects with
+    ``ValueError``: preflop subgame mode requires ``initial_hole_cards``
+    non-empty (full-tree preflop with hole cards drawn as a 1.6M-combo
+    chance enum is intractable, reserved for a post-v1 follow-up). This
+    keeps the test honest — it asserts the worker's
+    error-surfacing contract end-to-end while exercising a real,
+    documented PR 9 rejection path rather than a class that no longer
+    fires.
     """
     from poker_solver.hunl import HUNLConfig, HUNLPoker, Street
 
     from ui.state import SolveRunner
 
-    # Preflop > 15 BB → engines reach the PR 9 path which raises
-    # NotImplementedError (until PR 9 lands).
+    # Preflop > 15 BB WITHOUT initial_hole_cards → PR 9's
+    # `_validate_preflop_config` raises ValueError pointing at the
+    # subgame-only contract.
     cfg = HUNLConfig(
-        starting_stack=10_000,  # 100 BB
+        starting_stack=10_000,  # 100 BB (above push/fold range, in PR 9 scope)
         big_blind=100,
         small_blind=50,
         starting_street=Street.PREFLOP,
+        # initial_hole_cards intentionally omitted → PR 9 rejects.
     )
     runner = SolveRunner()
     runner.start(HUNLPoker(cfg), iterations=200, log_every=50)
@@ -1040,8 +1054,12 @@ def test_real_solve_error_surfaces_to_runner() -> None:
         f"expected status='error' on unsupported config; got {runner.status!r}"
     )
     assert runner.error is not None
-    assert isinstance(runner.error, NotImplementedError), (
-        f"expected NotImplementedError; got {type(runner.error).__name__}"
+    assert isinstance(runner.error, ValueError), (
+        f"expected ValueError (PR 9 rejects preflop without "
+        f"initial_hole_cards); got {type(runner.error).__name__}"
+    )
+    assert "initial_hole_cards" in str(runner.error), (
+        f"expected error to mention initial_hole_cards; got {runner.error!r}"
     )
 
 
