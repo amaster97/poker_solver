@@ -10,7 +10,74 @@ and this project adheres to [semantic versioning](https://semver.org/spec/v2.0.0
 In-flight on feature branches; not yet merged to `main`.
 
 ### In progress
-- PR 8+: NEON SIMD; PR 10b mock→real solver swap; v1.5/v2 follow-ups.
+- PR 10b mock→real solver swap; v1.5/v2 follow-ups.
+
+## [1.0.1] - 2026-05-23
+
+PR 8: NEON SIMD kernels + cache-blocked layout primitive + public chance
+sampling (PCS) infrastructure. Rust-internals only; zero public API
+change; PATCH bump. The spec's 10x end-to-end gate is NOT MET — the
+"true 10x" refactor (`FlatInfosetStore` primary-wire + `state.clone()`
+elimination + arena allocator) is deferred to PR 8b after a feasibility
+study (`docs/pr8b_prep/feasibility_study.md`) found a realistic
+end-to-end ceiling of 3-5x at 12-23 engineering days. PR 8b is parked
+behind a concrete revisit trigger; revisit only if perf becomes a
+user-facing constraint.
+
+### Added
+
+- **NEON SIMD kernels** (`crates/cfr_core/src/simd.rs`, ~470 LOC).
+  ARM NEON 128-bit f64 intrinsics for the DCFR hot path with
+  bit-identical scalar fallbacks. Two-rounding (no-FMA) design is
+  load-bearing: FMA shaved ULP that compounded over 1000+ iters past
+  the `STRATEGY_ATOL=1e-4` diff bar. Measured speedups at HUNL-relevant
+  row widths (per `crates/cfr_core/benches/baseline.json`, Apple M4 Pro,
+  release build): `discount_strategy` 3.29x at width=8;
+  `positive_regrets_and_total` 2.69x at width=6; `update_regret_sum`
+  2.53x at width=8; `discount_regrets` 1.40x at width=64.
+- **`FlatInfosetStore`** (`crates/cfr_core/src/layout.rs`, ~190 LOC):
+  cache-blocked flat regret + strategy arenas with `BLOCK_SIZE=64` rows
+  per block; `InfosetId` opaque handle. **Built but NOT primary-wired**;
+  `DCFRSolver` / `HUNLDcfr` still use `HashMap<String, InfosetData>`.
+- **Public chance sampling** (`crates/cfr_core/src/pcs.rs`, ~175 LOC):
+  Rust-internal only. `SamplingStrategy::{Full, PublicChance}`;
+  splitmix64-derived deterministic `PcsRng`; importance-weighted
+  unbiased estimator; negative-control test. NOT exposed via PyO3;
+  Python `use_pcs` surfacing deferred.
+- **Bench harness** (`crates/cfr_core/benches/dcfr_bench.rs`, ~210 LOC)
+  with archival `benches/baseline.json` snapshot.
+
+### Fixed
+
+- 4 clippy warnings (`needless_range_loop`, `derivable_impls`,
+  `manual_is_multiple_of`).
+- One `unsafe` block in `layout.rs::row_mut` refactored to safe
+  `split_at_mut` disjoint-borrow.
+- Pre-existing `cargo fmt` drift across 8 files reflowed.
+
+### Not shipped (deferred)
+
+- **Spec §2 10x end-to-end gate NOT MET.** Leduc end-to-end NEON vs
+  scalar = 2287 us / 2256 us = 0.986x (flat); HashMap + `format!()`
+  per-visit dominates kernel arithmetic.
+- **`FlatInfosetStore` primary-wire** (PR 8b).
+- **True 10x refactor** (PR 8b): feasibility ceiling 3-5x, cost 12-23
+  days; see `docs/pr8b_prep/scope.md`.
+- **PCS PyO3 surfacing** (Python `use_pcs` parameter): deferred.
+
+### Tests
+
+- Rust: 39 lib + 19 hunl_state_unit + 10 test_hunl_rust passing;
+  6 SIMD bit-parity tests (`a.to_bits() == b.to_bits()`) green.
+- Python: 21/21 DCFR diff + Leduc diff + Kuhn DCFR PASS;
+  `STRATEGY_ATOL=1e-4` gate green.
+- Pre-existing PyO3-embed test flake (Python 3.13 `typing.ClassVar`
+  circular-import) confirmed unchanged from `main@62c75d5`.
+
+### Internal
+
+- `__version__` bumped to `1.0.1` (PATCH — no public API surface
+  change; all additions are Rust-crate internals).
 
 ## [1.0.0] - 2026-05-22
 
@@ -779,7 +846,8 @@ and a hybrid exact / Monte Carlo equity calculator.
 - Initial Texas Hold'em equity solver scaffold (`023956e`):
   hand evaluator, Monte Carlo equity, range parser, CLI.
 
-[Unreleased]: https://github.com/amaster97/poker_solver/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/amaster97/poker_solver/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/amaster97/poker_solver/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/amaster97/poker_solver/releases/tag/v1.0.0
 [0.6.1]: https://github.com/amaster97/poker_solver/releases/tag/v0.6.1
 [0.6.0]: https://github.com/amaster97/poker_solver/releases/tag/v0.6.0
