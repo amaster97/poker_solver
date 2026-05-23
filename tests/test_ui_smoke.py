@@ -68,9 +68,35 @@ def isolated_state_dir(
 
     We also set the ``POKER_SOLVER_UI_STATE_DIR`` env var as a secondary
     override mechanism — Agent A may use either pattern.
+
+    PR 10b: also resets the AppState singleton + stops any in-flight solver
+    from a previous test. With the real solver (vs PR 10a's mock) tests
+    can take longer than the mock's near-zero latency, so the runner from
+    one test may still be alive at the start of the next.
     """
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("POKER_SOLVER_UI_STATE_DIR", str(tmp_path / ".poker_solver_ui"))
+    # PR 10b: stop any in-flight solver from a previous test before this
+    # one starts. With the real solver (vs PR 10a's near-zero-latency
+    # mock) tests can leave the worker thread alive past the test exit
+    # and the singleton SolveRunner refuses re-entrant `start()` while
+    # `is_alive()`. We do NOT reset the AppState singleton here because
+    # some smoke tests rely on cross-test singleton carryover for
+    # render-time state (the rendered matrix bakes in the spot.board at
+    # render time; resetting wipes the board between tests).
+    from ui.state import get_state
+
+    try:
+        current = get_state()
+        if current.runner.is_alive():
+            current.runner.stop()
+            current.runner.join(timeout=3.0)
+        # Always reset the solver state (cancel flags, history) without
+        # touching the spot. Idempotent on idle.
+        current.runner._stop_event.clear()
+        current.runner._pause_event.clear()
+    except Exception:  # noqa: BLE001
+        pass
     yield tmp_path
 
 
@@ -250,13 +276,13 @@ def test_combo_to_cell_mapping_no_off_by_one() -> None:
         hc = entry[-1] if isinstance(entry, tuple) else entry
         combos = enumerate_combos(hc)
         if hc.endswith("s"):  # suited
-            assert (
-                len(combos) == 4
-            ), f"{hc}: expected 4 suited combos, got {len(combos)}"
+            assert len(combos) == 4, (
+                f"{hc}: expected 4 suited combos, got {len(combos)}"
+            )
         elif hc.endswith("o"):  # offsuit
-            assert (
-                len(combos) == 12
-            ), f"{hc}: expected 12 offsuit combos, got {len(combos)}"
+            assert len(combos) == 12, (
+                f"{hc}: expected 12 offsuit combos, got {len(combos)}"
+            )
         else:  # pair
             assert len(combos) == 6, f"{hc}: expected 6 pair combos, got {len(combos)}"
         total_combo_count += len(combos)
@@ -268,9 +294,9 @@ def test_combo_to_cell_mapping_no_off_by_one() -> None:
                 f"expected {hc}, got {classify_combo(*combo)!r}"
             )
 
-    assert (
-        total_combo_count == 1326
-    ), f"expected 1326 combos total, got {total_combo_count}"
+    assert total_combo_count == 1326, (
+        f"expected 1326 combos total, got {total_combo_count}"
+    )
 
 
 async def test_library_dialog_opens(
@@ -337,12 +363,12 @@ def test_mock_solve_returns_real_hunl_solve_result() -> None:
 
     config = load_fixture("river_tiny_subgame")
     result = mock_solve(config, iterations=100, mock_latency_ms=0)
-    assert isinstance(
-        result, HUNLSolveResult
-    ), f"expected HUNLSolveResult, got {type(result).__name__}"
-    assert isinstance(
-        result.memory_report, MemoryReport
-    ), f"expected MemoryReport, got {type(result.memory_report).__name__}"
+    assert isinstance(result, HUNLSolveResult), (
+        f"expected HUNLSolveResult, got {type(result).__name__}"
+    )
+    assert isinstance(result.memory_report, MemoryReport), (
+        f"expected MemoryReport, got {type(result.memory_report).__name__}"
+    )
 
 
 def test_mock_solve_streams_progress_callbacks() -> None:
@@ -368,13 +394,13 @@ def test_mock_solve_streams_progress_callbacks() -> None:
     history = result.exploitability_history
     assert len(history) >= 9, f"expected >=9 history entries, got {len(history)}"
     # Exploitability decreases overall from first to last sample.
-    assert (
-        history[-1] < history[0]
-    ), f"exploitability did not decrease: first={history[0]} last={history[-1]}"
+    assert history[-1] < history[0], (
+        f"exploitability did not decrease: first={history[0]} last={history[-1]}"
+    )
     # Final result reflects the requested iterations (not partial).
-    assert (
-        result.iterations == 1000
-    ), f"expected iterations=1000 (success path), got {result.iterations}"
+    assert result.iterations == 1000, (
+        f"expected iterations=1000 (success path), got {result.iterations}"
+    )
 
 
 def test_mock_solve_failure_oom_raises_memory_error_with_partial_report() -> None:
@@ -395,11 +421,11 @@ def test_mock_solve_failure_oom_raises_memory_error_with_partial_report() -> Non
             mock_failure_mode="oom",
             mock_latency_ms=0,
         )
-    assert (
-        len(excinfo.value.args) >= 2
-    ), f"MemoryError.args should be (msg, report); got args={excinfo.value.args!r}"
+    assert len(excinfo.value.args) >= 2, (
+        f"MemoryError.args should be (msg, report); got args={excinfo.value.args!r}"
+    )
     assert isinstance(excinfo.value.args[1], MemoryReport), (
-        f"args[1] expected MemoryReport, got " f"{type(excinfo.value.args[1]).__name__}"
+        f"args[1] expected MemoryReport, got {type(excinfo.value.args[1]).__name__}"
     )
 
 
@@ -418,12 +444,12 @@ def test_mock_solve_failure_cancelled_returns_partial_result() -> None:
         mock_failure_mode="cancelled",
         mock_latency_ms=0,
     )
-    assert (
-        result.iterations < 10_000
-    ), f"expected partial iterations < 10000, got {result.iterations}"
-    assert (
-        len(result.average_strategy) > 0
-    ), "expected non-empty average_strategy after cancellation"
+    assert result.iterations < 10_000, (
+        f"expected partial iterations < 10000, got {result.iterations}"
+    )
+    assert len(result.average_strategy) > 0, (
+        "expected non-empty average_strategy after cancellation"
+    )
 
 
 def test_ui_never_imports_mock_specific_symbols() -> None:
@@ -562,9 +588,9 @@ async def test_input_matrix_palette_disjoint_from_display_palette(
     # yellow ~255,255,0; green ~0,255,0).
     palette_str = str(display_palette).lower()
     # Sanity: should NOT include "blue" (the input palette's primary).
-    assert (
-        "blue" not in palette_str
-    ), f"display palette must not contain blue; got {display_palette!r}"
+    assert "blue" not in palette_str, (
+        f"display palette must not contain blue; got {display_palette!r}"
+    )
 
     # Agent A owns spot_input.py; inspect its INPUT_PALETTE constant.
     spot_input = importlib.import_module("ui.views.spot_input")
@@ -572,14 +598,13 @@ async def test_input_matrix_palette_disjoint_from_display_palette(
         spot_input, "RANGE_INPUT_PALETTE", None
     )
     assert input_palette is not None, (
-        "ui.views.spot_input must expose INPUT_PALETTE for palette-"
-        "disjointness audit"
+        "ui.views.spot_input must expose INPUT_PALETTE for palette-disjointness audit"
     )
     input_palette_str = str(input_palette).lower()
     # Sanity: should mention "blue" (white → blue gradient per spec §2.4).
-    assert (
-        "blue" in input_palette_str or "#" in input_palette_str
-    ), f"input palette should source blue gradient; got {input_palette!r}"
+    assert "blue" in input_palette_str or "#" in input_palette_str, (
+        f"input palette should source blue gradient; got {input_palette!r}"
+    )
 
 
 async def test_chart_default_log_scale(
@@ -648,9 +673,9 @@ async def test_oom_failure_shows_remediation_notification(
     # The OOM error should surface a notification with the "Reduce bet
     # sizes" remediation button.
     notif_buttons = user.find(marker="oom-reduce-bet-sizes-button").elements
-    assert (
-        len(notif_buttons) >= 1
-    ), "OOM failure must surface 'Reduce bet sizes' quick-action button"
+    assert len(notif_buttons) >= 1, (
+        "OOM failure must surface 'Reduce bet sizes' quick-action button"
+    )
 
 
 async def test_pushfold_dispatch_at_15bb(
@@ -675,9 +700,9 @@ async def test_pushfold_dispatch_at_15bb(
     await asyncio.sleep(0.2)
     # Yellow warning toast appears with the push/fold dispatch button.
     pushfold_btn_elements = user.find(marker="pushfold-switch-button").elements
-    assert (
-        len(pushfold_btn_elements) >= 1
-    ), "stacks <= 15 BB must surface 'Switch to push/fold view' toast button"
+    assert len(pushfold_btn_elements) >= 1, (
+        "stacks <= 15 BB must surface 'Switch to push/fold view' toast button"
+    )
 
 
 async def test_long_solve_eta_appears_after_30s(
@@ -822,7 +847,201 @@ def test_cancel_flag_halts_mock_solve(reset_cancel_flag: None) -> None:
     assert "result" in result_holder
     result = result_holder["result"]
     assert result.iterations < 1000, (
-        f"expected partial iterations after cancellation; got " f"{result.iterations}"
+        f"expected partial iterations after cancellation; got {result.iterations}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# PR 10b: real-solver smoke tests
+# ---------------------------------------------------------------------------
+#
+# These exercise the SolveRunner -> poker_solver.solver.solve dispatch added
+# in PR 10b. PR 10a's mock_solver tests above remain to validate the
+# failure-mode injection infrastructure (OOM, cancellation) which the real
+# solver doesn't readily produce. The tests below verify that production
+# users running poker-solver ui see a real DCFR solve when they click
+# "Solve" — not a mock.
+
+
+def test_real_solve_runs_via_solve_runner() -> None:
+    """PR 10b smoke: SolveRunner.start with no mock kwargs invokes the real
+    solver path. The result must be a HUNLSolveResult (not a mock) and its
+    backend is one of the real backends (python/rust/pushfold_chart).
+    """
+    from poker_solver.hunl import HUNLPoker, default_tiny_subgame
+    from poker_solver.hunl_solver import HUNLSolveResult
+
+    from ui.state import SolveRunner
+
+    runner = SolveRunner()
+    runner.start(
+        HUNLPoker(default_tiny_subgame()),
+        iterations=200,
+        log_every=50,
+    )
+    runner.join(timeout=15.0)
+    assert runner.status == "done", (
+        f"expected status='done' after real solve; got {runner.status!r}, "
+        f"error={runner.error!r}"
+    )
+    assert isinstance(runner.result, HUNLSolveResult), (
+        f"expected HUNLSolveResult; got {type(runner.result).__name__}"
+    )
+    # Real solver backends: 'python' / 'rust' / 'pushfold_chart'.
+    # Mock backend would be 'python-mock'; that must NOT happen here.
+    assert runner.result.backend != "python-mock", (
+        f"runner mistakenly invoked mock solver; got backend={runner.result.backend!r}"
+    )
+    assert runner.result.iterations == 200
+
+
+def test_real_solve_streams_on_progress() -> None:
+    """PR 10b smoke: on_progress callback fires once per log_every chunk
+    during a real solve. The SolveRunner's expl_history accumulates one
+    entry per chunk; cumulative iter counts are monotone-increasing.
+    """
+    from poker_solver.hunl import HUNLPoker, default_tiny_subgame
+
+    from ui.state import SolveRunner
+
+    runner = SolveRunner()
+    runner.start(
+        HUNLPoker(default_tiny_subgame()),
+        iterations=200,
+        log_every=50,
+    )
+    runner.join(timeout=15.0)
+    assert runner.status == "done"
+    # 200 iters / log_every=50 -> 4 chunks -> at least 4 progress entries.
+    # We may have 5 if the final on-end push fires (per _worker's tail logic).
+    assert len(runner.expl_history) >= 4, (
+        f"expected >=4 progress entries; got {len(runner.expl_history)}"
+    )
+    iters = [it for it, _ in runner.expl_history]
+    assert iters == sorted(iters), f"iter counts not monotone: {iters!r}"
+
+
+def test_real_solve_stop_button_halts_mid_solve() -> None:
+    """PR 10b smoke: setting the runner's stop_event mid-solve aborts the
+    real solver within one chunk boundary. The solver returns a partial
+    HUNLSolveResult; status is 'stopped', iteration < requested.
+    """
+    import time as _time
+
+    from poker_solver.hunl import HUNLPoker, default_tiny_subgame
+
+    from ui.state import SolveRunner
+
+    runner = SolveRunner()
+    # Larger iteration count so we have time to observe + stop.
+    runner.start(
+        HUNLPoker(default_tiny_subgame()),
+        iterations=10_000,
+        log_every=50,
+    )
+    _time.sleep(0.1)
+    runner.stop()
+    runner.join(timeout=5.0)
+    assert not runner.is_alive(), "runner did not halt after stop()"
+    assert runner.status == "stopped", (
+        f"expected status='stopped'; got {runner.status!r}"
+    )
+    assert runner.iteration < 10_000, (
+        f"expected partial iter count after stop; got {runner.iteration}"
+    )
+
+
+def test_real_solve_pushfold_dispatch_at_short_stack() -> None:
+    """PR 10b smoke: a <=15 BB preflop config dispatches to the push/fold
+    chart via SolveRunner. Result.backend is 'pushfold_chart'; the solve is
+    instantaneous.
+    """
+    from poker_solver.hunl import HUNLConfig, HUNLPoker, Street
+
+    from ui.state import SolveRunner
+
+    cfg = HUNLConfig(
+        starting_stack=1000,  # 10 BB
+        big_blind=100,
+        small_blind=50,
+        starting_street=Street.PREFLOP,
+    )
+    runner = SolveRunner()
+    runner.start(HUNLPoker(cfg), iterations=100, log_every=10)
+    runner.join(timeout=5.0)
+    assert runner.status == "done", (
+        f"expected push/fold dispatch to complete; got status={runner.status!r}, "
+        f"error={runner.error!r}"
+    )
+    assert runner.result is not None
+    assert runner.result.backend == "pushfold_chart", (
+        f"expected push/fold chart dispatch at 10 BB; got backend="
+        f"{runner.result.backend!r}"
+    )
+
+
+def test_real_solve_ui_parity_with_direct_solve() -> None:
+    """PR 10b acceptance: a small solve via SolveRunner produces the same
+    exploitability final value as solving via solve_hunl_postflop directly
+    (modulo callback overhead). Locks the "no surprise" parity gate.
+    """
+    from poker_solver.hunl import HUNLPoker, default_tiny_subgame
+    from poker_solver.hunl_solver import solve_hunl_postflop
+
+    from ui.state import SolveRunner
+
+    cfg = default_tiny_subgame()
+
+    # Direct solve.
+    direct = solve_hunl_postflop(cfg, iterations=200, log_every=50, seed=42)
+
+    # Via SolveRunner.
+    runner = SolveRunner()
+    runner.start(HUNLPoker(cfg), iterations=200, log_every=50, seed=42)
+    runner.join(timeout=15.0)
+    assert runner.status == "done"
+    via_runner = runner.result
+
+    # DCFR with the same seed should produce byte-identical exploitability
+    # vectors (the strategy is deterministic at fixed seed; the callback
+    # doesn't perturb the math).
+    assert via_runner is not None
+    assert len(direct.exploitability_history) == len(via_runner.exploitability_history)
+    for direct_v, runner_v in zip(
+        direct.exploitability_history,
+        via_runner.exploitability_history,
+    ):
+        assert abs(direct_v - runner_v) < 1e-9, (
+            f"parity drift: direct={direct_v}, runner={runner_v}"
+        )
+
+
+def test_real_solve_error_surfaces_to_runner() -> None:
+    """PR 10b smoke: a config that the engine refuses (e.g. preflop
+    > 15 BB before PR 9 lands) surfaces as runner.status='error' with
+    runner.error populated. No crash; the worker thread exits cleanly.
+    """
+    from poker_solver.hunl import HUNLConfig, HUNLPoker, Street
+
+    from ui.state import SolveRunner
+
+    # Preflop > 15 BB → engines reach the PR 9 path which raises
+    # NotImplementedError (until PR 9 lands).
+    cfg = HUNLConfig(
+        starting_stack=10_000,  # 100 BB
+        big_blind=100,
+        small_blind=50,
+        starting_street=Street.PREFLOP,
+    )
+    runner = SolveRunner()
+    runner.start(HUNLPoker(cfg), iterations=200, log_every=50)
+    runner.join(timeout=10.0)
+    assert runner.status == "error", (
+        f"expected status='error' on unsupported config; got {runner.status!r}"
+    )
+    assert runner.error is not None
+    assert isinstance(runner.error, NotImplementedError), (
+        f"expected NotImplementedError; got {type(runner.error).__name__}"
     )
 
 

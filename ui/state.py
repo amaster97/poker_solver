@@ -384,6 +384,14 @@ class Spot:
         ``abstraction=None`` always in PR 10 (we visualize equilibrium
         strategies on the lossless engine; abstraction-aware visualization
         is a PR 11 concern).
+
+        PR 10b: derives ``initial_hole_cards`` from ``self.ranges`` by
+        picking the first valid combo per player that doesn't collide with
+        the board or the other player's pick. This is the "point-pair"
+        approximation per `pr10b_spec.md` Out-of-scope §1 (range-based
+        chance dealing is a PR 9 follow-up). Without fixed hole cards the
+        postflop chance node enumerates over C(52,2) * C(50,2) = 1.6M
+        combos and the solve becomes intractable.
         """
         bb_cents = 100  # canonical 1 BB == 100 cents
         starting_stack_cents = self.stacks_bb[0] * bb_cents
@@ -400,14 +408,33 @@ class Spot:
         ante_cents = int(self.ante * bb_cents)
         starting_street = self.starting_street
         initial_board = tuple(self.board)
+
+        # PR 10b: derive a single (point-pair) hole-card pair per player.
+        # For preflop spots this still applies (subgame mode in PR 9).
+        # If ranges are empty or fully blocked by the board, we fall back
+        # to an empty tuple — which means the engine will enumerate over
+        # all hole cards (slow). Production usage should always set at
+        # least one valid combo per player.
+        initial_hole_cards: tuple[tuple[Card, Card], tuple[Card, Card]] | tuple[()] = (
+            self._pick_point_pair_hole_cards(initial_board)
+        )
+
         if starting_street == Street.PREFLOP:
             initial_pot = 0
             initial_contributions: tuple[int, int] = (0, 0)
         else:
-            # Subgame: contributions are dead-money (the UI doesn't model
-            # the preflop tree). Use (0, 0) -> dead-money pot semantics.
-            initial_pot = 0
-            initial_contributions = (0, 0)
+            # Subgame: pot is whatever's been put in over the previous
+            # streets. PR 10b derives an effective pot from the
+            # "behind" stacks so the solve has a meaningful pot to work
+            # with: behind_stack = stack_bb * 100; pot = (starting_stack -
+            # behind) * 2 per player. Since the UI doesn't expose a
+            # pot-size input separately, we set a single-BB ante-style pot
+            # so the tree isn't degenerate. Per `pr10b_spec.md` §2: the
+            # UI plumbs HUNLConfig from spot fields; ante is already
+            # exposed. Use 2 * BB as a token pot when neither pot nor
+            # contributions were configured.
+            initial_pot = 2 * bb_blind_cents
+            initial_contributions = (bb_blind_cents, bb_blind_cents)
         return HUNLConfig(
             starting_stack=starting_stack_cents,
             small_blind=sb_cents,
@@ -417,12 +444,46 @@ class Spot:
             initial_board=initial_board,
             initial_pot=initial_pot,
             initial_contributions=initial_contributions,
+            initial_hole_cards=initial_hole_cards,
             preflop_raise_cap=self.preflop_raise_cap,
             postflop_raise_cap=self.postflop_raise_cap,
             bet_size_fractions=tuple(self.bet_sizes_checked),
             include_all_in=self.include_all_in,
             abstraction=None,
         )
+
+    def _pick_point_pair_hole_cards(
+        self, board: tuple[Card, ...]
+    ) -> tuple[tuple[Card, Card], tuple[Card, Card]] | tuple[()]:
+        """Pick one combo per player from ranges, avoiding board collisions.
+
+        Returns ``()`` when either range is empty after blocker filtering,
+        signalling the engine to enumerate over hole cards (slow path; the
+        UI surfaces a warning when this happens).
+
+        Selection strategy: first combo by deterministic iteration order
+        (Range stores combos sorted by (-rank, suit)) that doesn't
+        collide with the board or the other player's pick.
+        """
+        used: set[Card] = set(board)
+        picks: list[tuple[Card, Card]] = []
+        for player in range(2):
+            range_obj = self.ranges[player].base_range
+            chosen: tuple[Card, Card] | None = None
+            for combo in range_obj.combos:
+                c0, c1 = combo
+                if c0 in used or c1 in used:
+                    continue
+                chosen = (c0, c1)
+                used.add(c0)
+                used.add(c1)
+                break
+            if chosen is None:
+                # Range is empty or fully blocked. Return () to defer to
+                # engine enumeration; the caller surfaces a warning.
+                return ()
+            picks.append(chosen)
+        return (picks[0], picks[1])
 
 
 @dataclass
@@ -574,22 +635,29 @@ class SolveRunner:
                 self.status = "running"
 
     def stop(self) -> None:
-        """Set the stop flag (also sets the mock-side ``_CANCEL_FLAG``).
+        """Set the stop flag.
 
-        Worker exits its loop within ONE snapshot. Idempotent on idle.
+        For real solves (PR 10b): cancellation is checked between solver
+        chunks (granularity = `log_every` iterations); the worker exits
+        within ONE chunk after `stop()` returns.
+
+        For mock solves (smoke tests still on `mock_failure_mode`): also
+        sets the mock module-level ``_CANCEL_FLAG`` so the mock's
+        per-snapshot loop exits.
+
+        Idempotent on idle.
         """
         self._stop_event.set()
-        # Propagate to mock_solver's module-level flag so the per-snapshot
-        # check inside ``mock_solve`` exits its loop. Import lazily because
-        # ``ui.mock_solver`` may not exist during early bootstrap (Agent C
-        # owns that file).
+        # Propagate to mock_solver's module-level flag for the mock path.
+        # The real path uses `should_stop=lambda: self._stop_event.is_set()`
+        # threaded into `solve_hunl_postflop` (PR 10b §3).
         try:
             from ui.mock_solver import _CANCEL_FLAG
 
             _CANCEL_FLAG.set()
         except (ImportError, ModuleNotFoundError):
-            # PR 10a-pre: mock_solver not yet wired in. The status-only
-            # path below still works for the "idle" idempotency case.
+            # mock_solver not available; the real path's should_stop hook
+            # carries cancellation through the engine.
             pass
 
     def is_alive(self) -> bool:
@@ -655,21 +723,295 @@ class SolveRunner:
         ``self.result``, ``self.error``, ``self.partial_report`` — all
         guarded by ``self._lock``.
 
-        Imports ``_solve_postflop_impl`` from ``ui.mock_solver`` here (not at
-        module load) so that early bootstrap (e.g. ``from ui.state import
-        SolveRunner`` in unit tests) doesn't pull in NiceGUI transitively.
-        The PR 10b swap rewrites this ONE import line to point at the real
-        solver.
+        PR 10b dispatch composition (per `pr10b_spec.md` §3 + `solver.solve`):
+
+          1. If `mock_latency_ms` or `mock_failure_mode` is set, route to
+             the mock solver (smoke-test injection path; production users
+             never set these). The mock owns its own failure-mode dispatch
+             (`oom`, `cancelled`, etc.).
+          2. Otherwise, route to `poker_solver.solver.solve()` which
+             internally handles:
+               - push/fold short-circuit at <=15 BB (PR 3.5)
+               - HUNL postflop tree solve (PR 5/PR 6)
+               - HUNL preflop (PR 9, currently `NotImplementedError`)
+          3. Progress updates flow through the `on_progress` callback path
+             added in PR 10b (`solve_hunl_postflop` and the mock both fire
+             it once per `log_every` chunk).
+          4. Cancellation flows through `should_stop` (the real solver) or
+             `_CANCEL_FLAG` (the mock); both bind to `self._stop_event`.
         """
-        # ----- IMPORT SWAP POINT for PR 10b (single line) -----
-        # Plus the module-level _CANCEL_FLAG + read_latest_progress helpers
-        # (Option A from ``docs/pr10_prep/mock_signature_drift.md``: the real
-        # ``solve_hunl_postflop`` has no ``on_progress`` callback, so we
-        # decouple via a module-level progress buffer the worker polls).
+        # Populate timing fields used by compute_eta(). PR 10a's smoke 20
+        # asserts on these; the real-solver path keeps them current so the
+        # UI can render a live ETA without polling a separate timer.
+        with self._lock:
+            self.target_iterations = iterations
+            self.start_time_monotonic = time.monotonic()
+            self.current_time_monotonic = self.start_time_monotonic
+
+        # ----- Progress + cancellation hooks (shared by real + mock paths) -----
+        # `on_progress` fires from inside `solve_hunl_postflop._run_with_probe`
+        # at each `log_every` chunk boundary. We push the (iter, expl) tuple
+        # into `expl_history` and update `partial_report` so the UI's
+        # `ui.timer(0.5, ...)` poller can refresh the chart + memory panel.
+        def _on_progress(it: int, expl: float, report: Any) -> None:
+            now = time.monotonic()
+            with self._lock:
+                self.iteration = it
+                self.expl_history.append((it, expl))
+                self.partial_report = report
+                self.current_time_monotonic = now
+
+        # `should_stop` is polled at each chunk boundary inside the real
+        # solver. Returning True causes the loop to break cleanly and the
+        # solver returns a partial result.
+        def _should_stop() -> bool:
+            # Pause: block here while paused, but keep checking stop.
+            while self._pause_event.is_set() and not self._stop_event.is_set():
+                time.sleep(0.05)
+            return self._stop_event.is_set()
+
+        # ----- Mock path: smoke-test injection only -----
+        use_mock = mock_latency_ms is not None or mock_failure_mode is not None
+        if use_mock:
+            self._run_mock_path(
+                config=config,
+                iterations=iterations,
+                log_every=log_every,
+                dcfr_kwargs=dcfr_kwargs,
+                target_exploitability=target_exploitability,
+                memory_budget_gb=memory_budget_gb,
+                seed=seed,
+                mock_latency_ms=mock_latency_ms,
+                mock_failure_mode=mock_failure_mode,
+            )
+            return
+
+        # ----- Real-solver path (PR 10b core) -----
+        # `_dispatch_solve` (below) routes to push/fold / postflop / preflop
+        # per the PR 10b §6 dispatch composition.
+        try:
+            # `poker_solver.solver.solve` handles the dispatch composition:
+            # - <=15 BB preflop → push/fold chart (instantaneous)
+            # - postflop → solve_hunl_postflop (with our on_progress hook)
+            # - preflop > 15 BB → solve_hunl_preflop (PR 9; NotImplementedError
+            #   until PR 9 lands)
+            # We forward `on_progress` and `should_stop` to the postflop branch
+            # via `dcfr_kwargs` so they reach `_run_with_probe`. For the
+            # push/fold short-circuit path these hooks are no-ops because
+            # chart lookup is non-iterative.
+            kwargs: dict[str, Any] = {
+                "backend": backend,
+                "log_every": log_every,
+                # Forwarded into `solve_hunl_postflop` via solver.solve's
+                # **dcfr_kwargs splat (solver.py treats these as `_DIRECT_KEYS`).
+                "target_exploitability": target_exploitability,
+                "memory_budget_gb": memory_budget_gb,
+                "seed": seed,
+                # `on_progress` and `should_stop` are not in solver.solve's
+                # _DIRECT_KEYS set, so they ride in the remainder dict that
+                # gets passed as `dcfr_kwargs=` to solve_hunl_postflop. That's
+                # not what we want — instead, route through solve_hunl_postflop
+                # directly to avoid the dispatcher's kwargs sorting.
+            }
+            # Use the canonical dispatcher (`solver.solve`) for the push/fold
+            # short-circuit and the preflop branch; for the postflop branch
+            # we call `solve_hunl_postflop` directly so we can thread the new
+            # `on_progress` + `should_stop` kwargs (not yet in solve()'s
+            # signature; see PR 10b spec).
+            result = self._dispatch_solve(
+                game=HUNLPoker(config),
+                iterations=iterations,
+                on_progress=_on_progress,
+                should_stop=_should_stop,
+                **kwargs,
+            )
+        except MemoryError as exc:
+            # MemoryError.args[1] is MemoryReport per hunl_solver.py contract.
+            with self._lock:
+                self.error = exc
+                self.status = "error"
+                if len(exc.args) > 1 and hasattr(exc.args[1], "total_gb"):
+                    self.partial_report = exc.args[1]
+            return
+        except NotImplementedError as exc:
+            # Preflop solver not yet wired (PR 9); or unsupported backend.
+            with self._lock:
+                self.error = exc
+                self.status = "error"
+            return
+        except (ValueError, RuntimeError, OSError) as exc:
+            # Config/setup errors (e.g. bad abstraction, malformed config,
+            # equity oracle failure). Surfaced to the UI as a red notification
+            # instead of crashing.
+            logger.exception("Solve failed with %s", type(exc).__name__)
+            with self._lock:
+                self.error = exc
+                self.status = "error"
+            return
+        except BaseException as exc:  # noqa: BLE001
+            # Catch-all so the worker never silently dies.
+            logger.exception("Solve worker raised unexpected exception")
+            with self._lock:
+                self.error = exc
+                self.status = "error"
+            return
+
+        # Successful exit (or cooperative cancellation via should_stop).
+        with self._lock:
+            self.result = result
+            if self._stop_event.is_set():
+                self.status = "stopped"
+            else:
+                self.status = "done"
+            # Iteration count + final report from the solver. For push/fold
+            # the result is a non-HUNL SolveResult (no memory_report); skip
+            # the partial_report update in that case.
+            self.iteration = result.iterations
+            mem_report = getattr(result, "memory_report", None)
+            if mem_report is not None:
+                self.partial_report = mem_report
+            # Push the final exploitability into expl_history so the UI's
+            # chart shows the converged value even when on_progress wasn't
+            # called (e.g. log_every=None or push/fold short-circuit).
+            if result.exploitability_history and (
+                not self.expl_history
+                or self.expl_history[-1][1] != result.exploitability_history[-1]
+            ):
+                self.expl_history.append(
+                    (result.iterations, result.exploitability_history[-1])
+                )
+
+    def _dispatch_solve(
+        self,
+        *,
+        game: HUNLPoker,
+        iterations: int,
+        on_progress: Any,
+        should_stop: Any,
+        backend: str,
+        log_every: int,
+        target_exploitability: float | None,
+        memory_budget_gb: float,
+        seed: int | None,
+    ) -> SolveResult:
+        """Real-solver dispatch composition (PR 10b §6).
+
+        Order matches `poker_solver.solver.solve`:
+          1. push/fold short-circuit at <=15 BB preflop (PR 3.5).
+          2. HUNL postflop (PR 5/PR 6) — calls `solve_hunl_postflop` directly
+             so we can thread `on_progress` + `should_stop` (not yet in
+             `solver.solve`'s signature).
+          3. HUNL preflop (PR 9) — uses `solver.solve` which currently
+             raises NotImplementedError on the Rust path; Python tier lands
+             with PR 9 merge.
+        """
+        from poker_solver.pushfold import is_pushfold_mode, solve_pushfold
+        from poker_solver.solver import solve as canonical_solve
+
+        cfg = game.config
+
+        # 1. Push/fold short-circuit (≤15 BB preflop) — instantaneous chart
+        # lookup; no progress callback or cancellation needed.
+        if cfg.starting_street == Street.PREFLOP and is_pushfold_mode(
+            cfg.starting_stack, cfg.big_blind
+        ):
+            return solve_pushfold(cfg)
+
+        # 2. HUNL postflop — direct call so on_progress + should_stop reach
+        # `_run_with_probe`. The Rust backend doesn't yet support these
+        # callbacks (PR 6 has no equivalent hook), so we fall back to the
+        # Python backend in that case with a one-time warning.
+        if Street.FLOP <= cfg.starting_street < Street.SHOWDOWN:
+            from poker_solver.hunl_solver import solve_hunl_postflop
+
+            if backend == "rust":
+                logger.info(
+                    "Rust backend does not support on_progress/should_stop "
+                    "yet; falling back to Python tier for this solve."
+                )
+            return solve_hunl_postflop(
+                cfg,
+                abstraction=None,
+                iterations=iterations,
+                target_exploitability=target_exploitability,
+                memory_budget_gb=memory_budget_gb,
+                log_every=log_every,
+                seed=seed,
+                on_progress=on_progress,
+                should_stop=should_stop,
+            )
+
+        # 3. Preflop > 15 BB. PR 9's `solve_hunl_preflop` is the future
+        # home of this branch; not yet merged to main as of PR 10b. We
+        # try to import it (so PR 10b is forward-compatible the day PR 9
+        # lands), and otherwise raise a clean NotImplementedError that
+        # the UI surfaces as a red error notification with remediation
+        # text. We do NOT fall through to `canonical_solve()` because its
+        # tail branch unconditionally constructs a `DCFRSolver(game,
+        # **dcfr_kwargs)` whose dcfr_kwargs would carry
+        # `target_exploitability`/`memory_budget_gb` and crash on
+        # invalid-kwarg TypeError — masking the real "preflop not yet
+        # wired" message we want surfaced.
+        if cfg.starting_street == Street.PREFLOP:
+            try:
+                from poker_solver.preflop import (  # type: ignore[import-not-found,import-untyped]
+                    solve_hunl_preflop,
+                )
+            except (ImportError, ModuleNotFoundError) as exc:
+                raise NotImplementedError(
+                    "HUNL preflop solver (PR 9) is not yet wired into this "
+                    "build. For now: use a postflop spot (set board to 3+ "
+                    "cards) or reduce stacks to <=15 BB to dispatch to the "
+                    "push/fold chart."
+                ) from exc
+            return solve_hunl_preflop(
+                cfg,
+                abstraction=None,
+                iterations=iterations,
+                target_exploitability=target_exploitability,
+                memory_budget_gb=memory_budget_gb,
+                log_every=log_every,
+                seed=seed,
+                on_progress=on_progress,
+                should_stop=should_stop,
+            )
+        # Kuhn / Leduc / other Game protocols don't currently flow through
+        # the UI but we keep the fallback for forward-compat with the CLI
+        # path. These don't use on_progress/should_stop.
+        return canonical_solve(
+            game,
+            iterations,
+            backend=backend,
+            log_every=log_every,
+        )
+
+    def _run_mock_path(
+        self,
+        *,
+        config: HUNLConfig,
+        iterations: int,
+        log_every: int,
+        dcfr_kwargs: dict[str, Any] | None,
+        target_exploitability: float | None,
+        memory_budget_gb: float,
+        seed: int | None,
+        mock_latency_ms: int | None,
+        mock_failure_mode: str | None,
+    ) -> None:
+        """Run the mock solver path (smoke-test injection only).
+
+        Kept for PR 10a smoke tests that exercise `mock_failure_mode='oom'`,
+        `'cancelled'`, `'long_latency'`. Production users never reach this
+        branch — they go through `_dispatch_solve` (the real path).
+        """
         try:
             # fmt: off
-            from ui.mock_solver import _CANCEL_FLAG, mock_solve as _solve_postflop_impl  # noqa: E501, I001
-            from ui.mock_solver import read_latest_progress, reset_progress_buffer
+            from ui.mock_solver import (  # noqa: I001
+                _CANCEL_FLAG,
+                mock_solve as _mock_solve,
+                read_latest_progress,
+                reset_progress_buffer,
+            )
             # fmt: on
         except (ImportError, ModuleNotFoundError) as exc:
             with self._lock:
@@ -682,7 +1024,6 @@ class SolveRunner:
 
         # Run mock_solve on a helper thread; this worker thread polls the
         # module-level progress buffer and updates self.* under the lock.
-        # When the helper exits, we collect its result or exception.
         solve_result: dict[str, Any] = {"result": None, "exc": None}
 
         def _solve_in_helper() -> None:
@@ -692,11 +1033,6 @@ class SolveRunner:
                     mock_kwargs["mock_latency_ms"] = mock_latency_ms
                 if mock_failure_mode is not None:
                     mock_kwargs["mock_failure_mode"] = mock_failure_mode
-                # Positional args are byte-identical to ``solve_hunl_postflop``
-                # (PR 5): ``(config, abstraction, iterations,
-                # target_exploitability, memory_budget_gb)``. The PR 10b swap
-                # drops the ``**mock_kwargs`` line; everything else holds.
-                # seed is forwarded only when set (mock has default ``42``).
                 extra_kwargs: dict[str, Any] = {
                     "log_every": log_every,
                     "dcfr_kwargs": dcfr_kwargs,
@@ -704,27 +1040,24 @@ class SolveRunner:
                 if seed is not None:
                     extra_kwargs["seed"] = seed
                 extra_kwargs.update(mock_kwargs)
-                solve_result["result"] = _solve_postflop_impl(
+                solve_result["result"] = _mock_solve(
                     config,
-                    None,  # abstraction (mock ignores; real PR 5 solver uses)
+                    None,
                     iterations,
                     target_exploitability,
                     memory_budget_gb,
                     **extra_kwargs,
                 )
-            except BaseException as e:  # noqa: BLE001 -- captured & forwarded
+            except BaseException as e:  # noqa: BLE001
                 solve_result["exc"] = e
 
         helper = threading.Thread(target=_solve_in_helper, daemon=True)
         helper.start()
 
-        # Poll progress + pause/stop events while the helper runs. ~50 ms
-        # cadence is fast enough that stop reactivity is within ~1 snapshot.
         last_iter_seen = -1
         while helper.is_alive():
             if self._stop_event.is_set():
                 _CANCEL_FLAG.set()
-            # Pause: block here while pause is set; periodically re-check stop.
             while self._pause_event.is_set() and not self._stop_event.is_set():
                 time.sleep(0.05)
             snapshot = read_latest_progress()
@@ -736,11 +1069,10 @@ class SolveRunner:
                         (snapshot.iteration, snapshot.exploitability)
                     )
                     self.partial_report = snapshot.partial_report
+                    self.current_time_monotonic = time.monotonic()
             time.sleep(0.05)
 
         helper.join()
-
-        # Final snapshot — pick up the last progress update if we missed it.
         snapshot = read_latest_progress()
         if snapshot is not None and snapshot.iteration != last_iter_seen:
             with self._lock:
@@ -758,7 +1090,6 @@ class SolveRunner:
                 else:
                     self.status = "done"
         elif isinstance(worker_exc, MemoryError):
-            # MemoryError.args[1] is MemoryReport per pr10a_spec §7.2.
             with self._lock:
                 self.error = worker_exc
                 self.status = "error"
@@ -769,10 +1100,9 @@ class SolveRunner:
                 self.error = worker_exc
                 self.status = "error"
         else:
-            # Catch-all so the worker never silently dies. The UI surfaces
-            # ``state.runner.error`` in the "error" status readout.
             logger.exception(
-                "Solve worker raised unexpected exception", exc_info=worker_exc
+                "Mock solve worker raised unexpected exception",
+                exc_info=worker_exc,
             )
             with self._lock:
                 self.error = worker_exc

@@ -35,7 +35,9 @@ Failure modes are caught and reported:
 
 from __future__ import annotations
 
+import contextlib
 import warnings
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -44,6 +46,19 @@ from poker_solver.dcfr import DCFRSolver
 from poker_solver.hunl import HUNLConfig, HUNLPoker, Street
 from poker_solver.profiler.memory import MemoryProbe, MemoryReport
 from poker_solver.solver import SolveResult, exploitability
+
+# PR 10b: progress-callback type alias. Callers (the UI worker) pass a
+# callable that fires once per ``log_every`` chunk during the solve loop.
+# Signature: ``(iteration_count, exploitability_mBB_per_pot, memory_report)``.
+# The callback runs on the solver thread; callers must be thread-safe.
+OnProgressFn = Callable[[int, float, MemoryReport], None]
+
+# PR 10b: cancellation-flag predicate. Callers pass a callable returning
+# True when the solve should abort. Checked between DCFR chunks (snapshot
+# boundary granularity). Returning True causes the loop to break and the
+# function returns a partial ``HUNLSolveResult`` with the iteration count
+# reflecting how far the solver got before stopping.
+ShouldStopFn = Callable[[], bool]
 
 
 @dataclass
@@ -92,6 +107,8 @@ def solve_hunl_postflop(
     log_every: int | None = None,
     seed: int | None = None,
     dcfr_kwargs: dict[str, Any] | None = None,
+    on_progress: OnProgressFn | None = None,
+    should_stop: ShouldStopFn | None = None,
 ) -> HUNLSolveResult:
     """First end-to-end HUNL postflop solver in the Python reference tier.
 
@@ -122,6 +139,17 @@ def solve_hunl_postflop(
         seed: Reserved for deterministic re-runs. Threads through to DCFR.
         dcfr_kwargs: Reserved for future DCFR hyperparameter overrides; in
             PR 5 we pin α/β/γ at PLAN.md defaults.
+        on_progress: Optional callback fired once per ``log_every`` chunk
+            with ``(iteration_count, exploitability_mBB_per_pot, memory_report)``.
+            Used by the UI worker (PR 10b) to stream live progress without
+            requiring a separate polling buffer. Requires ``log_every`` to
+            be set; ignored otherwise. The callback runs on the solver
+            thread.
+        should_stop: Optional predicate polled at chunk boundaries. When it
+            returns True the solver exits cleanly and returns a partial
+            ``HUNLSolveResult`` with ``iterations`` reflecting how far the
+            solve progressed. Used by the UI worker for cooperative
+            cancellation (PR 10b).
 
     Returns:
         A frozen `HUNLSolveResult` with `average_strategy`,
@@ -166,6 +194,8 @@ def solve_hunl_postflop(
         target_exploitability=target_exploitability,
         memory_budget_gb=memory_budget_gb,
         game=game,
+        on_progress=on_progress,
+        should_stop=should_stop,
     )
 
     avg = solver.average_strategy()
@@ -205,7 +235,7 @@ def _validate_postflop_config(config: HUNLConfig) -> None:
         )
     if config.starting_street == Street.SHOWDOWN:
         raise ValueError(
-            "solve_hunl_postflop cannot start from SHOWDOWN (no decisions " "to make)."
+            "solve_hunl_postflop cannot start from SHOWDOWN (no decisions to make)."
         )
     required_board = {Street.FLOP: 3, Street.TURN: 4, Street.RIVER: 5}.get(
         config.starting_street
@@ -340,6 +370,8 @@ def _run_with_probe(
     target_exploitability: float | None,
     memory_budget_gb: float,
     game: HUNLPoker,
+    on_progress: OnProgressFn | None = None,
+    should_stop: ShouldStopFn | None = None,
 ) -> tuple[list[float], MemoryReport]:
     """Run DCFR in chunks; snapshot memory + check budgets between chunks.
 
@@ -367,6 +399,14 @@ def _run_with_probe(
     done = 0
     final_report: MemoryReport | None = None
     while done < iterations:
+        # PR 10b: cooperative cancellation between chunks. Polled here
+        # rather than inside DCFRSolver.solve() so we exit on a clean
+        # iteration boundary (the average strategy stays consistent).
+        if should_stop is not None and should_stop():
+            # Take a final snapshot so the caller still gets a MemoryReport.
+            final_report = probe.snapshot()
+            break
+
         step = min(chunk_size, iterations - done)
         solver.solve(step)
         done += step
@@ -390,6 +430,15 @@ def _run_with_probe(
         if log_every is not None:
             expl = exploitability(game, solver.average_strategy())
             history.append(expl)
+            # PR 10b: fire the on_progress callback with the live snapshot
+            # so the UI worker can update its expl_history + chart between
+            # chunks without polling a separate buffer. We suppress any
+            # exception raised inside the callback so a misbehaving UI
+            # client cannot crash the solver mid-iteration; the UI is
+            # responsible for catching its own bugs.
+            if on_progress is not None:
+                with contextlib.suppress(Exception):
+                    on_progress(done, expl, final_report)
             if target_exploitability is not None and expl <= target_exploitability:
                 # Early-exit on convergence target reached.
                 break
@@ -421,5 +470,7 @@ def _game_value(game: HUNLPoker, strategy: dict[str, list[float]]) -> float:
 
 __all__ = [
     "HUNLSolveResult",
+    "OnProgressFn",
+    "ShouldStopFn",
     "solve_hunl_postflop",
 ]
