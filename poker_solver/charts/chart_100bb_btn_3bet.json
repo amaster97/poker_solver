@@ -1,0 +1,7 @@
+{
+  "name": "100BB BTN 3-bet vs BB defend (HU, linear value range ~20%)",
+  "format": "pio_range_string",
+  "data": "AA,KK,QQ,JJ,TT,99,88,AKs,AKo,AQs,AQo,AJs,ATs,A9s,A5s,A4s,A3s,KQs,KQo,KJs,KTs,K9s,QJs,QTs,JTs,T9s,98s,87s,76s,65s,54s",
+  "_source": "Linear-plus-blockers 3-bet range over BB defends. Includes the 5x/4x/3x suited wheel cards as light blocker bluffs. No authoritative citation; conservative published heuristic.",
+  "_combo_count_approx": 162
+}

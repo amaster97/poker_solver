@@ -200,6 +200,10 @@ def _render_ranges_section(state: AppState) -> None:
     plumbed through ``Spot.to_rvr_call_args()`` (hero_range / villain_range
     swap) and ``range_matrix.render`` (front-tab row swap so hero is
     always on the visible front tab in RvR mode).
+
+    PR 24b §3.1: adds a preset dropdown above the player tabs sourced
+    from ``poker_solver/charts/chart_*.json`` files (4-file minimum
+    library shipped in this PR).
     """
     from nicegui import ui
 
@@ -226,6 +230,9 @@ def _render_ranges_section(state: AppState) -> None:
 
         hero_toggle.on_value_change(_on_hero_change)
 
+    # PR 24b §3.1 — preset dropdown + save-as-preset.
+    _render_chart_preset_row(state)
+
     with ui.tabs() as tabs:
         tab_p0 = ui.tab("P0 (SB / BTN)")
         tab_p1 = ui.tab("P1 (BB)")
@@ -234,6 +241,232 @@ def _render_ranges_section(state: AppState) -> None:
         for player in (0, 1):
             with ui.tab_panel(tab_p0 if player == 0 else tab_p1):
                 _render_one_player_range(state, player)
+
+
+def _render_chart_preset_row(state: AppState) -> None:
+    """Preset dropdown (PR 24b §3.1).
+
+    Scans ``poker_solver/charts/chart_*.json`` for built-in presets plus
+    ``~/.poker_solver/charts/`` for user-saved presets. On selection,
+    loads the JSON, parses via ``RangeWithFreqs.from_string``, and
+    writes to ``state.current_spot.ranges[hero_player]``. A
+    "Save current as preset" button writes the active range to the
+    user charts dir.
+
+    JSON schema per spec §4: ``{"name": "<label>", "format":
+    "pio_range_string", "data": "AA,KK,..."}``. Files that don't
+    conform are skipped silently (the loader surfaces a notify).
+    """
+    from nicegui import ui
+
+    charts = _enumerate_chart_presets()
+
+    with ui.row().classes("items-center gap-2 w-full"):
+        ui.label("Preset:").classes("text-xs")
+        select = (
+            ui.select(
+                options=[""] + [c["label"] for c in charts],
+                value="",
+                label="(none)",
+            )
+            .classes("flex-grow")
+            .mark("range-preset-select")
+        )
+        ui.tooltip(
+            "Load a range chart into the hero player's range. Built-in "
+            "charts come from poker_solver/charts/; user-saved charts "
+            "live in ~/.poker_solver/charts/."
+        )
+
+        def _on_preset_change(e: Any) -> None:
+            label = str(e.value or "").strip()
+            if not label:
+                return
+            for c in charts:
+                if c["label"] == label:
+                    _load_preset_into_spot(state, c)
+                    break
+
+        select.on_value_change(_on_preset_change)
+
+        def _save_preset() -> None:
+            _prompt_save_preset(state)
+
+        ui.button(
+            "Save as preset",
+            icon="save",
+            on_click=_save_preset,
+        ).props("flat dense").mark("save-preset-button")
+
+
+def _enumerate_chart_presets() -> list[dict[str, Any]]:
+    """Return the list of available chart presets.
+
+    Walks ``poker_solver/charts/chart_*.json`` (built-in) and
+    ``~/.poker_solver/charts/*.json`` (user). Each entry has keys
+    ``{"label": str, "path": Path, "data": dict}`` where ``data`` is the
+    parsed JSON.
+
+    Files that fail to parse or don't carry the required schema fields
+    are skipped silently — the caller surfaces a single notify on
+    selection if loading fails.
+    """
+    import glob
+    import json
+    from pathlib import Path
+
+    presets: list[dict[str, Any]] = []
+    candidates: list[Path] = []
+
+    # Built-in: poker_solver/charts/chart_*.json
+    try:
+        import poker_solver
+
+        builtin_dir = Path(poker_solver.__file__).parent / "charts"
+        candidates.extend(Path(p) for p in glob.glob(str(builtin_dir / "chart_*.json")))
+    except (ImportError, OSError):
+        pass
+
+    # User: ~/.poker_solver/charts/*.json
+    user_dir = Path.home() / ".poker_solver" / "charts"
+    if user_dir.exists():
+        try:
+            candidates.extend(Path(p) for p in glob.glob(str(user_dir / "*.json")))
+        except OSError:
+            pass
+
+    for path in sorted(candidates):
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            # Require ``name`` + ``data``; ``format`` is informational
+            # (assumed pio_range_string when absent).
+            if not isinstance(data, dict) or "data" not in data:
+                continue
+            label = str(data.get("name") or path.stem)
+            presets.append({"label": label, "path": path, "data": data})
+        except (OSError, ValueError, json.JSONDecodeError):
+            logger.warning("Failed to read preset %s", path)
+    return presets
+
+
+def _load_preset_into_spot(state: AppState, preset: dict[str, Any]) -> None:
+    """Load a preset's range string into the hero player's range slot."""
+    from nicegui import ui
+
+    data = preset["data"]
+    range_str = str(data.get("data") or "").strip()
+    if not range_str:
+        ui.notify(
+            f"Preset {preset['label']} has empty 'data' field; skipping.",
+            type="warning",
+            position="top",
+        )
+        return
+    try:
+        new_range = RangeWithFreqs.from_string(range_str)
+    except ValueError as exc:
+        ui.notify(
+            f"Failed to parse preset {preset['label']}: {exc}",
+            type="negative",
+            position="top",
+        )
+        return
+    spot = state.current_spot
+    ranges = list(spot.ranges)
+    ranges[spot.hero_player] = new_range
+    spot.ranges = (ranges[0], ranges[1])
+    save_state()
+    n_combos = sum(
+        1 for combo in new_range.base_range.combos
+        if new_range.frequency_of(combo) > 0.0
+    )
+    ui.notify(
+        f"Loaded preset '{preset['label']}' into P{spot.hero_player} "
+        f"({n_combos} combos)",
+        type="info",
+        position="top",
+        timeout=3000,
+    )
+
+
+def _prompt_save_preset(state: AppState) -> None:
+    """Open a dialog asking for the preset name; write to user charts dir."""
+    from nicegui import ui
+
+    with ui.dialog() as dialog, ui.card().classes("min-w-80"):
+        ui.label("Save range as preset").classes("font-semibold")
+        name_input = ui.input(
+            label="Preset name",
+            placeholder="e.g. my_btn_open",
+        ).classes("w-full").mark("save-preset-name-input")
+
+        def _save() -> None:
+            name = (name_input.value or "").strip()
+            if not name:
+                ui.notify(
+                    "Preset name required.",
+                    type="warning",
+                    position="top",
+                )
+                return
+            _write_user_preset(state, name)
+            dialog.close()
+
+        with ui.row().classes("w-full justify-end gap-2"):
+            ui.button("Cancel", on_click=dialog.close).props("flat")
+            ui.button("Save", on_click=_save).props("color=positive").mark(
+                "save-preset-confirm-button"
+            )
+
+    dialog.open()
+
+
+def _write_user_preset(state: AppState, name: str) -> None:
+    """Write the active hero range to ``~/.poker_solver/charts/{name}.json``."""
+    import json
+    from pathlib import Path
+
+    from nicegui import ui
+
+    spot = state.current_spot
+    rw = spot.ranges[spot.hero_player]
+    range_str = rw.to_string()
+    if not range_str:
+        ui.notify(
+            "Active range is empty; nothing to save.",
+            type="warning",
+            position="top",
+        )
+        return
+    # Sanitize the name: keep alnum + underscore.
+    safe = "".join(c if c.isalnum() or c in "_-" else "_" for c in name)
+    if not safe:
+        safe = "preset"
+    user_dir = Path.home() / ".poker_solver" / "charts"
+    user_dir.mkdir(parents=True, exist_ok=True)
+    path = user_dir / f"{safe}.json"
+    payload = {
+        "name": name,
+        "format": "pio_range_string",
+        "data": range_str,
+    }
+    try:
+        with path.open("w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
+    except OSError as exc:
+        ui.notify(
+            f"Failed to write preset: {exc}",
+            type="negative",
+            position="top",
+        )
+        return
+    ui.notify(
+        f"Saved preset '{name}' to {path}",
+        type="info",
+        position="top",
+        timeout=4000,
+    )
 
 
 def _render_one_player_range(state: AppState, player: int) -> None:
@@ -288,6 +521,20 @@ def _render_one_player_range(state: AppState, player: int) -> None:
             )
             cell.mark(f"range-matrix-cell-{label}")
             _color_input_cell(cell, state.current_spot.ranges[player], label)
+            # PR 24b §3.1: right-click opens the per-combo frequency
+            # dialog. NiceGUI 3.x's ``Element.on("contextmenu", ...)``
+            # subscribes to the DOM contextmenu event; the dialog
+            # exposes finer-grain control than the 4-step cycle. The
+            # default cell-click cycle remains the fast-path affordance.
+            def _open_freq_dialog(
+                _e: Any, lbl: str = label, p: int = player
+            ) -> None:
+                _open_per_hand_dialog(state, p, lbl, counter_label, _refresh_string)
+
+            try:
+                cell.on("contextmenu", _open_freq_dialog)
+            except Exception:  # noqa: BLE001
+                logger.debug("contextmenu subscription failed on cell %s", label)
 
     # ----- String input -----
     with string_container:
@@ -352,6 +599,35 @@ def _color_input_cell(cell: Any, rw: RangeWithFreqs, label: str) -> None:
         b = int(near_white[2] + (saturated_blue[2] - near_white[2]) * avg)
         bg = f"rgb({r}, {g}, {b})"
     cell.style(f"background-color: {bg}; min-width: 32px; min-height: 32px")
+
+
+def _open_per_hand_dialog(
+    state: AppState,
+    player: int,
+    hand_class: str,
+    counter_label: Any,
+    refresh_string: Any,
+) -> None:
+    """Open the per-hand frequency editor (PR 24b §3.1) for ``hand_class``.
+
+    Wraps ``range_freq_editor.open_range_freq_dialog`` and refreshes the
+    matrix counter + string after save so the user sees the updated
+    total without manually re-clicking.
+    """
+    from ui.views.range_freq_editor import open_range_freq_dialog
+
+    def _on_save() -> None:
+        rw = state.current_spot.ranges[player]
+        n = sum(1 for combo in rw.base_range.combos if rw.frequency_of(combo) > 0.0)
+        counter_label.set_text(f"{n} / 1326   ({100 * n / 1326:.1f}%)")
+        try:
+            refresh_string()
+        except Exception:  # noqa: BLE001
+            logger.debug("refresh_string failed after per-hand save")
+
+    open_range_freq_dialog(
+        state, player=player, hand_class=hand_class, on_save=_on_save
+    )
 
 
 def _cycle_cell_frequency(

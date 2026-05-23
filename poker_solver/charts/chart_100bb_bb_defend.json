@@ -1,0 +1,7 @@
+{
+  "name": "100BB BB defend vs SB open (HU, ~62% by MDF heuristic)",
+  "format": "pio_range_string",
+  "data": "AA,KK,QQ,JJ,TT,99,88,77,66,55,44,33,22,AKs,AKo,AQs,AQo,AJs,AJo,ATs,ATo,A9s,A9o,A8s,A8o,A7s,A7o,A6s,A6o,A5s,A5o,A4s,A4o,A3s,A3o,A2s,A2o,KQs,KQo,KJs,KJo,KTs,KTo,K9s,K9o,K8s,K8o,K7s,K7o,K6s,K5s,K4s,K3s,K2s,QJs,QJo,QTs,QTo,Q9s,Q9o,Q8s,Q7s,Q6s,JTs,JTo,J9s,J9o,J8s,J7s,T9s,T8s,T7s,98s,97s,87s,86s,76s,65s,54s",
+  "_source": "BB-defend range vs 2.5bb SB open at 100 BB HU. Approx MDF (1 - 1/odds) target on the call side; 3-bet branch not enumerated. Treat as a starting point.",
+  "_combo_count_approx": 526
+}

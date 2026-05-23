@@ -1,0 +1,7 @@
+{
+  "name": "30BB SB push/jam range (HU, ~25%)",
+  "format": "pio_range_string",
+  "data": "AA,KK,QQ,JJ,TT,99,88,77,66,55,44,33,22,AKs,AKo,AQs,AQo,AJs,AJo,ATs,ATo,A9s,A9o,A8s,A8o,A7s,A7o,A6s,A5s,A4s,A3s,A2s,KQs,KQo,KJs,KTs,K9s,QJs,QTs,JTs,T9s,98s",
+  "_source": "Short-stack 30BB HU SB-jam approximation. Tighter than the 100BB SB open because the jam loses fold equity vs deep calls. No authoritative citation; conservative published heuristic. Recommend re-solve via the push/fold chart at stacks <=15 BB for production use.",
+  "_combo_count_approx": 258
+}
