@@ -12,6 +12,103 @@ In-flight on feature branches; not yet merged to `main`.
 ### In progress
 - PR 10b mock→real solver swap; v1.5/v2 follow-ups.
 
+## [1.1.0] - 2026-05-23
+
+PR 9: HUNL **preflop subgame solver** (Python + Rust tiers) with
+equity-leaf substitution. Closes the public OSS preflop gap for **point
+hole-card pairs**; full-tree preflop deferred. Preflop subgame solves
+now ship in both tiers on the PR 3 HUNL tree (4-bet / 5-bet ladder) +
+PR 1 DCFR core, with an equity-leaf substitution wrapper (Brown &
+Sandholm 2018 depth-limited-solving pattern) collapsing postflop
+subtrees to equity-weighted terminals. MINOR bump: new public entry
+point + additive dispatch composition; zero behavior change to PRs 1-8
+or the v1 GA API surface.
+
+### Added
+
+- **Python preflop solver** (`poker_solver/preflop.py`, 516 lines):
+  `solve_hunl_preflop(config, ...)`, `PreflopSubgameGame` wrapper,
+  `PreflopSolveResult` dataclass. Caller supplies `HUNLConfig` with
+  `starting_street=PREFLOP` + fixed `initial_hole_cards`. Equity is
+  exhaustively enumerated (not Monte Carlo) so Python and Rust produce
+  bit-exact leaf values.
+- **Rust preflop port** (`crates/cfr_core/src/preflop.rs`, 525 lines):
+  in-Rust exhaustive equity enumerator + `PreflopDcfr` loop reusing
+  `HUNLState` / `HUNLConfig` from PR 3 / 6.
+- **PyO3 bindings** (`crates/cfr_core/src/lib.rs`, +66 lines):
+  `pub mod preflop;` + `solve_hunl_preflop` binding.
+- **Dispatch composition** (`poker_solver/solver.py`, +97/-3): routes
+  preflop HUNL with fixed hole cards to Python or Rust per `backend=`.
+  Rust branch recomputes exploitability + game_value through
+  `PreflopSubgameGame`.
+- **Re-exports** in `poker_solver/__init__.py`: `solve_hunl_preflop`,
+  `PreflopSolveResult`, `PreflopSubgameGame`.
+
+### Performance (measured, single trial; 500 iters)
+
+100 BB AA vs KK, 5 bet sizes, 608 infosets:
+
+| Tier | Wall-clock | Iters/sec |
+|---|---|---|
+| Python | ~25 sec | ~20 |
+| **Rust** | **~1.2 sec** | **~420** |
+
+**~21x** Rust speedup on the same tree. Equity cache hit rate after
+iteration 1: 100% (warms in ~0.1 sec of Rust solve).
+
+### Tests
+
+- 16 Python tests (`tests/test_preflop_python.py`) — API contract,
+  symmetry, dispatch, equity-leaf, memory report.
+- 4 Rust cargo unit tests in `preflop::tests` — equity AA-vs-KK
+  canonical, AA-vs-AA = 0.5, subgame config accepted, missing
+  hole-cards rejected.
+- 13 differential tests (`tests/test_preflop_diff.py`) at 5 / 20 / 100
+  BB, per-action tolerance **5e-3**, per-spot game-value tolerance
+  **1e-3** (scope: point hole-card pairs).
+- 83 regression tests (HUNL tree / core / pushfold / action
+  abstraction / DCFR core+diff) all pass.
+
+### Fixed
+
+- **Banker's-rounding fix** in pre-existing code:
+  `crates/cfr_core/src/hunl.rs` `python_round_positive`. PR 6's
+  implementation was round-half-up (`(value + 0.5).floor()`) despite
+  the docstring claiming "byte-for-byte parity with Python's
+  `round()`". Switched to Rust 1.77+ `f64::round_ties_even`.
+  Eliminates one-chip token divergences (e.g., Python `r1037` vs
+  old-Rust `r1038`) surfaced by the PR 9 diff test at the 4-bet ladder
+  rounding boundary.
+
+### Changed
+
+- **`solve()` dispatch ordering** preserved per §6 canonical
+  invariant: push/fold chart short-circuit at ≤15 BB still hits FIRST.
+  PR 9 only invoked for stacks 15-250 BB (or when caller passes
+  `allow_pushfold_range=True`).
+
+### Out of scope (deferred)
+
+- **Full Pluribus blueprint + subgame refinement**: PR 9 ships
+  subgame-only with fixed initial hole cards, not the
+  `pr9_spec.md` blueprint+refinement architecture.
+- **Full-tree preflop** with range-based hole-card dealing — point
+  hole-card pairs only; range support is a follow-up (169-class hand
+  abstraction or Pluribus blueprint pattern).
+- **`on_progress` callback** threading for PR 10b UI dispatch.
+- **Postflop continuation beyond equity-leaf**: full Pluribus subgame
+  refinement composing PR 5's `solve_hunl_postflop` (current wrapper
+  bakes in "check it down" for non-all-in preflop closes).
+
+### License compliance
+
+Zero new deps; no AGPL leakage; MIT-only posture preserved.
+`cargo.lock --locked` verified.
+
+### Internal
+
+- `__version__` bumped to `1.1.0`.
+
 ## [1.0.1] - 2026-05-23
 
 PR 8: NEON SIMD kernels + cache-blocked layout primitive + public chance
@@ -846,7 +943,8 @@ and a hybrid exact / Monte Carlo equity calculator.
 - Initial Texas Hold'em equity solver scaffold (`023956e`):
   hand evaluator, Monte Carlo equity, range parser, CLI.
 
-[Unreleased]: https://github.com/amaster97/poker_solver/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/amaster97/poker_solver/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/amaster97/poker_solver/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/amaster97/poker_solver/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/amaster97/poker_solver/releases/tag/v1.0.0
 [0.6.1]: https://github.com/amaster97/poker_solver/releases/tag/v0.6.1
