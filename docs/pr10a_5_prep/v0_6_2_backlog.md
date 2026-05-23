@@ -1,14 +1,22 @@
-# v0.6.2 backlog — PR 10a.5 deferred should-fixes
+# v0.6.2 backlog — PR 10a.5 deferred should-fix items
 
-Two audit-flagged should-fix items were deferred from PR 10a.5 (v0.6.1) because each carries a real design surface that warrants its own scoped PR with proper tests. v0.6.1 shipped item 1 (the f-string fix); items 2 and 3 below remain.
+PR 10a.5 (v0.6.1) landed the conformance fix for the pushfold f-string toast (item 1) and deferred the remaining two should-fix items from the audit because each carries a real design surface. This file expands both items with the design analysis needed to scope and ship a v0.6.2 polish PR.
 
-Status: not started. Each is a self-contained polish item — likely a single fan-out PR (e.g., PR 10a.6) covering both, or two micro-PRs if the design discussion below pulls them apart.
+## v0.6.2 scope
+
+**Deliverables:**
+1. Bound the OOM-recovery prune so `bet_sizes_checked` cannot go empty (item 2).
+2. Resolve the `SolveRunner.compute_eta()` dead-code surface (item 3) — delete or wire.
+
+**Ship order:** item 2 first (isolated, no spec touch); then item 3 (touches state.py). One PR (`pr-10a.6-polish`), one commit per item for clean revert.
+
+**Tests:** `test_reduce_bet_sizes_keeps_minimum_one_size` — fixture `bet_sizes_checked=(1.5, 2.0)`, invoke `_reduce_bet_sizes`, assert `len >= 1` and fallback toast fired. Item 3 test depends on chosen option.
 
 ---
 
-## Item 2 — `run_panel._reduce_bet_sizes` unbounded prune
+## Item 2 — Unbounded `bet_sizes_checked` pruning
 
-**Location:** `ui/views/run_panel.py:540-542`
+**Location:** `ui/views/run_panel.py:538-548` (inside the OOM branch of `_show_error`).
 
 ```python
 def _reduce_bet_sizes(_e: Any = None) -> None:
@@ -16,85 +24,40 @@ def _reduce_bet_sizes(_e: Any = None) -> None:
     spot.bet_sizes_checked = tuple(
         bs for bs in spot.bet_sizes_checked if bs <= 1.0
     )
-    ui.notify(
-        "Bet sizes reduced to <=100% pot; rerun solve.",
-        type="info",
-        ...
-    )
+    ui.notify("Bet sizes reduced to <=100% pot; rerun solve.", ...)
 ```
 
-**Problem:** The filter keeps only `bs <= 1.0`. If the user has configured a spot where every checked bet size is `> 1.0` (e.g., a custom abstraction with only over-pot sizes for a specific exploit study), the result is an empty tuple. The downstream solver will then either crash or silently behave as if there are no aggressive lines — neither acceptable from a UX surface advertised as a recovery action ("Reduce bet sizes" button surfaced on OOM error).
+**Bug:** The filter keeps only `bs <= 1.0`. With the default `(0.33, 0.75, 1.0)` (`ui/state.py:357`) the result always retains at least one size. But for a user with a custom config like `(1.5, 2.0)` — perfectly legal per `SpotConfig` — pruning produces `()`. Downstream `HUNLConfig(bet_size_fractions=())` (`ui/state.py:422`) then degenerates: the solver sees no aggressive lines, silently abstracting the spot into check/call-only and producing strategies that look "fine" but are unsolvable as configured.
 
-**Safe-by-default:** The shipping abstraction (PR 4) includes 0.5, 0.75, 1.0 in the default tuple, so the empty-result branch is unreachable in defaults. The risk is real only for the custom-config-with-only-`>1.0`-sizes user.
+**Design options:**
 
-**Design questions for v0.6.2 PR:**
+- **2A. Floor at 1 size + fallback toast.** If post-filter result is empty, restore the smallest original size (or `(1.0,)`); fire a second toast: "All sizes >100% pot — kept the smallest at <X>; try smaller tree depth instead."
+- **2B. Refuse to prune on custom configs.** If `spot.bet_sizes_checked != DEFAULT_BET_SIZES`, abort the action and notify the user that custom configs require manual reduction.
+- **2C. Prune to empty, then re-populate with `(1.0,)`.** Always end with `(1.0,)` regardless of input. Simpler than 2A but discards user intent more aggressively.
 
-1. **Clamp policy.** Three viable choices:
-   - **(a)** Default-clamp: if pruned result is empty, fall back to `(1.0,)` (the smallest bet size we want a solver to ever see). Simple, safe; user may feel surprised.
-   - **(b)** Default-clamp + toast: same as (a) but with a second `ui.notify` explaining the floor was applied. Explicit, slightly more code.
-   - **(c)** Block-and-prompt: if pruned result is empty, abort the prune action and notify "All your bet sizes are >1.0; reduce-bet-sizes cannot help here." Honest, but the OOM recovery surface goes dead exactly when most needed — a bad outcome.
-   Recommendation: **(b)**, since the OOM-recovery surface is the failure mode this button exists to handle.
+**Recommended: 2A.** Defense: the OOM button is most valuable when the user has opted into expensive sizes — exactly the population most likely to OOM. Killing the recovery surface in that case (2B) defeats the button's purpose; silently rewriting to `(1.0,)` (2C) discards user intent. 2A preserves the action, informs via a second toast, and mirrors the "second-toast" pattern already in use.
 
-2. **Test surface.** Smoke 18 (X5) only checks marker presence on the button — it does not exercise the click handler. A new unit test in `tests/test_ui_smoke.py` (or `tests/ui/test_run_panel_recovery.py`) should construct a spot with `bet_sizes_checked = (1.5, 2.0)`, invoke `_reduce_bet_sizes`, and assert `spot.bet_sizes_checked == (1.0,)` plus toast emission.
+**Estimated effort:** ~10 LOC in `_reduce_bet_sizes`; ~15 LOC test. No UI surface change beyond the new toast.
 
-3. **Spec touch.** None — purely UI-surface behavior; solver semantics unchanged. No spec-freeze concern.
-
-**Estimated effort:** ~5–10 min code + ~10 min test + ~5 min PR overhead. Single agent.
+**Open question:** floor at `(1.0,)` or `min(original_sizes)` when all are > 1.0? Lean `min(original_sizes)` — more honest to user intent.
 
 ---
 
-## Item 3 — `SolveRunner.compute_eta()` dead-code path
+## Item 3 — Dead-code `SolveRunner.compute_eta()`
 
-**Location:** `ui/state.py:603-635`
+**Two ETA paths coexist:**
+- `SolveRunner.compute_eta()` in `ui/state.py:603-635` — linear iters/sec extrapolation using `target_iterations` and `start_time_monotonic`/`current_time_monotonic`. Only callable in tests; `_worker()` never sets the three required attributes, and `start()` doesn't capture `target_iterations`. So in production it returns `None` on the `target is None` branch (`state.py:629-631`).
+- `_compute_eta(history, wall)` in `ui/views/run_panel.py:479-513` — log-space slope fit over `expl_history`, projecting iters-to-target of 0.5 mBB/pot. Live; called from `refresh_progress` at `run_panel.py:305` when `wall > 30 s and len(expl_history) >= 3`.
 
-```python
-def compute_eta(self) -> float | None:
-    """Return the linear-extrapolation ETA in seconds, or None if N/A."""
-    iters = self.iteration
-    if iters <= 0:
-        return None
-    start = getattr(self, "start_time_monotonic", None)
-    now = getattr(self, "current_time_monotonic", None)
-    if start is not None and now is not None:
-        elapsed = float(now) - float(start)
-    else:
-        elapsed = time.time() - self.started_at if self.started_at else 0.0
-    ...
-    target = getattr(self, "target_iterations", None)
-    if target is None or target <= iters:
-        return None
-    rate = iters / elapsed
-    if rate <= 0:
-        return None
-    return (target - iters) / rate
-```
+**Feature comparison:** the two functions compute fundamentally different ETAs. State's `compute_eta` gives "seconds to hit `target_iterations`" (iter-count target); run_panel's `_compute_eta` gives "seconds to hit `0.5 mBB/pot` exploitability" (quality target, the metric specified in `pr10a_spec.md` §6 edge #1). The state-side method also requires `target_iterations` to be set, which the worker today does not propagate from the dispatch config. The run_panel-side function works purely from `expl_history`, which is already populated by `_worker`.
 
-**Problem:** `compute_eta()` exists and is unit-tested (smoke 20 (X7) sets `start_time_monotonic`, `current_time_monotonic`, `target_iterations` directly and asserts the return value), but in production the `_worker()` method never assigns `start_time_monotonic`, `current_time_monotonic`, or `target_iterations`. So in real solves the method falls through to the `time.time() - started_at` branch but then always returns `None` because `target_iterations` is unset. The progress-eta UI element (smoke 19) shows the marker but never updates with a real ETA.
+**Design options:**
 
-This is dead code in prod: the surface advertised by smoke 20 is provably real only inside the test fixture.
+- **3A. Delete `SolveRunner.compute_eta()` + the three `start_time_monotonic` / `current_time_monotonic` / `target_iterations` attributes; refactor smoke 20 to test `_compute_eta` from `run_panel` directly.** Cost: ~30 LOC removed + 1 test rewritten (~15 LOC). Cleanest. Surfaces the actual production ETA path.
+- **3B. Wire up the state-side path: have `start()` capture `target_iterations`, have `_worker` tick `current_time_monotonic`, then replace `_compute_eta` calls with `runner.compute_eta()` in `run_panel:305`.** Cost: ~15 LOC in `state.py` + 3 LOC in `run_panel.py`, but semantic change (iter-target vs expl-target ETA) and requires deciding which ETA we actually want to show. Adds threading exposure (worker writes `current_time_monotonic`; UI reads).
 
-**Design questions for v0.6.2 PR:**
+**Recommended: 3A.** Defense: the spec calls for exploitability-target ETA, which is what `run_panel._compute_eta` already does. The state-side `compute_eta` is an iter-target ETA — a different feature, never wired, and arguably the wrong metric. Deleting it removes 30 LOC of dead code, removes the smoke 20 fast-path that misleads readers, and avoids touching `_worker` (which PR 10a.5 deliberately kept byte-unchanged). The smoke 20 rewrite synthesizes `expl_history` and a wall > 30 — direct, no UI loop.
 
-1. **Rip vs wire.** Two paths:
-   - **Rip:** delete `compute_eta()`, delete `start_time_monotonic`/`current_time_monotonic`/`target_iterations` attributes, delete the progress-eta UI element. Breaks smoke 20 (deletion) and smoke 19 (marker presence) — both would need to be updated or removed. Honest minimization but discards the UX feature the PR 10a spec §6 edge #1 explicitly called for ("UI surfaces an ETA after 30s of forward progress so the user can decide whether to stop").
-   - **Wire:** modify `start()` to capture `target_iterations` from the dispatch config and `start_time_monotonic = time.monotonic()`; modify `_worker()` to tick `current_time_monotonic = time.monotonic()` on each progress callback; modify `_update_progress` in `run_panel.py` to call `runner.compute_eta()` and render the result.
-   Recommendation: **Wire**, since the PR 10a spec calls for this. But the wiring touches the production ETA path — own audit warranted, and probably its own small test that exercises `start() → _worker tick → compute_eta()` end-to-end (not just direct attribute injection like smoke 20 does).
+**Estimated effort:** ~30 LOC removed (`state.py` method + three attribute inits + docstring); ~15 LOC test rewrite (`tests/test_ui_smoke.py:706-724`); zero UI surface change.
 
-2. **Threading.** `start_time_monotonic` is set on the orchestrator thread once at `start()`; `current_time_monotonic` ticks from the worker thread. Reads happen from the UI thread. Plain attribute assignment is racy in principle but the GIL plus the fact that float writes are atomic in CPython makes this fine; just document the contract.
-
-3. **Spec coverage gap.** The 30s-threshold logic (spec §6 edge #1) is a UI policy, not currently encoded anywhere. Either land it now in `_update_progress` (only show ETA when `elapsed >= 30`) or defer to a follow-up that owns the UX trigger.
-
-4. **Cross-cut with other deferred work.** The pr10a_5 `commit_prep.md` lists two other spec-coverage gaps (blocker-overlay visual, pushfold-toast text) that share the same "ship the marker, defer the polish" pattern. They are natural neighbors to wire alongside item 3 in v0.6.2.
-
-**Estimated effort:** ~20–40 min code + ~30 min test + ~15 min audit + ~10 min PR overhead. Single agent, but with a clear hand-off to an auditor since this touches the production ETA path.
-
----
-
-## Recommended sequencing for v0.6.2
-
-1. Open `pr-10a.6-polish` (or whatever the naming convention dictates) off `integration` HEAD (currently `c8aa2a2` post-Option-C-tracking commit).
-2. Land item 2 first (smaller, fully isolated, no spec touch).
-3. Land item 3 second, with the wire-up path; pull in the blocker-overlay visual + pushfold-toast text spec-coverage gaps from `commit_prep.md` as bonus scope if the agent has headroom.
-4. Tag v0.6.2 from integration; same Option-C tracking semantics apply.
-
-No blockers; can be picked up any time after PR 10a.5 lands (which it has, as of v0.6.1).
+**Open question:** any other caller depend on the three attributes? `grep` across `ui/` + `tests/` shows only smoke 20. Safe to remove.

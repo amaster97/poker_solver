@@ -1,10 +1,10 @@
 # Plan: GTO Solver for No-Limit Hold'em
 
-**Status:** PR 1-7 + 3.5 + 3.5-followup + 4.5 + 10a + 11 landed; main + integration both at `62c75d5`; v1.0.0 GA tagged at `bbb4395`.
+**Status:** PR 1-7 + 3.5 + 3.5-followup + 4.5 + 10a + 10a.5 + 11 landed; v1.0.0 GA tagged at `bbb4395`; **v0.6.1 milestone tagged on integration at `67760c7`** (PR 10a.5 UI conformance follow-up). `main` still at `62c75d5` awaiting split-script execution; integration tip at `9936d5f` is **8 commits ahead of `origin/integration`** (nothing pushed yet).
 
-**Branch state (2026-05-22):** integration→main merge completed today — 30 commits fast-forwarded; `main` advanced from `2b67370` to `62c75d5`. v1.0.0 GA tag (`bbb4395`) is reachable from main via FF. `origin/equity-precision` deleted (confirmed gone; matches desired state).
+**Branch state (2026-05-23):** PR 10a.5 landed locally at `67760c7` (22/22 smoke pass, 5 fail + 7 xfail resolved). **Option C dual-channel cutover EXECUTED** at `c8aa2a2` — `docs/` and `PLAN.md` now TRACKED on integration; `.gitignore` updated; private mirror plan locked. Doc-landing wave: `8a4fa82` (USAGE + DEVELOPER), `178fd6b` (sync_repos.sh + runbook), `c50f4dd` (split_main_for_publish.sh), `9936d5f` (routing check report). `poker_solver_private` GitHub repo created today (private mirror destination); `backup` private remote being wired in parallel — first push of integration → backup imminent.
 
-**Current session: autonomous overnight mode (started 2026-05-21).** User asleep. Working through PR 5 verification → commit; PR 6+ launches when PR 5 lands. **No GitHub pushes without explicit OK.** Local commits to feature branches; `integration` accumulates merged PR branches. Per-decision audit trail in `docs/autonomous_log.md`.
+**Current session: autonomous overnight mode (started 2026-05-21).** PR 8 + PR 9 implementers still in flight (worktrees). **No GitHub pushes without explicit OK.** Local commits to feature branches; `integration` accumulates merged PR branches. Per-decision audit trail in `docs/autonomous_log.md`.
 
 ---
 
@@ -55,6 +55,7 @@
 - **Solver UI control: exploitability target (primary) + iter count cap (safety).** Original PR 10a Q3 (iter count 1000 vs 2000) **reframed 2026-05-22**: the user-facing knob is a target exploitability (% pot), with iter count acting as a safety ceiling (max 2000). Slider tiers: **Draft (1% pot) · Standard (0.5% pot) · Tight (0.25% pot) · Library (0.1% pot).** Default numeric tier values are TBD until a measurement pass runs after PR 10b lands (need real-solver convergence curves to set sensible defaults). Reference: industry standard from `references/blog/gtow_how_solvers_work.md` + Brown's MIT reference solver default of 2000 iters.
 - **Branching: per-PR feature branches from PR 3 onward** (`pr-N-<title>`). PR 1 and PR 2 went directly to `main` (acknowledged; not retroactively fixable).
 - **Mandatory PR audit from PR 3 onward:** a fresh `general-purpose` agent with no implementation context reviews the diff and writes `audit_report.md`. User reads `audit_report.md` + `pr_report.md` before approving commit.
+- **Dual-channel publishing — Option C ACTIVE (executed 2026-05-23 at `c8aa2a2`).** `docs/` and `PLAN.md` are TRACKED on integration (the planning channel); `.gitignore` updated accordingly. Private mirror destination: `poker_solver_private` GitHub repo (created today) reached via `backup` remote. Public-facing main is published via `scripts/split_main_for_publish.sh` (committed `c50f4dd`) which sanitizes planning artifacts before pushing to `origin/main`. Sync runbook: `scripts/sync_repos.sh` + `docs/sync_runbook.md` (committed `178fd6b`).
 
 ### Explicitly out of scope (v1)
 
@@ -95,7 +96,7 @@ Progress legend: ✅ shipped (committed + pushed to GitHub) · 🚧 in flight (a
 | PR 8 | NEON SIMD + cache-blocking + public chance sampling in Rust | 📋 | spec'd + prompts |
 | PR 9 | HUNL preflop (both tiers) | 📋 | spec'd + prompts |
 | **PR 10a** | NiceGUI scaffold + **mock solver layer** (range matrix, board input, controls, tree browser; no real engine) | ✅ | `8d514a2` + followup `040fc45` → merged `b880032` (**v0.6.0**; UI mock-first scaffold) |
-| **PR 10a.5** | Audit-debt conformance pass (clear 5 fail + 7 xfail surfaced post-GA) | 🚧 | branch `pr-10a.5-conformance` from `62c75d5`; audit verdict **READY** (2026-05-23) with 3 should-fix items — pending commit |
+| **PR 10a.5** | Audit-debt conformance pass (clear 5 fail + 7 xfail surfaced post-GA) | ✅ | merged at `67760c7` (**v0.6.1 milestone on integration**); 22/22 smoke pass, item 1 f-string fix included; items 2 + 3 deferred to v0.6.2 backlog (`docs/pr10a_5_prep/v0_6_2_backlog.md`); `main` awaiting split-script execution |
 | **PR 10b** | Replace mock with real solver bindings (Python tier; Rust tier when ready) | 📋 | spec'd + prompts; deps: PR 9 + PR 10a |
 | **PR 11** | Library mode + macOS packaging (codesign + notarize + .dmg) | ✅ | `6af3684` → merged `bbb4395` (**v1.0.0 GA milestone**) + follow-up `639c776` (post-GA fix on `a7955c7` tip) |
 | PR 12 | 3-handed postflop stretch (optional; explicitly approximate) | 📝 | spec only — no impl prompts; deferred |
@@ -116,10 +117,11 @@ PR 5 (postflop) ──→ PR 6 (Rust port) ──→ PR 7 / PR 8 (perf, parity)
    PR 12 (3-handed stretch, post-v1) ←──── PR 9 + PR 10b
 ```
 
-### Post-GA sequencing decision (2026-05-22)
+### Post-GA sequencing decision (2026-05-22, updated 2026-05-23)
 
-- **PR 10a.5 lands first** (clears 5 fail + 7 xfail conformance debt on `62c75d5` baseline).
-- **PR 8 ∥ PR 9 planned in parallel** after PR 10a.5 ships. NEON SIMD perf work (PR 8) and HUNL preflop (PR 9) touch disjoint code surfaces; no fan-out conflict.
+- **PR 10a.5 ✅ shipped** at `67760c7` / v0.6.1 (cleared 5 fail + 7 xfail conformance debt; should-fix items 2 + 3 deferred to v0.6.2 backlog).
+- **Option C dual-channel cutover EXECUTED** at `c8aa2a2` (2026-05-23). Not a PR per se — a structural change: `docs/` and `PLAN.md` are now TRACKED on integration; `.gitignore` updated; private mirror plan (`poker_solver_private` GitHub repo + `backup` remote) locked. First integration → backup push imminent.
+- **PR 8 ∥ PR 9 planned in parallel** after PR 10a.5 ships — implementers currently in flight (worktrees). NEON SIMD perf work (PR 8) and HUNL preflop (PR 9) touch disjoint code surfaces; no fan-out conflict.
 - **PR 10b waits for PR 9** (real-solver bindings need the preflop tier).
 - **PR 8 preflop-perf gap — option 3 accepted:** PR 8's DCFR inner-loop optimization is expected to cover ~70–80% of preflop perf for free (the inner CFR loop is shared). PR 9 will add preflop-specific traversal code that PR 8 doesn't touch. **Do not preemptively block on it.** If measured-slow after both ship, add a small follow-up perf pass. Rejected alternatives: (1) extend PR 8 to include preflop traversal — bloats scope, delays SIMD ship; (2) gate PR 9 on a PR-8-preflop-perf addendum — couples two independent work tracks.
 
@@ -227,7 +229,7 @@ scripts/             setup_references.sh, check_pr.sh
 - **Within a PR:** parallelize aggressively; no user input required mid-PR.
 - **Between PRs:** checkpoint by default. I hand `pr_report.md` + `audit_report.md` + diff to user; wait for approval before merging to main.
 - **PR-branch pushes:** **autonomous** (user-authorized 2026-05-21).
-- **Autonomous overnight mode:** `integration` branch ("pseudo-main") autonomously accumulates merged PR branches; always reflects the latest working set. Tip: `a7955c7` (PR 11 v1.0.0 GA tagged at `bbb4395`; follow-up commit `639c776` on top).
+- **Autonomous overnight mode:** `integration` branch ("pseudo-main") autonomously accumulates merged PR branches; always reflects the latest working set. Tip: `9936d5f` (8 commits ahead of `origin/integration`; PR 10a.5 / v0.6.1 at `67760c7`, Option C cutover at `c8aa2a2`, doc-landing wave + scripts on top).
 - **`main` merges:** require explicit user OK.
 - **Force pushes (any branch):** require explicit user OK.
 
@@ -237,11 +239,11 @@ scripts/             setup_references.sh, check_pr.sh
 
 Things surfaced during recent sessions that must not be forgotten. Each has an explicit action and the PR that owns it. Source: `docs/open_items_audit_2026-05-22.md` + `docs/plan_log_final_sweep.md`.
 
-Trajectory note: `eee9b4b` (PR 4 + PR 5) was the **v0.4.0 milestone** — first user-visible postflop solver + profiler beyond push/fold. **`6c438b8` (PR 6) is the v0.5.0 milestone** — Rust port of HUNL postflop with ~24x speedup over Python tier. **`bbb4395` (PR 11) is the v1.0.0 GA milestone** — first end-user-shippable artifact (library + macOS .dmg).
+Trajectory note: `eee9b4b` (PR 4 + PR 5) was the **v0.4.0 milestone** — first user-visible postflop solver + profiler beyond push/fold. **`6c438b8` (PR 6) is the v0.5.0 milestone** — Rust port of HUNL postflop with ~24x speedup over Python tier. **`bbb4395` (PR 11) is the v1.0.0 GA milestone** — first end-user-shippable artifact (library + macOS .dmg). **`67760c7` (PR 10a.5) is the v0.6.1 milestone on integration** — UI conformance follow-up cleared 5 fail + 7 xfail.
 
 ### v1.0.0 GA milestone callout
 
-- **v1.0.0 GA = PR 11** (library mode + macOS .dmg, codesign + notarize). Shipped `6af3684` → merged `bbb4395`. **First end-user-shippable artifact** — the engine (PR 1-7 + 4.5) plus UI scaffold (PR 10a) plus packaging now reaches a real user's Mac without a dev environment. Remaining work (PR 8 perf, PR 9 preflop, PR 10b real-bindings, PR 10a.5 polish, PR 12 stretch) is post-GA enhancement, not blocker.
+- **v1.0.0 GA = PR 11** (library mode + macOS .dmg, codesign + notarize). Shipped `6af3684` → merged `bbb4395`. **First end-user-shippable artifact** — the engine (PR 1-7 + 4.5) plus UI scaffold (PR 10a) plus packaging now reaches a real user's Mac without a dev environment. Remaining work (PR 8 perf, PR 9 preflop, PR 10b real-bindings, PR 12 stretch) is post-GA enhancement, not blocker. PR 10a.5 polish landed post-GA at `67760c7` / v0.6.1.
 
 ### v0.5.0 milestone callout
 
@@ -295,15 +297,17 @@ Nine `launch_kickoff.md` files now live under `docs/` ready to be invoked verbat
 - **`docs/pr11_prep/launch_kickoff.md`** — library mode + macOS packaging (shipped at `bbb4395`, **v1.0.0 GA**).
 - **`docs/pr12_prep/launch_kickoff.md`** — 3-handed postflop stretch (optional, explicitly approximate).
 
-Sequencing intent: PR 6 ✅ → PR 7 ✅ → PR 4.5 ✅ → PR 10a ✅ → PR 11 ✅ (**v1.0.0 GA**) → PR 10a.5 + PR 8 + PR 9 → PR 10b → PR 12.
+Sequencing intent: PR 6 ✅ → PR 7 ✅ → PR 4.5 ✅ → PR 10a ✅ → PR 11 ✅ (**v1.0.0 GA**) → PR 10a.5 ✅ (**v0.6.1**) → PR 8 ∥ PR 9 → PR 10b → PR 12.
 
-**Remaining post-GA work:** PR 10a.5 (UI polish / xfail follow-ups beyond `040fc45`), PR 8 (NEON SIMD + cache-blocking + public chance sampling), PR 9 (HUNL preflop both tiers), PR 10b (real-solver bindings replacing the mock), PR 12 (3-handed stretch, optional).
+**Remaining post-GA work:** PR 8 (NEON SIMD + cache-blocking + public chance sampling — implementer in flight), PR 9 (HUNL preflop both tiers — implementer in flight), PR 10b (real-solver bindings replacing the mock), PR 12 (3-handed stretch, optional). v0.6.2 backlog (`docs/pr10a_5_prep/v0_6_2_backlog.md`) carries the two deferred should-fix items from PR 10a.5.
 
-### User-facing docs (in flight 2026-05-22)
+### User-facing docs (landed 2026-05-23)
 
-- **`USAGE.md`** — end-user guide (install, first solve, range editor, exploitability slider semantics, library mode). Being written this session.
-- **`DEVELOPER.md`** — contributor guide (two-tier architecture, differential test loop, audit protocol, PR branch convention, perf instrumentation). Being written this session.
+- **`USAGE.md`** — end-user guide (install, first solve, range editor, exploitability slider semantics, library mode). Landed at `8a4fa82`.
+- **`DEVELOPER.md`** — contributor guide (two-tier architecture, differential test loop, audit protocol, PR branch convention, perf instrumentation). Landed at `8a4fa82`.
 - **`README.md`** — remains the project landing page (one-screen pitch + quick install + links to USAGE and DEVELOPER). No change planned.
+- **`scripts/sync_repos.sh` + `docs/sync_runbook.md`** — dual-channel sync tooling for Option C (integration → public main publish flow). Landed at `178fd6b`.
+- **`scripts/split_main_for_publish.sh`** — sanitization step that strips planning artifacts before pushing to public `origin/main`. Landed at `c50f4dd`.
 
 ---
 
@@ -344,3 +348,4 @@ Decisions made then revised. Preserved here so the reasoning trail isn't lost.
 - **Research plan (Phase 1) — three parallel Explore agents.** Complete. Findings folded into §1 locked decisions. Was load-bearing for algorithm choice (DCFR), hardware path (CPU not GPU), industry positioning (PioSolver target), and the license audit.
 - **First-PR scope (original 9-step Ultraplan):** Kuhn + DCFR + maturin/PyO3 + diff test + references scaffold. Shipped as PR 1 (`9d2d66a`). Detailed step-by-step spec retired; current state is the code on main.
 - **PR 10a Q3 — iter count 1000 vs 2000 → exploitability-target slider with iter cap.** Original framing pinned the UI knob to raw iterations. Reframed 2026-05-22 because industry standard is exploitability, not iter count: `postflop-solver` defaults to 0.5% pot, GTOW library tier is 0.1–0.3% pot, Shark targets 0.1% pot, Brown's MIT reference solver uses 2000 iters as the convergence proxy. Exploitability is the dimensionless quality measure across stacks/streets; iter count is just the safety ceiling. Numeric tier defaults deferred to a post-PR-10b measurement pass. Current state: see §1 Solver UI control.
+- **Dual-channel publishing strategy — single-repo-with-gitignore → Option C (tracked-on-integration, sanitized-on-main).** Executed 2026-05-23 at `c8aa2a2`. Prior state: `docs/` and `PLAN.md` lived in the working tree but were gitignored, so planning artifacts had no version history and couldn't survive a clean clone. New state: integration tracks `docs/` and `PLAN.md` directly (private channel via `backup` remote → `poker_solver_private` GitHub repo created today); `main` is published via `scripts/split_main_for_publish.sh` which strips planning artifacts before pushing to public `origin/main`. Why: a private mirror is necessary anyway (planning content has internal-only details), so making the planning channel a first-class tracked surface is strictly better than ad-hoc local-only artifacts. Current state: see §1 Dual-channel publishing locked decision + §7 user-facing docs.
