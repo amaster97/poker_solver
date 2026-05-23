@@ -1,6 +1,6 @@
 ## Linked issue
 
-Fixes #... (or "n/a — small drive-by fix" / "n/a — PR N from `PLAN.md`").
+Fixes #... (or "n/a — small drive-by fix" / "n/a — roadmap PR").
 
 ## Summary
 
@@ -31,8 +31,9 @@ What was verified, concretely:
 
 ## Cross-cutting changes
 
-- [ ] `PLAN.md` updated if a locked decision changed or a new one was
-  added (and the change explained in the PR body)
+- [ ] If the change affects a locked design decision (algorithm,
+  abstraction, stack range, license posture), call it out in the PR
+  body
 - [ ] `CHANGELOG.md` entry added under `[Unreleased]` (or appropriate
   version section if cutting a release)
 - [ ] `README.md` updated if a public-facing feature, command, or

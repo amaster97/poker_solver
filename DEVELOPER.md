@@ -5,8 +5,7 @@ This is the "I want to make the codebase do something" entry point. Read
 for the dev-environment setup, branching, license rules, and PR audit
 contract — this document does not repeat those, it cross-links them and
 focuses on architecture, mental model, and the workflow for landing a
-substantive change. For the strategic roadmap and locked design
-decisions see [`PLAN.md`](PLAN.md).
+substantive change.
 
 Goal: orient a new contributor in about fifteen minutes.
 
@@ -36,10 +35,10 @@ single most load-bearing invariant in the repo, so do not weaken it
 without an explicit PR-level decision.
 
 The two-tier pattern is not novel: Noam Brown's reference repo
-[`references/code/noambrown_poker_solver`](references/code/) ships a
-`python/` and a `cpp/` tier with the same correspondence. We adopted
-it for the same reason — the readable tier is the spec, the fast tier
-is the deliverable, the diff test is the gate.
+`noambrown/poker_solver` ships a `python/` and a `cpp/` tier with the
+same correspondence. We adopted it for the same reason — the readable
+tier is the spec, the fast tier is the deliverable, the diff test is
+the gate.
 
 **Rule of thumb:** Algorithm changes (new DCFR variant, abstraction
 tweak, action set change) land in Python first, get tested against a
@@ -57,10 +56,9 @@ Top-level layout:
 | [`poker_solver/`](poker_solver/) | Python reference tier (ground truth). |
 | [`crates/cfr_core/`](crates/cfr_core/) | Rust performance tier (PyO3 ext). |
 | [`tests/`](tests/) | Pytest suite. `test_*_diff.py` are the two-tier gates. |
-| [`references/`](references/) | Papers, blogs, OSS solver clones. Read-first source of truth. |
-| [`ui/`](ui/) | NiceGUI app (PR 10a; mock-backed today, PR 10b swaps in real). |
+| `references/` (local-only, gitignored) | Papers, blogs, OSS solver clones. Populated by `scripts/setup_references.sh`. |
+| [`ui/`](ui/) | NiceGUI app (mock-backed today; a future PR swaps in real solver). |
 | [`scripts/`](scripts/) | `check_pr.sh`, chart generation, macOS packaging. |
-| [`docs/`](docs/) | Per-PR prep folders, audit reports, release notes, architecture deep-dive. |
 
 Inside [`poker_solver/`](poker_solver/):
 
@@ -87,11 +85,12 @@ Inside [`crates/cfr_core/src/`](crates/cfr_core/src/):
 - [`hunl.rs`](crates/cfr_core/src/hunl.rs), [`hunl_tree.rs`](crates/cfr_core/src/hunl_tree.rs), [`hunl_eval.rs`](crates/cfr_core/src/hunl_eval.rs), [`hunl_solver.rs`](crates/cfr_core/src/hunl_solver.rs) — HUNL postflop port.
 - [`abstraction.rs`](crates/cfr_core/src/abstraction.rs) — bucket lookup from the precomputed `.npz`.
 
-Inside [`references/`](references/):
+Inside `references/` (after running `scripts/setup_references.sh`; the
+entire tree is gitignored and local-only):
 
-- [`papers/`](references/papers/) — PDFs of DCFR, CFR+, vanilla CFR, Libratus, Pluribus, Deep CFR, ReBeL, hyperparameter schedules, surveys. Per-paper notes in `papers/_INDEX.md`.
-- [`code/`](references/code/) — gitignored OSS solver clones (cloneable via `scripts/setup_references.sh`): `noambrown_poker_solver`, `slumbot2019`, `open_spiel`, `postflop-solver`, `TexasSolver`, `shark-2.0`.
-- [`blog/`](references/blog/), [`products/`](references/products/) — competitor analysis.
+- `papers/` — PDFs of DCFR, CFR+, vanilla CFR, Libratus, Pluribus, Deep CFR, ReBeL, hyperparameter schedules, surveys.
+- `code/` — OSS solver clones: `noambrown_poker_solver`, `slumbot2019`, `open_spiel`, `postflop-solver`, `TexasSolver`, `shark-2.0`.
+- `blog/`, `products/` — competitor analysis.
 
 ## 3. Setup
 
@@ -198,22 +197,19 @@ developer-facing summary:
 
 ## 7. Reference-first rule
 
-[`references/README.md`](references/README.md) is the topic-to-file
-index for the entire CFR / DCFR / HUNL literature plus competitor
-solver code. **Check it before any technical claim.** If a paper or a
-competitor repo is the authoritative source for a formula, hyperparameter,
-or architectural choice, quote that source — do not paraphrase from
-training data. This rule applies in code comments, docstrings, PR
-descriptions, and prose docs.
-
-If you are unsure where to look, start in [`references/papers/_INDEX.md`](references/papers/_INDEX.md)
-and `references/code/<repo>/_NOTES.md`.
+Once `scripts/setup_references.sh` has populated your local
+`references/` tree, treat it as the topic-to-file index for the entire
+CFR / DCFR / HUNL literature plus competitor solver code. **Check it
+before any technical claim.** If a paper or a competitor repo is the
+authoritative source for a formula, hyperparameter, or architectural
+choice, quote that source — do not paraphrase from training data. This
+rule applies in code comments, docstrings, PR descriptions, and prose
+docs.
 
 ## 8. License rules (load-bearing)
 
 Project license is **MIT** and is locked. AGPL contamination is a
-one-way door. Summary table (the full version lives in
-[`references/README.md`](references/README.md) section 2):
+one-way door. Summary table:
 
 | Repo | License | Copy policy |
 |---|---|---|
@@ -237,22 +233,15 @@ contamination is permanent.
 - **No floating-point chip math** anywhere in
   [`poker_solver/hunl.py`](poker_solver/hunl.py). Integer cents only;
   convert to BB-floats at terminal states.
-- **Per-decision audit trail.** Substantive design decisions go in
-  [`docs/autonomous_log.md`](docs/autonomous_log.md) with date,
-  rationale, and the references consulted.
+- **Per-decision audit trail.** Substantive design decisions are
+  logged with date, rationale, and the references consulted.
 - **No emojis in code or docs** unless explicitly requested by the
   user.
 
 ## 10. Where to go next
 
-- [`PLAN.md`](PLAN.md) — strategic roadmap. PR 8 (NEON SIMD + cache
-  blocking + public chance sampling), PR 9 (HUNL preflop full solve),
-  and PR 10b (mock -> real solver swap in the UI) are the next
-  scheduled tracks.
-- [`docs/<pr>_prep/`](docs/) — staged launch docs for each PR
-  (e.g. [`docs/pr8_prep/`](docs/pr8_prep/), [`docs/pr9_prep/`](docs/pr9_prep/)).
-- [`docs/audit_followup_backlog.md`](docs/audit_followup_backlog.md) —
-  known should-fix items from prior audits, with severity tags. Good
-  first-issue source.
-- [`docs/architecture.md`](docs/architecture.md) — deeper architectural
-  reference if you want the long version of section 1 above.
+- Strategic roadmap: NEON SIMD + cache blocking + public chance
+  sampling (Rust perf), HUNL preflop full solve (replacing the
+  push/fold lookup above 15 BB), and mock-to-real solver swap in the
+  UI are the next scheduled tracks.
+- Open issues on the GitHub repo are a good first-issue source.

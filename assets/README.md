@@ -97,8 +97,7 @@ update the list.
 
 The bundle targets Apple Silicon (M-series). The `target_arch="arm64"`
 line in `scripts/poker_solver.spec` is load-bearing. Intel-Mac support
-is explicitly out of scope per PR 11 spec decision 13.6 and PLAN.md
-hardware target.
+is explicitly out of scope for v1.0.0.
 
 ### DMG size
 
