@@ -51,3 +51,11 @@ pr_report.md
 # Office app artifacts (user's local files; not project source)
 *.docx
 ~$*
+
+# Session / handoff artifacts (local-only; added by split_main_for_publish.sh)
+STATUS*.md
+SESSION_*.md
+V*_GA_CLOSE.md
+V*_MILESTONE*.md
+wake_up_*.md
+*_HANDOFF.md
