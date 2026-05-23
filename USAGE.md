@@ -1,10 +1,14 @@
-# Using poker_solver — End-User Guide (v1.0.0)
+# Using poker_solver — End-User Guide (v1.4.x)
 
 For people who want to **use** the solver to improve their poker game,
 not develop it. You should be comfortable in a terminal and editing a
 config file; you do not need to read Python or Rust source. The README
 is the developer-facing overview; this is the "what can I do with this
 today" companion.
+
+Document baseline: v1.0.0. Updates through v1.4.2 are layered in §5.3
+(node-locking), §5.4 (asymmetric contributions), §5.5 (range utilities),
+plus the new §7a (known CLI gaps) and §7b (known perf cliffs) sections.
 
 ---
 
@@ -390,6 +394,91 @@ flop-start range queries practical.
   same dict; we don't distinguish AhAd vs AsAh on suit-isomorphic
   boards.
 
+### 5.3 Node-locking via `locked_strategies` (v1.4.0)
+
+v1.4.0 shipped node-locking on `solve_hunl_postflop`. Pass a
+`locked_strategies` mapping of `{infoset_key: [prob, ...]}` to pin one
+or more infosets to a fixed action distribution; the solver computes
+the best response against the locked strategy. Useful for exploiting a
+specific population leak ("villain over-folds the turn") or for
+diagnosing whether a board favors aggressor or defender under a
+hypothetical line.
+
+```python
+from poker_solver import Card, HUNLConfig, Street, solve_hunl_postflop
+
+board = tuple(Card.from_str(c) for c in ("As", "7c", "2d", "Kh", "5s"))
+cfg = HUNLConfig(
+    starting_stack=10_000,
+    starting_street=Street.RIVER,
+    initial_board=board,
+    initial_pot=1_000,
+    initial_contributions=(500, 500),
+)
+
+# Pin one infoset to a fixed fold/call/raise mix:
+locked = {
+    "<infoset_key_str>": [1.0, 0.0, 0.0, 0.0],  # 100% fold at that node
+}
+result = solve_hunl_postflop(cfg, iterations=500, locked_strategies=locked)
+```
+
+Empty / `None` is bit-identical to v1.3 behavior (the lock-check
+fast-path returns immediately). See `tests/test_node_locking.py` for
+worked examples that cover both Python and Rust backends and the
+infoset-key format the solver expects.
+
+### 5.4 Asymmetric initial contributions (v1.4.1)
+
+v1.4.1 lifted the symmetric `initial_contributions=(c, c)` constraint
+for facing-bet postflop subgames. Now you can set up a spot where one
+player has already led and the other faces the lead — useful for "I
+defended OOP, villain c-bet 2/3, what's my response?" queries.
+
+```python
+from poker_solver import Card, HUNLConfig, Street, solve_hunl_postflop
+
+board = tuple(Card.from_str(c) for c in ("As", "7c", "2d"))
+# Pot = 200; P0 contributed 100, P1 contributed 150 (P1 led 50 into 200).
+# P1's lead lands on the table; P0 faces the bet.
+cfg = HUNLConfig(
+    starting_stack=10_000,
+    starting_street=Street.FLOP,
+    initial_board=board,
+    initial_pot=250,
+    initial_contributions=(100, 150),  # asymmetric: P1 has the larger contribution
+    initial_hole_cards=(
+        (Card.from_str("Ah"), Card.from_str("Kd")),
+        (Card.from_str("Qc"), Card.from_str("Qd")),
+    ),
+)
+result = solve_hunl_postflop(cfg, iterations=500)
+```
+
+Invariants enforced (`poker_solver/hunl.py` validation):
+
+- `initial_contributions` must be non-negative and not exceed
+  `starting_stack`.
+- When asymmetric, `sum(initial_contributions)` must equal
+  `initial_pot` (or both be `(0, 0)` for a dead-money subgame).
+- The player with the smaller contribution acts first (they face the
+  bet); the engine threads this through the action ordering and the
+  hole-deal routing.
+
+See `tests/test_asymmetric_contributions.py` for the full set of
+worked configurations.
+
+### 5.5 Range utilities
+
+`Range` (in `poker_solver.range`) accepts standard PioSolver notation
+(`"AA,KK,AKs,AKo"`) and exposes set-membership operations for
+range-arithmetic in scripts and notebooks. PR 27 (`pr-27-range-diff-utility`
+branch; not yet on `main` at v1.4.2) adds `Range.diff(other)` with
+strict set-membership semantics — useful for computing range
+intersections / complements without rebuilding combo lists by hand. If
+you are not on the PR 27 branch, fall back to manual set operations on
+the underlying combo iterable.
+
 ---
 
 ## 6. Library mode (caching solves)
@@ -445,6 +534,86 @@ description, so the same configuration always resolves to the same row.
 - **`--backend rust` is opt-in on postflop.** Python is the default
   because the reference implementation drives behavior; pass
   `--backend rust` explicitly for the performance tier.
+
+---
+
+## 7a. Known CLI gaps (v1.4.x)
+
+A few workflows that the library API supports are not yet wired
+through the `poker-solver` CLI. Drop down to a one-line Python
+invocation in the meantime — these gaps are tracked for a future PR.
+
+- **No `poker-solver pushfold` subcommand.** Push/fold queries auto-
+  dispatch via the `solve` path on short configs (§3a), but there is no
+  dedicated `pushfold` subcommand. Use the library directly:
+
+  ```python
+  from poker_solver.pushfold import get_pushfold_strategy
+  get_pushfold_strategy(stack_bb=9, position='sb_jam', hand='88')
+  ```
+
+- **No `poker-solver river --hero --villain-range` subcommand.**
+  Concrete hero hole-cards vs. a villain range on a river spot is
+  expressible through the library but not through a CLI flag pair. Use
+  `solve_hunl_postflop` with fixed `initial_hole_cards`:
+
+  ```python
+  from poker_solver import Card, HUNLConfig, Street, solve_hunl_postflop
+  cfg = HUNLConfig(
+      starting_stack=10_000,
+      starting_street=Street.RIVER,
+      initial_board=tuple(Card.from_str(c) for c in ("As","7c","2d","Kh","5s")),
+      initial_pot=1_000,
+      initial_contributions=(500, 500),
+      initial_hole_cards=((h1, h2), (v1, v2)),  # both pinned
+  )
+  result = solve_hunl_postflop(cfg, iterations=500)
+  ```
+
+  For range-on-one-side queries, build a wrapper that loops the villain
+  combos and aggregates by combo weight (the §5.2 aggregator pattern,
+  but with hero pinned to specific cards).
+
+- **`poker-solver batch-solve` CSV quoting.** The `bet_sizes` column is
+  comma-separated within a single CSV cell, so multi-value entries must
+  be CSV-quoted: write `"0.5,1.0"` (with quotes), not `0.5;1.0` or
+  bare-comma in an unquoted cell. The CSV schema also does not include
+  hole-cards columns; per-row fixed-cards configs require the library
+  path (`solve_hunl_postflop` with `initial_hole_cards=...`) rather
+  than batch-solve.
+
+---
+
+## 7b. Known perf cliffs (v1.4.x)
+
+The honest framing: the v1.4.x Python solver targets two regimes
+well — short pushfold (§3a) and fixed-cards postflop subgames (§3b).
+Outside those regimes, performance is bounded by the
+chance-enum-at-root architecture and the post-solve exploitability
+walk. The §5.2 aggregator is the production-safe workaround today.
+
+- **`initial_hole_cards=()` on flop / turn / river is slow.** The
+  full-range chance-enum path (§5.1) walks the lossless combo tree at
+  the root, which scales poorly even with the Rust backend. Empirical
+  observation: a 500-iter Rust solve on a standard river spot stalled
+  >10 minutes in the post-solve exploitability walk (see §5.1 honest
+  perf caveat). Not practical for interactive analysis as of v1.4.2.
+
+- **Workaround today.** Use the scoped-per-class fixed-cards substitute
+  pattern: pick representative hero combos per hand class (the same
+  pattern the §5.2 aggregator uses internally), pin them via
+  `initial_hole_cards`, solve each in seconds, then aggregate by combo
+  weight. This is the pattern that worked for the W2.5 / W2.1
+  retest-acceptance flows; the per-hand solves are fast and the
+  aggregate is honest about being a blueprint approximation rather
+  than joint Nash.
+
+- **For full Nash range-vs-range, wait for v1.5.0.** PR 23 ships a
+  vector-form CFR in the Rust tier (per Brown's `cpp/trainer.cpp`
+  vector path; see `DEVELOPER.md` §1 for the two-tier honesty note).
+  That closes the ~100x DCFR slowdown observed in v1.4.1 W2b
+  benchmarks on range-on-both-sides flop / turn queries. Until then,
+  the aggregator (§5.2) is the recommended interactive path.
 
 ---
 
