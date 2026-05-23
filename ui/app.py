@@ -41,7 +41,7 @@ from ui.state import (
     get_state,
     save_state,
 )
-from ui.views import onboarding, run_panel, spot_input
+from ui.views import onboarding, range_matrix, run_panel, spot_input, tree_browser
 
 if TYPE_CHECKING:
     pass
@@ -124,19 +124,14 @@ def build_page() -> None:
     # ----- Two-pane layout (Q1 LOCKED) -----
     with ui.row().classes("w-full no-wrap items-stretch"):
         # Center pane: matrix + (Agent B's) combo inspector strip + tree.
-        # Agent A reserves the slot but doesn't render the matrix contents.
+        # Agent B owns the actual range_matrix / tree_browser renders;
+        # smoke tests assert `range-matrix-display`, `matrix-cell`,
+        # `tree-browser`, etc. markers, which only exist once these
+        # `render(state)` calls fire (PR 10a originally left them stubbed).
         with ui.column().classes("flex-grow p-2").mark("matrix-region"):
-            ui.label(
-                "Range matrix renders here (Agent B's range_matrix.render)."
-            ).classes("text-gray-500 italic")
+            range_matrix.render(state)
             ui.separator()
-            ui.label(
-                "Combo inspector strip below (Agent B; Q5 LOCKED: below matrix)."
-            ).classes("text-gray-500 italic")
-            ui.separator()
-            ui.label("Decision tree below (Agent B's tree_browser.render).").classes(
-                "text-gray-500 italic"
-            )
+            tree_browser.render(state)
 
         # Right pane: collapsible sidebar with three expansion panels.
         with ui.column().classes("p-2 w-96").style("min-width: 320px"):
@@ -169,7 +164,9 @@ def build_page() -> None:
                     on_stop=lambda: _on_stop(state),
                 )
 
-            # Tree browser slot — Agent B fills the contents.
+            # Tree browser slot — collapsed by default; same render call is
+            # already fired in the matrix region's center pane (this is just
+            # the sidebar expansion stub label).
             with (
                 ui.expansion(
                     "Decision Tree",
@@ -180,7 +177,7 @@ def build_page() -> None:
                 .mark("sidebar-tree-expansion")
             ):
                 ui.label(
-                    "Tree browser renders here (Agent B's tree_browser.render)."
+                    "Decision tree renders inline below the matrix (Q5 layout)."
                 ).classes("text-gray-500 italic")
 
     # ----- The 500 ms poller (mental model 7: don't block the loop) -----
@@ -392,3 +389,14 @@ def launch(
 
 
 __all__ = ["build_page", "launch"]
+
+
+# Per NiceGUI 3.x (https://nicegui.io/documentation/section_testing):
+# the `User` test fixture runs this file via runpy with run_name="__main__".
+# The guard form `{"__main__", "__mp_main__"}` is the documented pattern that
+# supports both direct CLI invocation and NiceGUI's multiprocessing reload.
+# Without this, `pytest tests/test_ui_smoke.py` errors out because
+# `ui.run()` is never called and NiceGUI's `_startup()` raises RuntimeError
+# ("You must call ui.run() to start the server.").
+if __name__ in {"__main__", "__mp_main__"}:
+    launch()

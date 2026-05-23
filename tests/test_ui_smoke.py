@@ -188,14 +188,26 @@ async def test_stop_button_halts_within_one_iteration(
     """
     from ui.state import get_state
 
+    from poker_solver.hunl import HUNLPoker
+
     await user.open("/")
     user.find(marker="preset-flop-k72r-100bb").click()
-    user.find(marker="iterations-input").type("100000")
-    user.find(marker="solve-button").click()
-    await asyncio.sleep(0.5)
+    state = get_state()
+    # The UI's _on_solve handler doesn't expose `mock_latency_ms` (mock-
+    # specific injection lives behind `SolveRunner.start`). Drive the
+    # runner directly with a 500 ms mock latency so the stop-button race
+    # is observable; without latency the mock finishes in <1 ms and
+    # `iteration` already equals `iterations` when stop registers.
+    config = state.current_spot.to_hunl_config()
+    state.runner.start(
+        HUNLPoker(config),
+        iterations=100_000,
+        log_every=50,
+        mock_latency_ms=500,
+    )
+    await asyncio.sleep(0.1)
     user.find(marker="stop-button").click()
     await asyncio.sleep(0.5)
-    state = get_state()
     assert state.runner.status in ("stopped", "done"), (
         f"expected status 'stopped' or 'done' after stop click; "
         f"got {state.runner.status!r}"
@@ -265,9 +277,18 @@ async def test_library_dialog_opens(
     user: User, isolated_state_dir: pathlib.Path
 ) -> None:
     """Smoke test 8: clicking the library header button opens the dialog;
-    ``[Load selected]`` is disabled; clicking a stub row produces a toast.
+    ``[Load selected]`` is disabled.
 
     Per ``pr10a_spec.md`` §10.1 item 8 + §4.6 mockup.
+
+    Note: the stub-row check was dropped post-PR-11. PR 11 wired the real
+    ``poker_solver.library`` SQLite-backed gateway, so the
+    ``library-stub-row-{idx}`` markers (and accompanying "PR 11 — not
+    yet wired" toast) are only emitted when the library module is
+    unimportable. On an isolated-state-dir fresh install the library is
+    importable but empty, which renders the "(no spots saved yet)" label
+    instead. The disable-prop check on ``library-load-button`` is the
+    surviving smoke-relevant invariant.
     """
     await user.open("/")
     user.find(marker="library-header-button").click()
@@ -282,10 +303,6 @@ async def test_library_dialog_opens(
     assert disable_prop is True or "disable" in (
         getattr(load_btn, "props", "") or ""
     ), f"library-load-button missing 'disable' prop; got props={props!r}"
-    # Stub row click produces a toast.
-    user.find(marker="library-stub-row-0").click()
-    notif_count = _count_notifications(user)
-    assert notif_count >= 1, f"expected >=1 notification, got {notif_count}"
 
 
 def _count_notifications(user: User) -> int:
@@ -449,10 +466,6 @@ def test_ui_never_imports_mock_specific_symbols() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason="PR 10a.5 conformance pass: missing marker/constant per "
-    "audit_report_10a.md should-fix 1 (cell_rgb_for_action_freqs)"
-)
 async def test_range_matrix_color_blend_matches_pio_convention(
     user: User, isolated_state_dir: pathlib.Path
 ) -> None:
@@ -495,10 +508,6 @@ async def test_range_matrix_color_blend_matches_pio_convention(
     assert abs(b) <= 2, f"B: expected ~0, got {b}"
 
 
-@pytest.mark.xfail(
-    reason="PR 10a.5 conformance pass: missing marker/constant per "
-    "audit_report_10a.md should-fix 3 (blocker-overlay class + matrix-cell-AKs marker)"
-)
 async def test_blocker_cells_show_slashed_overlay(
     user: User, isolated_state_dir: pathlib.Path
 ) -> None:
@@ -528,10 +537,6 @@ async def test_blocker_cells_show_slashed_overlay(
     )
 
 
-@pytest.mark.xfail(
-    reason="PR 10a.5 conformance pass: missing marker/constant per "
-    "audit_report_10a.md should-fix 2 (DISPLAY_PALETTE / INPUT_PALETTE constants)"
-)
 async def test_input_matrix_palette_disjoint_from_display_palette(
     user: User, isolated_state_dir: pathlib.Path
 ) -> None:
@@ -577,10 +582,6 @@ async def test_input_matrix_palette_disjoint_from_display_palette(
     ), f"input palette should source blue gradient; got {input_palette!r}"
 
 
-@pytest.mark.xfail(
-    reason="PR 10a.5 conformance pass: missing marker/constant per "
-    "audit_report_10a.md should-fix 3 (expl-chart-linear-toggle marker)"
-)
 async def test_chart_default_log_scale(
     user: User, isolated_state_dir: pathlib.Path
 ) -> None:
@@ -617,10 +618,6 @@ async def test_chart_default_log_scale(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason="PR 10a.5 conformance pass: missing marker/constant per "
-    "audit_report_10a.md should-fix 3 (oom-reduce-bet-sizes-button marker)"
-)
 async def test_oom_failure_shows_remediation_notification(
     user: User, isolated_state_dir: pathlib.Path, reset_cancel_flag: None
 ) -> None:
@@ -656,10 +653,6 @@ async def test_oom_failure_shows_remediation_notification(
     ), "OOM failure must surface 'Reduce bet sizes' quick-action button"
 
 
-@pytest.mark.xfail(
-    reason="PR 10a.5 conformance pass: missing marker/constant per "
-    "audit_report_10a.md should-fix 3 (pushfold-switch-button marker)"
-)
 async def test_pushfold_dispatch_at_15bb(
     user: User, isolated_state_dir: pathlib.Path
 ) -> None:
@@ -669,8 +662,15 @@ async def test_pushfold_dispatch_at_15bb(
     Per ``pr10a_spec.md`` §10.4 item 19 + §6 edge #4.
     """
     await user.open("/")
-    user.find(marker="stack-input-p0").type("15")
-    user.find(marker="stack-input-p1").type("15")
+    # NiceGUI 3.x's `UserInteraction.type` appends to the current value
+    # (user_interaction.py:70). The stack inputs start at 100 BB, so
+    # ``.type("15")`` yields 10015 — overflow above the 15 BB threshold.
+    # Drive the model value directly to land on the boundary the test
+    # is actually asserting.
+    stack_p0 = list(user.find(marker="stack-input-p0").elements)[0]
+    stack_p1 = list(user.find(marker="stack-input-p1").elements)[0]
+    stack_p0.value = 15
+    stack_p1.value = 15
     # Tab out / commit the change.
     await asyncio.sleep(0.2)
     # Yellow warning toast appears with the push/fold dispatch button.
@@ -680,10 +680,6 @@ async def test_pushfold_dispatch_at_15bb(
     ), "stacks <= 15 BB must surface 'Switch to push/fold view' toast button"
 
 
-@pytest.mark.xfail(
-    reason="PR 10a.5 conformance pass: missing marker/constant per "
-    "audit_report_10a.md should-fix 3 (progress-eta marker + compute_eta method)"
-)
 async def test_long_solve_eta_appears_after_30s(
     user: User, isolated_state_dir: pathlib.Path, reset_cancel_flag: None
 ) -> None:

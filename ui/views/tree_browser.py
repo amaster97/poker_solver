@@ -605,7 +605,7 @@ def render(state: AppState) -> None:
 
     with (
         ui_mod.element("div")
-        .props("data-marker=tree-browser")
+        .mark("tree-browser")
         .style("background:#0f0f0f;padding:10px;border-radius:6px")
     ):
         if tree is None:
@@ -623,7 +623,7 @@ def render(state: AppState) -> None:
                 step=0.01,
                 value=float(getattr(tree, "min_reach", _DEFAULT_MIN_REACH)),
             )
-            slider.props("data-marker=tree-reach-slider")
+            slider.mark("tree-reach-slider")
             slider.tooltip(
                 "Hides nodes with combined reach probability below this "
                 "threshold. HUNL trees have 10^4-10^6 nodes; 0.01 hides "
@@ -644,10 +644,12 @@ def render(state: AppState) -> None:
                 )
                 if rendered.truncated > 0:
                     badge = ui_mod.label(f"{rendered.truncated} hidden by cap")
-                    badge.props("data-marker=tree-truncation-badge")
+                    badge.mark("tree-truncation-badge")
                     badge.style("color:#d09a4a;font-size:11px")
             widget = ui_mod.tree(rendered.nodes, label_key="label", node_key="id")
-            widget.props("data-marker=tree-widget no-selection-unset")
+            # NiceGUI markers via `.mark()`; the `no-selection-unset` token
+            # is a Quasar prop and must stay on `.props()`.
+            widget.mark("tree-widget").props("no-selection-unset")
 
             def _select_handler(event: Any) -> None:
                 node_id = getattr(event, "value", None) or getattr(

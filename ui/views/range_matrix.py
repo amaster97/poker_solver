@@ -158,6 +158,9 @@ class CellSummary:
     blocked: bool = False
     empty: bool = False
     out_of_range: bool = False
+    # True when ANY combo in the class is board-blocked, even if other
+    # combos survive (smoke 15 / pr10a_spec.md §10.3 item 15).
+    has_blocker: bool = False
 
 
 # Duck-typed snapshot interface (see prompt comment): ``infoset_key`` is
@@ -273,6 +276,7 @@ def cell_strategy_summary(
             continue
         in_range_total += 1
         if combo[0] in board_cards or combo[1] in board_cards:
+            summary.has_blocker = True
             continue
         all_blocked = False
         survivors += 1
@@ -409,6 +413,46 @@ def cell_color(summary: CellSummary) -> str:
     g = summary.fold * 40 + summary.call * 200 + summary.raise_ * 180
     b = summary.fold * 40 + summary.call * 40 + summary.raise_ * 60
     return f"rgb({int(r)},{int(g)},{int(b)})"
+
+
+# Pure-Pio R/Y/G anchors used by the palette-audit smoke test.
+# Per pr10a_spec.md §7.3:
+#   fold  → red    (255, 0,   0)
+#   call  → yellow (255, 255, 0)
+#   raise → green  (0,   255, 0)
+# Distinct from the `cell_color()` fade anchors above; the smoke test
+# guards the convention surface so downstream consumers (export, image
+# diff, doc screenshots) can rely on pure anchors.
+DISPLAY_PALETTE: tuple[tuple[int, int, int], tuple[int, int, int], tuple[int, int, int]] = (
+    (255, 0, 0),
+    (255, 255, 0),
+    (0, 255, 0),
+)
+
+
+def cell_rgb_for_action_freqs(
+    fold: float, call: float, raise_: float
+) -> tuple[int, int, int]:
+    """Return the additive-Pio-blend RGB for a cell's action frequencies.
+
+    Adapter exposed for the palette-audit smoke test (smoke 14). Uses the
+    pure RYG anchors from ``DISPLAY_PALETTE`` rather than the fade anchors
+    inside ``cell_color()`` — see module docstring + ``pr10a_spec.md`` §7.3.
+
+    :param fold: probability mass on fold (0..1).
+    :param call: probability mass on call (0..1).
+    :param raise_: probability mass on raise (0..1).
+    :returns: ``(r, g, b)`` int triple, each channel clamped 0..255.
+    """
+    red, yellow, green = DISPLAY_PALETTE
+    r = fold * red[0] + call * yellow[0] + raise_ * green[0]
+    g = fold * red[1] + call * yellow[1] + raise_ * green[1]
+    b = fold * red[2] + call * yellow[2] + raise_ * green[2]
+    return (
+        max(0, min(255, int(round(r)))),
+        max(0, min(255, int(round(g)))),
+        max(0, min(255, int(round(b)))),
+    )
 
 
 def _cell_tag(summary: CellSummary) -> str:
@@ -722,7 +766,7 @@ def inspect_panel(state: AppState, hand_class: str) -> None:
     rows = _build_combo_rows(state, hand_class)
     with (
         ui_mod.element("div")
-        .props("data-marker=combo-inspector-strip")
+        .mark("combo-inspector-strip")
         .style("padding:8px 12px;background:#1b1b1b;border-top:1px solid #303030")
     ):
         ui_mod.label(f"Combo inspector — {hand_class} ({len(rows)} combos)").style(
@@ -732,10 +776,10 @@ def inspect_panel(state: AppState, hand_class: str) -> None:
             ui_mod.label("No combos in range").style("color:#9a9a9a")
             return
         for row in rows:
-            marker = f"data-marker=combo-inspector-row-{row.label}"
+            marker = f"combo-inspector-row-{row.label}"
             with (
                 ui_mod.row()
-                .props(marker)
+                .mark(marker)
                 .style("align-items:center;gap:10px;padding:2px 0")
             ):
                 ui_mod.label(row.label).style(
@@ -811,7 +855,7 @@ def render(state: AppState) -> None:
         if selected is None:
             with (
                 ui_mod.element("div")
-                .props("data-marker=combo-inspector-strip")
+                .mark("combo-inspector-strip")
                 .style(
                     "padding:8px 12px;background:#1b1b1b;"
                     "border-top:1px solid #303030;color:#909090"
@@ -825,7 +869,7 @@ def render(state: AppState) -> None:
 
     with (
         ui_mod.element("div")
-        .props("data-marker=range-matrix-display")
+        .mark("range-matrix-display")
         .style("background:#0f0f0f;padding:12px;border-radius:6px")
     ):
         with ui_mod.row().style(
@@ -841,12 +885,26 @@ def render(state: AppState) -> None:
             "gap:2px;justify-content:center"
         ):
             for cell in _build_grid_summaries(state):
-                cell_marker = f"data-marker=matrix-cell,matrix-cell-{cell.hand_class}"
-                with (
+                # NiceGUI's `User.find(marker=...)` filter searches
+                # `element._markers`, populated by `.mark(...)` (whitespace-
+                # delimited per nicegui/element.py:342). The old form
+                # `.props("data-marker=matrix-cell,matrix-cell-AKs")` set a
+                # Quasar prop instead and never populated _markers, so all
+                # five smoke tests that look up `matrix-cell` would assert 0.
+                cell_marker = f"matrix-cell matrix-cell-{cell.hand_class}"
+                cell_el_builder = (
                     ui_mod.element("div")
-                    .props(cell_marker)
-                    .style(_cell_style(cell.summary)) as cell_el
-                ):
+                    .mark(cell_marker)
+                    .style(_cell_style(cell.summary))
+                )
+                if cell.summary.blocked or cell.summary.has_blocker:
+                    # Smoke 15 (X2): blocker cells expose a `blocker-overlay`
+                    # CSS class so the smoke test can assert on slashed
+                    # overlay styling without scraping inline styles.
+                    # ``blocked`` = fully blocked (no surviving combos);
+                    # ``has_blocker`` = at least one combo blocked.
+                    cell_el_builder = cell_el_builder.classes("blocker-overlay")
+                with cell_el_builder as cell_el:
                     ui_mod.label(cell.hand_class).style(
                         "font-weight:600;font-family:'SF Pro',Inter,sans-serif"
                     )
