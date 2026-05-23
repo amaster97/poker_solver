@@ -529,7 +529,16 @@ class HUNLPoker:
     def _apply_chance(self, state: HUNLState, action: Action) -> HUNLState:
         if not state.hole_cards:
             new_hole = _normalize_hole_action(action)
-            next_cur = 0 if state.street == Street.PREFLOP else 1
+            if state.street == Street.PREFLOP:
+                next_cur = 0
+            else:
+                # PR 22: postflop first actor depends on the bet state. With
+                # symmetric contributions there is no bet to face → BB (P1)
+                # acts first. With asymmetric contributions (Fix A), the
+                # player with the lower contribution faces the bet and acts
+                # first.
+                c0, c1 = state.contributions
+                next_cur = 0 if c0 < c1 else 1
             return replace(state, hole_cards=new_hole, cur_player=next_cur)
         card = int_to_card(action)
         new_board = state.board + (card,)

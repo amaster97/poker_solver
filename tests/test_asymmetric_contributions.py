@@ -285,6 +285,35 @@ def test_preflop_invalid_contributions_still_raises():
 # ---------------------------------------------------------------------------
 
 
+def test_asymmetric_hole_deal_routes_to_facing_bet_player():
+    """When `initial_hole_cards` is empty, the engine starts at a chance node
+    that deals hole cards. After dealing, `cur_player` must route to the
+    facing-bet player (P0 if c0 < c1, else P1), not unconditionally to P1.
+    Locks the `_apply_chance` hole-card branch."""
+    cfg = HUNLConfig(
+        starting_stack=10_000,
+        starting_street=Street.FLOP,
+        initial_board=_flop_board(),
+        initial_pot=1500,
+        initial_contributions=(500, 1000),  # P0 faces a 500 bet
+        initial_hole_cards=(),
+    )
+    game = HUNLPoker(cfg)
+    s = game.initial_state()
+    # No hole cards yet → cur_player = -1 (chance node).
+    assert s.cur_player == -1
+    assert s.to_call == 500
+    assert s.street_aggressor == 1
+    # Deal one hole-pair outcome and check the next cur_player.
+    outcomes = game.chance_outcomes(s)
+    assert outcomes  # has hole-pair outcomes
+    s_dealt = game.apply(s, outcomes[0][0])
+    # After hole-deal, P0 (the facing-bet player) acts first.
+    assert s_dealt.cur_player == 0
+    assert s_dealt.to_call == 500
+    assert s_dealt.street_aggressor == 1
+
+
 def test_default_tiny_subgame_unchanged():
     """`default_tiny_subgame()` returns a symmetric `(500, 500)` config; its
     `initial_state` must produce identical fields to the pre-fix behavior
