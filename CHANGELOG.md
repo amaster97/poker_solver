@@ -13,6 +13,44 @@ In-flight on feature branches; not yet merged to `main`.
 - v1.5/v2 follow-ups (Q3 exploitability slider reframe; range-based
   dealing; Rust callbacks; full-tree preflop).
 
+## [1.3.0] - 2026-05-23
+
+### Added — Range-vs-range API (Option B: blueprint aggregator)
+
+- New public function `solve_range_vs_range(config_template, hero_range, villain_range, iterations, backend)` in `poker_solver/range_aggregator.py` (~450 lines)
+- Per-hand-class strategy outputs: `result.per_class_strategy["AA"] → {"bet_75": 1.0, "check": 0.0}`
+- Combo-weighted range aggregate output for range-level frequencies (MDF, polarization, sizing distributions)
+- Combo expansion: "AA" → 6 combos, "AKs" → 4, "AKo" → 12; board-blocked combos filtered
+- 18 new tests in tests/test_range_vs_range_aggregator.py
+
+### Performance (measured)
+
+- 6×5 range query (turn-start, 200 iters): 23.9 s
+- 10×10 range query: 79.2 s
+- Per-hand subgame: 1-3 seconds (Rust backend)
+
+### Honest framing
+
+This is a WORKAROUND pattern (Pluribus blueprint), not Nash range-vs-range:
+- Each per-hand solve is 1-vs-1 with the engine's existing dispatcher
+- Aggregation is uniform across representative villain combos
+- True Nash range-vs-range with full-tree co-dependent strategies awaits future work
+- Documented in module docstring + test docstrings + USAGE.md
+
+### What's NOT in this release
+
+- Flop-start at 100 BB lossless is still slow (10-100s per solve at the engine layer, not aggregator)
+- Option A (Rust port of exploitability walk) deferred (may follow as v1.3.1 if it lands)
+- True Nash range-vs-range solving (post-v1)
+- Suit-aware aggregation (v1.4+ work)
+
+### Resolves
+
+- Phase 1E W1E.2/W1E.3/W1E.4 (range-level workflows previously timed out)
+- Phase 1 W1.5 (single-spot range solve previously timed out at 15 min)
+- Phase 2 W2.3/W2.6 (range-level methodology gaps from preflop testing)
+- All previously documented as Type C-CRITICAL per persona acceptance rectification framework
+
 ## [1.2.1] - 2026-05-23
 
 Patch release: build the Rust `_rust.cpython-313-darwin.so` as a
@@ -1069,7 +1107,8 @@ and a hybrid exact / Monte Carlo equity calculator.
 - Initial Texas Hold'em equity solver scaffold (`023956e`):
   hand evaluator, Monte Carlo equity, range parser, CLI.
 
-[Unreleased]: https://github.com/amaster97/poker_solver/compare/v1.2.1...HEAD
+[Unreleased]: https://github.com/amaster97/poker_solver/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/amaster97/poker_solver/compare/v1.2.1...v1.3.0
 [1.2.1]: https://github.com/amaster97/poker_solver/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/amaster97/poker_solver/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/amaster97/poker_solver/compare/v1.0.1...v1.1.0
