@@ -45,6 +45,14 @@ pub mod preflop;
 // stays bit-for-bit close.
 pub mod exploit;
 
+// PR 23 — Vector-form DCFR for true range-vs-range Nash. Extends PR 15's
+// flat-tree machinery to the write side (regret + strategy updates) using
+// Brown's `references/code/noambrown_poker_solver/cpp/src/trainer.cpp`
+// (MIT) `Trainer::traverse` pattern. Opt-in via the
+// `solve_range_vs_range_rust` PyO3 entry; existing scalar DCFR paths
+// (Kuhn, Leduc, fixed-combo HUNL postflop/preflop) are unchanged.
+pub mod dcfr_vector;
+
 use crate::solver::SolveOutput;
 
 /// Build-time version smoke check.
