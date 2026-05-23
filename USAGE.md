@@ -176,8 +176,21 @@ today, drop down to the CLI in §3.
 ## 5. Building a custom range-vs-range solve
 
 §3b runs the bundled `default_tiny_subgame` fixture (one hand vs one
-hand). For real range-vs-range analysis on a board of your choice,
-construct a `HUNLConfig` directly. Leaving `initial_hole_cards=()` tells
+hand). For real range-vs-range analysis on a board of your choice you
+have two options:
+
+- **§5.1** — Build a `HUNLConfig` with `initial_hole_cards=()` and call
+  `solve` directly. This is the "true" range-vs-range path used by
+  `test_river_diff.py` for the diff vs Brown's solver, but it is **not**
+  practical for interactive analysis (see the perf caveat in §5.1).
+- **§5.2** — Use `solve_range_vs_range` (v1.3.0+), the blueprint
+  aggregator. This runs one per-hand 1v1 subgame per hero class
+  representative and aggregates by combo count. The recommended path
+  for interactive range queries today.
+
+### 5.1 Direct full-range solve via `solve` (diff-test path; slow)
+
+Construct a `HUNLConfig` directly. Leaving `initial_hole_cards=()` tells
 the solver to enumerate the full range; the engine handles the chance
 node over hole-card pairs.
 
@@ -259,6 +272,123 @@ This is the v1.3+ planned work; the per-hand path runs in seconds per hand.
 For now: build configs with FIXED hole cards (e.g., `(Card.from_str("As"), Card.from_str("Kh"))`)
 for ad-hoc spots, or use the push/fold charts (≤15 BB) and equity calculator
 (any street). The river subgame fixture solves in seconds.
+
+### 5.2 Range-vs-range API via the blueprint aggregator (v1.3.0+)
+
+v1.3.0 shipped `solve_range_vs_range` as the production-safe range-level
+workaround for the "full chance-enum range-vs-range solve" gap (Option A,
+deferred). The aggregator runs one per-hand 1v1 subgame per hero-class
+representative, then averages frequencies weighted by combo count
+(`AA = 6`, `AKs = 4`, `AKo = 12`).
+
+```python
+from poker_solver import (
+    Card,
+    HUNLConfig,
+    Street,
+    solve_range_vs_range,
+)
+
+cfg = HUNLConfig(
+    starting_stack=10_000,
+    starting_street=Street.TURN,        # see perf caveat below
+    initial_board=tuple(Card.from_str(c) for c in ("As", "7c", "2d", "Kh")),
+    initial_pot=200,
+    initial_contributions=(100, 100),
+    bet_size_fractions=(0.75,),
+    include_all_in=False,
+    postflop_raise_cap=2,
+)
+
+# Aggressor query (default; hero opens / c-bets):
+result = solve_range_vs_range(
+    config_template=cfg,
+    hero_range=["AA", "KK", "AKs", "AKo", "QQ"],
+    villain_range=["QQ", "JJ", "TT", "AQs"],
+    iterations=200,
+    backend="rust",
+    # hero_player=0 (default) -> hero is aggressor (P0)
+)
+print(result.position)              # "aggressor"
+print(result.range_aggregate)       # {"check": ..., "bet_75": ...}
+
+# Defender query (new in v1.3.1; hero faces villain's lead):
+result_def = solve_range_vs_range(
+    config_template=cfg,
+    hero_range=["AA", "KK", "QQ"],
+    villain_range=["AA", "KK"],
+    iterations=200,
+    backend="rust",
+    hero_player=1,                  # hero is defender (P1)
+)
+print(result_def.position)          # "defender"
+print(result_def.range_aggregate)   # frequencies are P1's first-decision mass
+```
+
+#### `hero_player` parameter (v1.3.1)
+
+- `hero_player=0` (default) — Hero occupies engine slot 0 (postflop IP /
+  the player who acts AFTER P1's lead). Returned frequencies are hero's
+  response to villain's modal opening action. `result.position ==
+  "aggressor"`.
+- `hero_player=1` — Hero occupies engine slot 1 (postflop OOP / first to
+  act postflop in HUNL). Returned frequencies are hero's FIRST decision
+  (open / lead vs. check). `result.position == "defender"`.
+
+**Always check `result.position` before labeling the output**: the
+range-aggregate dict mixes `"check"` / `"bet_*"` (aggressor side) with
+`"fold"` / `"call"` / `"raise_*"` (defender side) only when the input
+spot has unmatched contributions; in the dominant matched-pot postflop
+case, the dict you get back is from hero's perspective at hero's first
+decision.
+
+**Bug history.** v1.3.0 hardcoded `hero_player=0` and the extraction
+walker silently passed through P1's modal action before grabbing P0's
+frequencies. On no-history defending spots (river bluff-catchers, MDF
+queries) P1 modally checked, so P0 had no bet to face and the API
+returned ~100% check no matter what hero was. Caught by the Option B
+pre-ship stress test S4 (see `docs/pr16_prep/stress_test_results.md`).
+
+#### Honest perf caveat — 100 BB flop-start is minutes, not seconds
+
+v1.3.0 ships with a 30 s ceiling per per-hand solve (`time_budget_per_solve_s`).
+A 100 BB flop-start spot at full lossless tree size exceeds this budget
+for most hero classes:
+
+- A minimal AA-vs-QQ flop solve (As-Ks-7h, 100 BB, 2 bet sizes) ran
+  **146 s** during the pre-ship stress test — about 5x the per-solve
+  budget. Most hero classes hit `partial_misses` and the aggregator
+  drops them.
+- Turn-start at 100 BB completes per-hand in 1-3 s on the Rust backend;
+  a 6x5 query finishes in ~25-30 s end-to-end.
+- River subgame solves are sub-second.
+
+For 100 BB flop-start range queries today, either:
+
+1. Use the turn-start path (`starting_street=Street.TURN`) with a 4-card
+   board — this is what the smoke test in
+   `tests/test_range_vs_range_aggregator.py` exercises and is the
+   currently-recommended path.
+2. Drop to a shorter stack (e.g. 25-50 BB) where the lossless flop tree
+   is small enough to finish per-hand inside the budget.
+
+A Rust port of the post-solve exploitability walk (Option A) is in
+flight and will lift the per-solve budget high enough to make 100 BB
+flop-start range queries practical.
+
+#### Other caveats (already in v1.3.0)
+
+- **1v1 collapse.** Each per-hand solve is a 1-combo-vs-1-combo Nash.
+  Hero's bet-size mix can flip entirely based on `bet_size_fractions`
+  (e.g. AA bets 100% under `(0.75,)` but checks 100% under
+  `(0.33, 0.75)` on some boards). This is a structural property of the
+  workaround, not a bug — caveated in `range_aggregator.py:19-32`.
+- **Bet-size frequencies are 1v1 outputs**, not GTO range-vs-range
+  mixed sizing. Use Option A (when it ships) for true Nash range-mix
+  sizing.
+- **Combo-weighted, not suit-aware.** AA's 6 combos all contribute the
+  same dict; we don't distinguish AhAd vs AsAh on suit-isomorphic
+  boards.
 
 ---
 

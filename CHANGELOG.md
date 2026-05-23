@@ -13,6 +13,143 @@ In-flight on feature branches; not yet merged to `main`.
 - v1.5/v2 follow-ups (Q3 exploitability slider reframe; range-based
   dealing; Rust callbacks; full-tree preflop).
 
+## [1.3.1] - 2026-05-23
+
+PATCH bump on top of v1.3.0. Two narrow fixes to the range-vs-range
+aggregator's API surface plus honest USAGE caveats. No behavior change
+for any v1.3.0 caller that did not opt into the new parameter; no
+engine changes; no Rust changes.
+
+Caught by the Option B pre-ship stress test
+(`docs/pr16_prep/stress_test_results.md`): S4 MDF query returned 100%
+check on a half-pot bluff-catcher spot; S1 K-high turn showed AA and
+KK both checking 99.99% — heuristic FAIL traced to position
+misclassification (the aggregator hardcoded `hero_player=0` and the
+extraction walker silently passed through P1's modal action before
+grabbing P0's frequencies on no-history defending spots).
+
+### Fixed
+
+- **`solve_range_vs_range` hero_player gap.** Added a
+  `hero_player: int = 0` keyword parameter to
+  `poker_solver.range_aggregator.solve_range_vs_range`. v1.3.0
+  hardcoded the engine-slot-0 (aggressor) seat and silently returned
+  ~100% check for defender-side queries (MDF / calling-frequency).
+  v1.3.1 threads `hero_player` through `_run_one_subgame` (which
+  places hero's combo at the requested engine slot) and
+  `_extract_first_decision_freqs` (which extracts that slot's first
+  decision). Default behavior is unchanged: omitting the kwarg gives
+  the v1.3.0 aggressor extraction. New value `hero_player=1` places
+  hero at engine slot 1 (postflop OOP / first-to-act) and returns
+  P1's first-decision frequencies. Invalid values (anything not 0 or
+  1) raise `ValueError`.
+
+### Added
+
+- **`RangeVsRangeResult.position` field.** New string field on the
+  result dataclass; `"aggressor"` when `hero_player == 0`,
+  `"defender"` when `hero_player == 1`. Disambiguates the
+  per-class-strategy and range-aggregate dicts: with the matched-pot
+  postflop setups in the smoke suite the dict mixes `"check"` /
+  `"bet_*"` (aggressor side) vs `"fold"` / `"call"` / `"raise_*"`
+  (defender side, when contributions are unmatched). The new field
+  lets callers label outputs correctly without inspecting the
+  underlying config.
+
+### Tests
+
+- **+3 new tests** in `tests/test_range_vs_range_aggregator.py` (21
+  total, was 18):
+  - `test_hero_player_1_defender_extraction` — solves an AA-on-K-high
+    turn spot with `hero_player=1` and asserts the non-check mass is
+    > 30% (rejecting the v1.3.0 "silent ~100% check" failure mode).
+  - `test_hero_player_invalid_raises` — `hero_player=2` raises a
+    `ValueError` mentioning the parameter name.
+  - `test_position_field_default_aggressor` — backward-compat sanity
+    check that the v1.3.0 default kwarg path sets
+    `position == "aggressor"`.
+- All 18 existing tests pass unchanged; the differential parity test
+  (`test_per_hand_solve_matches_standalone_solve`) continues to pass
+  because it omits `hero_player` and falls through to the
+  v1.3.0-equivalent default.
+
+### Docs
+
+- **`USAGE.md` §5.2** — new subsection covering the
+  `solve_range_vs_range` API, the v1.3.1 `hero_player` parameter, the
+  `position` result field, and an honest perf caveat: 100 BB
+  flop-start at full lossless tree size exceeds the 30 s per-solve
+  budget (146 s observed on a minimal AA-vs-QQ flop solve during the
+  pre-ship stress test); turn-start is the currently-recommended
+  path until the Rust exploitability port (Option A) lands. Stress
+  test findings cited as the discovery point.
+- **`docs/pr16_prep/stress_test_results.md`** — already in the repo
+  from the v1.3.0 ship audit; cited from the CHANGELOG and USAGE.
+
+### Stress-test reproduction after fix
+
+The v1.3.1 patch was validated by re-running the S1 K-high turn
+heuristic at reduced scale (3 bet sizes instead of 6, 2 hero classes
+instead of 5) under both `hero_player=0` and `hero_player=1`:
+
+```
+Setup: TURN As-Ks-7h-4d, stack 9750, pot 500, contributions (250, 250),
+       bet_size_fractions=(0.5, 0.75, 1.5), villain_reps=1, 200 iters
+
+hero_player=0 (aggressor / v1.3.0 default; hero = SB / IP):
+  AA: bet_50=0.0000  bet_75=0.0000  bet_150=0.0000  check=0.9999
+  KK: bet_50=0.0000  bet_75=0.0000  bet_150=0.0000  check=0.9999
+  → Matches v1.3.0 S1 finding: AA/KK both ~99.99% check. The walker
+    steps past P1's (BB's) modal check, P0 (SB / IP) sees no bet to
+    face, and the 1v1 equilibrium has SB checking back AA/QQ.
+
+hero_player=1 (defender / new in v1.3.1; hero = BB / OOP):
+  AA: bet_50=0.4970  bet_75=0.3570  bet_150=0.0000  check=0.1461
+  KK: bet_50=0.4970  bet_75=0.3570  bet_150=0.0000  check=0.1461
+  → AA/KK bet ~85% combined as a donk-lead from the BB / OOP seat.
+    The walker extracts slot-1's first decision directly (no more
+    walking-past-villain-modal-check); the engine assigns most of
+    AA/KK's mass to the bet actions.
+```
+
+What the fix does NOT do: it does NOT recover a "preflop-aggressor
+c-bets K-high" heuristic. The 1v1 collapse + per-hand subgame
+structure documented in `range_aggregator.py:19-32` is unchanged. Both
+`hero_player=0` and `hero_player=1` are valid engine-seat extractions,
+but neither corresponds exactly to the preflop-aggressor c-bet that
+S1's heuristic was checking. `hero_player=1` returns the BB's
+donk-lead frequency; `hero_player=0` returns the SB's response after
+the BB's modal action. Picking the "right" one depends on which
+real-world question the caller is asking; the new `position` field
+plus this CHANGELOG entry document the disambiguation.
+
+The S4 MDF heuristic (defending after villain's lead) remains
+unaddressed even with `hero_player=1` — see "Honest framing" below.
+
+### Honest framing
+
+- The `hero_player=1` path returns hero's FIRST decision frequencies
+  at engine slot 1, NOT a true Nash defending mix vs villain's lead.
+  Because the engine's `initial_state` always seats slot 1 first
+  postflop, "defending after villain's lead" would require either
+  unmatched `initial_contributions` (so the to-act player faces a
+  bet) or a deeper walker that drives through hero's check and
+  villain's response. v1.3.1 does NOT extend the walker; it only
+  exposes the engine-slot choice and adds the result field.
+- The S4 MDF bluff-catcher spot (`hero_player=1` on a no-history
+  river) STILL returns ~100% check after the fix — the engine
+  reports P1's first decision as ~100% check, which is mechanically
+  correct for "no bet to face, fold not legal, check vs lead choice
+  collapses to check at 200 iters." MDF queries proper require the
+  unmatched-contributions setup or the deeper walker. Both are
+  follow-up work, not in scope for v1.3.1.
+
+### Internal
+
+- `__version__` bumped to `1.3.1` (PATCH).
+- `pyproject.toml` `version` bumped to `1.3.1`.
+- No Rust changes; the prebuilt `_rust.so` carries over unchanged.
+
 ## [1.3.0] - 2026-05-23
 
 ### Added — Range-vs-range API (Option B: blueprint aggregator)
@@ -1107,7 +1244,8 @@ and a hybrid exact / Monte Carlo equity calculator.
 - Initial Texas Hold'em equity solver scaffold (`023956e`):
   hand evaluator, Monte Carlo equity, range parser, CLI.
 
-[Unreleased]: https://github.com/amaster97/poker_solver/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/amaster97/poker_solver/compare/v1.3.1...HEAD
+[1.3.1]: https://github.com/amaster97/poker_solver/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/amaster97/poker_solver/compare/v1.2.1...v1.3.0
 [1.2.1]: https://github.com/amaster97/poker_solver/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/amaster97/poker_solver/compare/v1.1.0...v1.2.0

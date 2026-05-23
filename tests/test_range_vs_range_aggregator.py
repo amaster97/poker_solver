@@ -42,7 +42,6 @@ from poker_solver.range_aggregator import (
     solve_range_vs_range,
 )
 
-
 # ---------------------------------------------------------------------------
 # Combo-expansion unit tests
 # ---------------------------------------------------------------------------
@@ -136,10 +135,7 @@ def test_board_block_filters_aa_on_ace_board() -> None:
     """On As-x-y board, AA's 6 combos drop to 3 (As is unavailable)."""
     combos = _enumerate_combos("AA")
     board = {Card.from_str("As"), Card.from_str("7c"), Card.from_str("2d")}
-    feasible = [
-        c for c in combos
-        if c[0] not in board and c[1] not in board
-    ]
+    feasible = [c for c in combos if c[0] not in board and c[1] not in board]
     assert len(feasible) == 3
     # The 3 feasible AA combos must contain Ah, Ad, or Ac — never As.
     for c in feasible:
@@ -151,10 +147,7 @@ def test_board_block_aks_on_ace_board() -> None:
     """AKs on As-7c-2d: AsKs is blocked; AhKh, AdKd, AcKc remain."""
     combos = _enumerate_combos("AKs")
     board = {Card.from_str("As"), Card.from_str("7c"), Card.from_str("2d")}
-    feasible = [
-        c for c in combos
-        if c[0] not in board and c[1] not in board
-    ]
+    feasible = [c for c in combos if c[0] not in board and c[1] not in board]
     assert len(feasible) == 3  # one of the 4 suited combos uses As
     for c in feasible:
         assert Card.from_str("As") not in c
@@ -264,8 +257,7 @@ def test_smoke_6x5_turn_under_5min() -> None:
     # Sanity: partial misses should be low or zero (every combo pair was
     # board-feasible in this config).
     assert result.partial_misses == 0, (
-        f"expected 0 misses, got {result.partial_misses}; warnings: "
-        f"{result.warnings}"
+        f"expected 0 misses, got {result.partial_misses}; warnings: {result.warnings}"
     )
 
     # Result must report meaningful counts.
@@ -529,3 +521,137 @@ def test_empty_villain_range_raises() -> None:
             villain_range=[],
             iterations=10,
         )
+
+
+# ---------------------------------------------------------------------------
+# hero_player parameter (v1.3.1 — defender extraction fix)
+# ---------------------------------------------------------------------------
+
+
+def test_hero_player_invalid_raises() -> None:
+    """hero_player outside {0, 1} raises ValueError with a clear message."""
+    cfg = HUNLConfig(
+        starting_stack=10_000,
+        starting_street=Street.TURN,
+        initial_board=tuple(Card.from_str(c) for c in ("As", "7c", "2d", "Kh")),
+        initial_pot=200,
+        initial_contributions=(100, 100),
+        bet_size_fractions=(0.75,),
+        include_all_in=False,
+        postflop_raise_cap=2,
+    )
+    with pytest.raises(ValueError, match="hero_player"):
+        solve_range_vs_range(
+            config_template=cfg,
+            hero_range=["AA"],
+            villain_range=["KK"],
+            iterations=10,
+            hero_player=2,
+        )
+
+
+@pytest.mark.timeout(120)
+def test_hero_player_1_defender_extraction() -> None:
+    """hero_player=1 extracts P1's first decision (not P0's modal continuation).
+
+    v1.3.0 bug (caught by Option B stress test S4): the aggregator
+    hardcoded ``hero_player=0`` and walked past P1's modal action. On
+    a defending spot, P1's modal action was check, so the walker stepped
+    through P1's check and then extracted P0's response (also check,
+    since there was no bet to face). Result: silent ~100% check, no
+    matter what hero was.
+
+    v1.3.1 fix: ``hero_player=1`` places hero's combo at engine slot 1
+    (postflop-first-to-act) AND extracts slot 1's first decision
+    frequencies. With a strong value hand on a static board, P1's first
+    decision should include non-trivial bet mass (> 30%); we verify the
+    output is **not 100% check** — the v1.3.0 failure mode.
+
+    Setup mirrors stress-test S5 (AA-vs-underpair turn, where AA bets
+    100%), but with hero placed at slot 1 instead of slot 0. Backward
+    compat: ``hero_player=0`` still extracts P0's response (the v1.3.0
+    behavior) and is the default.
+    """
+    cfg = HUNLConfig(
+        starting_stack=10_000,
+        starting_street=Street.TURN,
+        initial_board=tuple(Card.from_str(c) for c in ("As", "7c", "2d", "Kh")),
+        initial_pot=200,
+        initial_contributions=(100, 100),
+        bet_size_fractions=(0.75,),
+        include_all_in=False,
+        postflop_raise_cap=2,
+    )
+    # Hero = AA (strong value); villain = QQ (dominated).
+    # With hero_player=1, hero is at engine slot 1 and acts first
+    # postflop. AA on As-7c-2d-Kh has the nuts; P1's first-decision
+    # mass should not collapse to 100% check.
+    result = solve_range_vs_range(
+        config_template=cfg,
+        hero_range=["AA"],
+        villain_range=["QQ"],
+        iterations=200,
+        backend="rust",
+        villain_reps=1,
+        hero_player=1,
+    )
+
+    # The position field must reflect the hero_player choice.
+    assert result.position == "defender", (
+        f"expected position='defender' for hero_player=1; got {result.position!r}"
+    )
+
+    # AA must produce a strategy.
+    assert "AA" in result.per_class_strategy, (
+        f"AA dropped from per_class_strategy; warnings: {result.warnings}"
+    )
+    aa = result.per_class_strategy["AA"]
+
+    # Strategy must sum to 1.0 (sanity).
+    assert abs(sum(aa.values()) - 1.0) < 1e-6, (
+        f"AA frequencies sum to {sum(aa.values())}, expected 1.0"
+    )
+
+    # The v1.3.0 failure mode: AA returned ~100% check. The v1.3.1 fix
+    # must produce a strategy where AA does NOT 100%-check.
+    # On a K-high turn with AA = nuts, P1's first decision should
+    # allocate > 30% mass to NON-check actions (bet_75 specifically,
+    # since that's the only bet size).
+    non_check_mass = sum(v for k, v in aa.items() if k != "check")
+    assert non_check_mass > 0.3, (
+        f"AA non-check mass = {non_check_mass:.4f}; expected > 0.3 "
+        f"(v1.3.0 bug returned ~100% check). Strategy: {aa}"
+    )
+
+    # Defender's range_aggregate must reflect the same caveat.
+    agg_non_check = sum(v for k, v in result.range_aggregate.items() if k != "check")
+    assert agg_non_check > 0.3, (
+        f"range_aggregate non-check mass = {agg_non_check:.4f}; expected > 0.3"
+    )
+
+
+def test_position_field_default_aggressor() -> None:
+    """Default hero_player=0 sets result.position='aggressor'.
+
+    Backward-compatibility check: every v1.3.0 caller (no hero_player
+    kwarg) gets position='aggressor' on the result.
+    """
+    cfg = HUNLConfig(
+        starting_stack=10_000,
+        starting_street=Street.TURN,
+        initial_board=tuple(Card.from_str(c) for c in ("As", "7c", "2d", "Kh")),
+        initial_pot=200,
+        initial_contributions=(100, 100),
+        bet_size_fractions=(0.75,),
+        include_all_in=False,
+        postflop_raise_cap=2,
+    )
+    result = solve_range_vs_range(
+        config_template=cfg,
+        hero_range=["AA"],
+        villain_range=["QQ"],
+        iterations=10,
+        backend="rust",
+        villain_reps=1,
+    )
+    assert result.position == "aggressor"

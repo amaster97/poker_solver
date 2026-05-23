@@ -35,15 +35,27 @@ range-level behavior, but:
 exceed it are dropped with a warning and the aggregation continues with
 partial data (the result's ``partial_misses`` field counts dropped
 solves so callers can surface this).
+
+**Hero position (v1.3.1).** The ``hero_player`` parameter of
+:func:`solve_range_vs_range` controls which engine seat hero occupies:
+``0`` (default) places hero as the aggressor (P0, first postflop
+decision after BB acts); ``1`` places hero as the defender (P1, BB)
+so the returned frequencies are hero's defense (call / fold / raise)
+against villain's lead. The :class:`RangeVsRangeResult.position` field
+reflects this choice (``"aggressor"`` or ``"defender"``). v1.3.0
+hardcoded the aggressor seat and silently returned ~100% check on
+defending spots; the v1.3.1 fix is to expose ``hero_player`` so MDF /
+calling-frequency queries work. See
+``docs/pr16_prep/stress_test_results.md`` S4 for the bug that drove
+this patch.
 """
 
 from __future__ import annotations
 
 import time
-import warnings
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any, Callable
+from typing import Any
 
 from poker_solver.action_abstraction import (
     ACTION_ALL_IN,
@@ -61,7 +73,7 @@ from poker_solver.action_abstraction import (
     ACTION_RAISE_150,
     ACTION_RAISE_200,
 )
-from poker_solver.card import RANKS, RANK_VALUE, Card
+from poker_solver.card import RANK_VALUE, RANKS, Card
 from poker_solver.hunl import HUNLConfig, HUNLPoker, Street
 from poker_solver.range import Range
 from poker_solver.solver import SolveResult, solve
@@ -120,6 +132,7 @@ def _label_for_action(action_id: int, bet_size_fractions: tuple[float, ...]) -> 
         return f"raise_idx_{idx}"
     return f"action_{action_id}"
 
+
 # Default per-solve wall-clock ceiling. Solves slower than this are dropped
 # and contribute zero weight to the aggregate. Documented as a hard cap so
 # callers can plan a total budget = N_hero_classes * per_solve_cap.
@@ -150,10 +163,14 @@ class RangeVsRangeResult:
     Attributes:
         per_class_strategy: ``{hand_class: {action_label: probability}}``.
             Hero's first-decision action frequencies, per hero hand class,
-            averaged across representative combos.
+            averaged across representative combos. **Frequencies are from
+            hero's perspective at hero's first decision point** — check
+            ``position`` to disambiguate (see below).
         range_aggregate: Range-level frequencies, weighted by combo count.
             ``{action_label: probability}``. Sums to ~1.0 (modulo dropped
-            solves; see ``partial_misses``).
+            solves; see ``partial_misses``). **Same hero-perspective caveat
+            as ``per_class_strategy``** — if ``position == "defender"`` these
+            are defense (call/fold/raise) frequencies, not c-bet frequencies.
         total_combos: Total concrete combos enumerated across hero classes
             (post board-block filtering).
         total_solves: Number of subgame solves actually executed.
@@ -163,6 +180,13 @@ class RangeVsRangeResult:
         wall_clock_s: Total wall-clock for the full range-vs-range query.
         per_solve_wall_clock_s: Per-class wall-clock dict.
         warnings: Human-readable warnings (timeouts, missing reps, etc.).
+        position: ``"aggressor"`` if ``hero_player == 0`` (default; hero is
+            P0 and acts first postflop after BB acts), else ``"defender"``
+            (``hero_player == 1``; hero faces villain's action). Use this
+            to interpret ``range_aggregate``: aggressor freqs include
+            ``"check"`` / ``"bet_*"``; defender freqs include ``"fold"`` /
+            ``"call"`` / ``"raise_*"``. **Always check this field before
+            labeling the output** — see the v1.3.1 caveat in USAGE.md §5.2.
     """
 
     per_class_strategy: dict[HandClass, dict[str, float]] = field(default_factory=dict)
@@ -173,6 +197,7 @@ class RangeVsRangeResult:
     wall_clock_s: float = 0.0
     per_solve_wall_clock_s: dict[HandClass, float] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    position: str = "aggressor"
 
 
 # ---------------------------------------------------------------------------
@@ -189,6 +214,7 @@ def solve_range_vs_range(
     backend: str = "rust",
     reps_per_class: int = 1,
     villain_reps: int = 3,
+    hero_player: int = 0,
     time_budget_per_solve_s: float = DEFAULT_TIME_BUDGET_PER_SOLVE_S,
     on_progress: Callable[[int, int, HandClass], None] | None = None,
     dcfr_kwargs: dict[str, Any] | None = None,
@@ -236,6 +262,16 @@ def solve_range_vs_range(
             improve accuracy at linear cost.
         villain_reps: Villain representative combos solved against per
             hero rep. Default 3.
+        hero_player: Which engine player slot hero occupies. ``0`` (the
+            aggressor / first-to-act postflop in HUNL) is the default and
+            matches v1.3.0's hardcoded behavior. Pass ``1`` to extract
+            hero's frequencies as the **defender** (e.g., for MDF /
+            calling-frequency queries against villain's lead). The
+            returned ``RangeVsRangeResult.position`` field reflects this
+            choice. **Caveat:** the per-hand solver picks villain's
+            most-likely opening action under the solved strategy, so
+            defender outputs reflect hero's response to villain's modal
+            line, not a true Nash defending mix.
         time_budget_per_solve_s: Hard wall-clock ceiling per subgame
             solve. Solves exceeding this are dropped with a warning;
             the aggregator continues with partial data.
@@ -246,14 +282,21 @@ def solve_range_vs_range(
     Returns:
         A :class:`RangeVsRangeResult` with per-class and range-level
         frequencies, total combos enumerated, partial-miss count, and
-        wall-clock breakdown.
+        wall-clock breakdown. The ``position`` field disambiguates
+        whether the frequencies are aggressor-side (opens) or
+        defender-side (defends).
 
     Raises:
         ValueError: hero or villain range is empty after parsing; a
-            hand-class label is invalid; ``config_template.starting_street
-            == Street.PREFLOP`` (use ``solve_hunl_preflop`` directly per
-            PR 9; aggregation for preflop ranges is a follow-up).
+            hand-class label is invalid; ``hero_player`` is not 0 or 1;
+            ``config_template.starting_street == Street.PREFLOP`` (use
+            ``solve_hunl_preflop`` directly per PR 9; aggregation for
+            preflop ranges is a follow-up).
     """
+    if hero_player not in (0, 1):
+        raise ValueError(
+            f"hero_player must be 0 (aggressor) or 1 (defender); got {hero_player!r}"
+        )
     if config_template.starting_street == Street.PREFLOP:
         raise ValueError(
             "solve_range_vs_range does not yet support preflop range-vs-range "
@@ -278,7 +321,9 @@ def solve_range_vs_range(
     villain_reps_by_class: dict[HandClass, list[tuple[Card, Card]]] = {}
     for vclass in villain_classes:
         combos = _enumerate_combos(vclass)
-        feasible = [c for c in combos if c[0] not in board_cards and c[1] not in board_cards]
+        feasible = [
+            c for c in combos if c[0] not in board_cards and c[1] not in board_cards
+        ]
         villain_reps_by_class[vclass] = feasible[:villain_reps]
 
     # Build the flat villain rep list as (class, combo) pairs for sampling.
@@ -287,7 +332,9 @@ def solve_range_vs_range(
         for combo in combos:
             villain_rep_list.append((vclass, combo))
 
-    result = RangeVsRangeResult()
+    result = RangeVsRangeResult(
+        position="aggressor" if hero_player == 0 else "defender",
+    )
     t_total_start = time.perf_counter()
 
     total_classes = len(hero_classes)
@@ -296,7 +343,9 @@ def solve_range_vs_range(
             on_progress(class_idx, total_classes, hclass)
 
         combos = _enumerate_combos(hclass)
-        feasible = [c for c in combos if c[0] not in board_cards and c[1] not in board_cards]
+        feasible = [
+            c for c in combos if c[0] not in board_cards and c[1] not in board_cards
+        ]
         result.total_combos += len(feasible)
 
         if not feasible:
@@ -332,6 +381,7 @@ def solve_range_vs_range(
                     dcfr_kwargs=dcfr_kwargs,
                     result_acc=result,
                     label=f"{hclass}<-{vclass}",
+                    hero_player=hero_player,
                 )
                 if freqs is not None:
                     v_freqs.append(freqs)
@@ -406,13 +456,9 @@ def _enumerate_combos(hand_class: HandClass) -> list[tuple[Card, Card]]:
         if r1 not in RANK_VALUE or r2 not in RANK_VALUE:
             raise ValueError(f"invalid hand class {hand_class!r}")
         if r1 == r2:
-            raise ValueError(
-                f"pair token cannot have suit suffix: {hand_class!r}"
-            )
+            raise ValueError(f"pair token cannot have suit suffix: {hand_class!r}")
         if suffix not in ("s", "o"):
-            raise ValueError(
-                f"invalid suit suffix in {hand_class!r}; use 's' or 'o'"
-            )
+            raise ValueError(f"invalid suit suffix in {hand_class!r}; use 's' or 'o'")
         hi, lo = (r1, r2) if RANK_VALUE[r1] > RANK_VALUE[r2] else (r2, r1)
         if suffix == "s":
             return _suited_combos(RANK_VALUE[hi], RANK_VALUE[lo])
@@ -539,16 +585,30 @@ def _run_one_subgame(
     dcfr_kwargs: dict[str, Any] | None,
     result_acc: RangeVsRangeResult,
     label: str,
+    hero_player: int = 0,
 ) -> dict[str, float] | None:
     """Run a single concrete-vs-concrete subgame solve and extract hero's
     first-decision action frequencies.
 
+    The ``hero_player`` argument controls which engine slot hero's combo is
+    placed at AND which slot's decisions are extracted; passing
+    ``hero_player=1`` swaps hero into the defender seat so the extracted
+    frequencies are hero's response to villain's lead, not hero's c-bet
+    frequency.
+
     Returns ``None`` on timeout/error (the caller increments
     ``partial_misses``); otherwise returns ``{action_label: prob}``.
     """
+    # Place hero's combo at the requested engine slot (0 = aggressor = P0
+    # acts first postflop after BB; 1 = defender = P1 / BB). The engine's
+    # `initial_hole_cards` is ordered (player_0_cards, player_1_cards).
+    if hero_player == 0:
+        hole_cards = (hero_combo, villain_combo)
+    else:
+        hole_cards = (villain_combo, hero_combo)
     sub_config = replace(
         config_template,
-        initial_hole_cards=(hero_combo, villain_combo),
+        initial_hole_cards=hole_cards,
     )
     game = HUNLPoker(sub_config)
     t0 = time.perf_counter()
@@ -576,7 +636,9 @@ def _run_one_subgame(
             f"{label}: solve took {elapsed:.2f}s > budget {time_budget_s:.1f}s; dropped"
         )
         return None
-    return _extract_first_decision_freqs(game, sub_config, sresult, hero_player=0)
+    return _extract_first_decision_freqs(
+        game, sub_config, sresult, hero_player=hero_player
+    )
 
 
 def _extract_first_decision_freqs(
@@ -621,10 +683,7 @@ def _extract_first_decision_freqs(
             actions = game.legal_actions(state)
             key = game.infoset_key(state, cur)
             probs = sresult.average_strategy.get(key)
-            if probs is None:
-                idx = 0
-            else:
-                idx = max(range(len(probs)), key=lambda i: probs[i])
+            idx = 0 if probs is None else max(range(len(probs)), key=lambda i: probs[i])
             state = game.apply(state, actions[idx])
             visited += 1
             continue
