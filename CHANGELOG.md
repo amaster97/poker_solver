@@ -13,6 +13,77 @@ In-flight on feature branches; not yet merged to `main`.
 - v1.5/v2 follow-ups (Q3 exploitability slider reframe; range-based
   dealing; Rust callbacks; full-tree preflop).
 
+## [1.4.3] - 2026-05-23
+
+### Fixed — HUNLConfig input-validation hardening (PR 31)
+
+- `HUNLConfig.__post_init__` now raises `TypeError`/`ValueError` early
+  on malformed inputs rather than allowing garbage to propagate to the
+  Rust backend and crash deep in the solver. Loud failure at the
+  Python/Rust boundary instead of silent corruption.
+- Builds on the v1.4.1 validation foundation (PR 22 already added
+  `ValueError` on negative contributions and over-stack contributions);
+  PR 31 extends to type-level guards on contribution tuple shape,
+  scalar types (`starting_stack`, `big_blind`, `small_blind`, `ante`,
+  `initial_pot`), bet-size-fraction containers, and rejects `bool`
+  values where `int` fields are expected.
+- Tests: 28 new cases in `tests/test_hunl_config_validation.py`
+  covering the expanded guard surface, plus 2 regression tests
+  confirming the PR 22 negative-contribution and over-stack
+  contribution checks still fire.
+
+### Added — `Range.diff()` set-difference utility (PR 27)
+
+- New `Range.diff(other)` method on `poker_solver.range.Range`
+  returning a new `Range` containing combos in `self` but not in
+  `other`. Directional set-difference semantics
+  (`a.diff(b) != b.diff(a)` when ranges overlap partially);
+  non-mutating on `self`; returns empty Range when `other` is a
+  superset.
+- Implementation is equivalent to frequency-aware
+  `max(self.freq - other.freq, 0)` under the current Range invariant
+  (all stored frequencies are 1.0). Docstring flags the freq-dict
+  extension point for when per-combo fractional frequencies are added
+  (task #189).
+- Unblocks the W2.2 (Sarah) categorical-leak-slice workflow at the
+  set-membership level — finding combos present in BB's defending
+  range but missing from a candidate exploit response.
+  Fractional-frequency exemplars remain out of scope pending Range
+  refactor.
+- Tests: 8 new cases in `tests/test_range.py` covering empty/self/
+  superset/disjoint diffs, directionality, partial overlap,
+  non-mutation of `self`, and boolean set-like behavior. All 22
+  `test_range.py` tests pass.
+
+### Documentation — USAGE.md + DEVELOPER.md refresh (PR 30)
+
+- **`USAGE.md` refresh.** Updated to reflect v1.4.x capabilities
+  (node-locking §5.3, asymmetric contributions §5.4, Range utilities
+  including the new `Range.diff()` §5.5), known CLI ergonomics gaps
+  (§7a: pushfold subcommand, exploit-target positional convention,
+  batch-solve CSV quoting), and observed performance cliffs (§7b:
+  range-vs-range walk vs. Rust port path).
+- **`DEVELOPER.md` refresh.** Two-tier (Python `solve_hunl_postflop`
+  chance-enum-at-root vs. Rust `solve_range_vs_range_rust` vector-form
+  CFR) honesty framing, action-abstraction notes
+  (`ActionAbstractionConfig` defaults; library round-trip behavior
+  including `exploitability_history` truncation), and operational
+  notes for contributors (single-worker batch-solve recommendation).
+
+### Honest scope
+
+- PATCH bump: input-validation hardening + additive utility + docs
+  refresh. No public API breakage, no behavior change to existing
+  call sites, no Rust source changes.
+- v1.4.2 `_rust.cpython-313-darwin.so` is byte-identical for this
+  release (no Rust rebuild required); the shipped binding reuses the
+  v1.4.2 compile output.
+- Smoke regression: `test_range.py` (22 tests) and
+  `test_hunl_config_validation.py` (28 tests) all green.
+- No new persona workflow structurally unblocked beyond v1.4.1; PR 27
+  enables the W2.2 categorical-leak-slice workflow at the
+  set-membership level (utility-level convenience).
+
 ## [1.4.2] - 2026-05-23
 
 ### Fixed — Docs honesty + test marker
