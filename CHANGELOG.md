@@ -13,6 +13,58 @@ In-flight on feature branches; not yet merged to `main`.
 - v1.5/v2 follow-ups (Q3 exploitability slider reframe; range-based
   dealing; Rust callbacks; full-tree preflop).
 
+## [1.5.0] - candidate (PR 23)
+
+### Added — Rust DCFR widening for true range-vs-range Nash (PR 23)
+
+- New `crates/cfr_core/src/dcfr_vector.rs` module implementing vector-form
+  DCFR — per-infoset `hand_count × action_count` regret + strategy_sum
+  tables, betting tree walked once per iteration, alternating player
+  updates per Brown's `Trainer::run` pattern. Direct structural port of
+  `references/code/noambrown_poker_solver/cpp/src/trainer.cpp:138-209`
+  (MIT, attributed in code comments).
+- New `Game::hand_count(&self) -> usize` trait method, default `1` for
+  backward compatibility. Vector-form DCFR opt-in via the new top-level
+  entrypoint; existing Kuhn / Leduc / fixed-combo HUNL still go through
+  the scalar `dcfr.rs::DCFRSolver<G>` byte-identically.
+- New PyO3 entry `_rust.solve_range_vs_range_rust(config_json, iters,
+  alpha, beta, gamma, p0_holes=None, p1_holes=None) -> dict`. Output
+  dict shape matches Python tier (`average_strategy: dict[str,
+  list[float]]` with lossless `<hole>|<board>|<street>|<history>` keys),
+  plus `decision_node_count`, `iterations`, `wallclock_seconds`,
+  `hand_count_per_player`, `memory_profile`, `backend = "rust_vector"`.
+- Per-street memory profiler (`VectorMemoryProfile`) surfaced in the
+  PyO3 dict's `memory_profile` field with `total_bytes`, `infoset_count`,
+  `bytes_by_street`, `infoset_count_by_street`.
+- v1.5.0 scope: postflop only (`Street::Flop` / `Turn` / `River`); preflop
+  RvR deferred to v1.5.1 per spec §8 Q2 (16 GB memory edge at
+  full-1326 hand vector without suit-iso reduction). EMD bucketing in
+  the hand dimension also deferred to v1.5.1.
+- New tests in `tests/test_range_vs_range_rust_diff.py` (4 active, 1
+  skipped): exploitability-convergence diff against Python `dcfr.py`
+  on a restricted-range test harness, structural smoke check, and
+  end-to-end binding chain verification. Spec §5's per-row tolerance
+  metric was replaced with exploitability-under-restricted-game because
+  RvR Nash strategies are non-unique in mixed form when hands are
+  indifferent; both Python and Rust achieve <= 0.05 BB exploitability
+  on the Case A spot.
+
+### Unchanged
+
+- All existing scalar paths (`dcfr.rs::DCFRSolver`, `hunl_solver.rs`,
+  `preflop.rs`) byte-identical to v1.4.0. 40 existing diff tests
+  (Kuhn / Leduc / fixed-combo river / exploit / node-locking) green.
+
+### Deferred to v1.5.1+
+
+- Wire `range_aggregator.solve_range_vs_range` to use the new Rust tier
+  (Q3 default for v1.5.0).
+- UI surfacing (v1.5.0 is internal-only per the documented Q4 default;
+  user-facing UI integration deferred to a later minor).
+- SIMD kernels for vector-shape arithmetic (expected 4-8x speedup based
+  on PR 8 NEON-on-scalar experience).
+- Preflop RvR with suit-iso reduction.
+
 ## [1.4.3] - 2026-05-23
 
 ### Fixed — HUNLConfig input-validation hardening (PR 31)
@@ -159,7 +211,6 @@ In-flight on feature branches; not yet merged to `main`.
   some invalid configs silently and either ignored them or segfaulted
   on solve). Callers that relied on the silent-accept path will now
   get an early, clear error.
-
 ## [1.4.0] - 2026-05-23
 
 ### Added — Node locking (marquee feature; PR 21)

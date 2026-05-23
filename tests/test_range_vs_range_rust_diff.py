@@ -42,7 +42,6 @@ output's lossless `<hole_str>|<key_suffix>` format.
 from __future__ import annotations
 
 import importlib
-import json
 import time
 
 import pytest
@@ -142,7 +141,7 @@ class _RestrictedHUNLGame:
         # apply path is identical.
         self._hand_outcomes: list[tuple[int, float]] = []
         weight = 1.0 / len(hand_pairs) if hand_pairs else 0.0
-        for (p0, p1) in hand_pairs:
+        for p0, p1 in hand_pairs:
             action = _pack_hole_outcome(p0[0], p0[1], p1[0], p1[1])
             self._hand_outcomes.append((action, weight))
 
@@ -191,7 +190,7 @@ def _build_rvr_config(
     board: tuple[Card, ...],
     bet_size_fractions: tuple[float, ...] = (0.75,),
     postflop_raise_cap: int = 1,
-) -> "HUNLConfig":
+) -> HUNLConfig:
     """Construct a deterministic postflop RvR config used by all diff cases."""
     return HUNLConfig(
         starting_stack=5000,
@@ -223,7 +222,12 @@ def _select_hand_pairs(
     on the cross product disjoint-filter for the (p0, p1) handshake.
     """
     board_set = set(board)
-    deck = [Card(r, s) for r in range(2, 15) for s in range(4) if Card(r, s) not in board_set]
+    deck = [
+        Card(r, s)
+        for r in range(2, 15)
+        for s in range(4)
+        if Card(r, s) not in board_set
+    ]
     # Enumerate every (c0, c1) unordered pair from `deck`, then take
     # the first `n_per_player` distinct ones. We want sufficient card
     # diversity so the cross product `(p0, p1)` has many disjoint
@@ -269,12 +273,14 @@ def _select_hand_pairs(
 
 def _hand_card_ids(hole: tuple[Card, Card]) -> list[int]:
     from poker_solver.card import card_to_int
+
     return [card_to_int(hole[0]), card_to_int(hole[1])]
 
 
 def _hole_str(hole: tuple[Card, Card]) -> str:
     """Match Rust `dcfr_vector.rs` / `exploit.rs::hole_string` output."""
     from poker_solver.card import card_to_int
+
     ids = sorted([card_to_int(hole[0]), card_to_int(hole[1])])
     return "".join(_card_str(cid) for cid in ids)
 
@@ -410,15 +416,17 @@ def test_case_a_structural_smoke():
         # Hole is 4 chars: rank+suit+rank+suit
         assert len(hole) == 4, f"unexpected hole length in {key!r}"
         # Street is single token.
-        assert street in ("p", "f", "t", "r", "s"), (
-            f"unexpected street token in {key!r}"
-        )
+        assert street in (
+            "p",
+            "f",
+            "t",
+            "r",
+            "s",
+        ), f"unexpected street token in {key!r}"
         # Probs are valid distribution.
         assert all(p >= 0.0 for p in probs)
         total = sum(probs)
-        assert abs(total - 1.0) < 1e-6, (
-            f"row {key!r} does not sum to 1.0 (got {total})"
-        )
+        assert abs(total - 1.0) < 1e-6, f"row {key!r} does not sum to 1.0 (got {total})"
 
 
 # ---------------------------------------------------------------------------
