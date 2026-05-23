@@ -38,8 +38,15 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SPOTS_JSON = REPO_ROOT / "tests" / "data" / "river_spots.json"
 
 # Convergence-test iteration count (spec §10 Agent C #2 — 2000 iters with
-# expl < 0.02 × pot). River subgames are small (single street, bounded
-# raise depth), so 2000 iters is cheap (<10s/spot on a typical dev box).
+# expl < 0.02 × pot). The original PR 7 (v0.5.1) comment described 2000
+# iters as "cheap (<10s/spot on a typical dev box)" — that was an
+# aspirational target, never empirically validated. In practice the
+# canonical parity test takes >660s on the Python tier due to the
+# chance-enum-at-root architecture (1.6M hole-card combos per iter); see
+# `docs/river_parity_timeout_investigation_2026-05-23.md` for the
+# TEST-WAS-ALWAYS-SLOW verdict. The canonical parity test was marked
+# `@pytest.mark.slow` in v1.4.2; a full runtime fix awaits PR 23
+# vector-form CFR (v1.5.0).
 CONVERGENCE_ITERS: int = 2000
 
 # Smoke iteration count for the strategy-matrix shape test (cheaper; we
