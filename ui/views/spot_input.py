@@ -464,7 +464,7 @@ def _render_stacks_section(state: AppState) -> None:
 
 
 def _render_blinds_section(state: AppState) -> None:
-    """SB / BB / ante numeric inputs."""
+    """SB / BB / ante numeric inputs + facing-bet expansion (PR 24b §3.6)."""
     from nicegui import ui
 
     def _on_sb(e: Any) -> None:
@@ -509,6 +509,85 @@ def _render_blinds_section(state: AppState) -> None:
         min=0.0,
         on_change=_on_ante,
     ).classes("w-32")
+    _render_facing_bet_section(state)
+
+
+def _render_facing_bet_section(state: AppState) -> None:
+    """Asymmetric ``initial_contributions`` input (PR 24b §3.6).
+
+    Surfaces three inputs:
+      - ``pot-so-far-input``: dead-money pot already in middle (BB).
+      - ``villain-bet-input``: the bet the bettor has put in (BB).
+      - ``bettor-seat-toggle``: which seat is the bettor (P0 = SB / BTN
+        by default, the common BTN-bets-BB-defends workflow).
+
+    When ``villain_bet_bb > 0`` the engine sees an asymmetric pot;
+    ``Spot.to_hunl_config()`` builds the matching
+    ``initial_contributions``. Validation against the bettor's
+    effective stack happens in ``ui/app.py:_on_solve`` (not here) so
+    the user can experiment with values before committing.
+    """
+    from nicegui import ui
+
+    spot = state.current_spot
+
+    with ui.expansion(
+        "Facing bet (postflop subgame)", icon="trending_up", value=False
+    ).classes("w-full").mark("facing-bet-expansion"):
+        ui.label(
+            "Use these inputs when you're solving a subgame where one "
+            "side has already bet (e.g. 'BB faces a half-pot c-bet'). "
+            "Leave villain bet at 0 for symmetric subgames."
+        ).classes("text-xs text-gray-500 italic")
+
+        def _on_pot_so_far(e: Any) -> None:
+            try:
+                spot.pot_so_far_bb = max(0.0, float(e.value or 0.0))
+                save_state()
+            except (ValueError, TypeError):
+                pass
+
+        ui.number(
+            label="Pot so far (BB)",
+            value=spot.pot_so_far_bb,
+            step=0.1,
+            min=0.0,
+            on_change=_on_pot_so_far,
+        ).classes("w-32").mark("pot-so-far-input")
+
+        def _on_villain_bet(e: Any) -> None:
+            try:
+                spot.villain_bet_bb = max(0.0, float(e.value or 0.0))
+                save_state()
+            except (ValueError, TypeError):
+                pass
+
+        ui.number(
+            label="Villain's bet (BB)",
+            value=spot.villain_bet_bb,
+            step=0.1,
+            min=0.0,
+            on_change=_on_villain_bet,
+        ).classes("w-32").mark("villain-bet-input")
+
+        with ui.row().classes("items-center"):
+            ui.label("Bettor seat:").classes("text-xs")
+            bettor_toggle = ui.toggle(
+                ["P0 bets", "P1 bets"],
+                value="P0 bets" if spot.bettor_is_p0 else "P1 bets",
+            )
+            bettor_toggle.mark("bettor-seat-toggle")
+            ui.tooltip(
+                "Which seat has put in the bet. The OTHER seat acts "
+                "first (faces the bet) per the engine's lower-contribution "
+                "convention (v1_4_asymmetric_contributions.md Fix A)."
+            )
+
+            def _on_bettor_change(e: Any) -> None:
+                spot.bettor_is_p0 = str(e.value) == "P0 bets"
+                save_state()
+
+            bettor_toggle.on_value_change(_on_bettor_change)
 
 
 # --------------------------------------------------------------------------- #
