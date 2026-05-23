@@ -34,6 +34,7 @@ code copied.
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from typing import Any
 
@@ -43,7 +44,7 @@ from poker_solver.dcfr import DCFRSolver
 from poker_solver.equity import equity as compute_equity
 from poker_solver.evaluator import evaluate
 from poker_solver.hunl import HUNLConfig, HUNLPoker, HUNLState, Street
-from poker_solver.hunl_solver import HUNLSolveResult
+from poker_solver.hunl_solver import HUNLSolveResult, OnProgressFn, ShouldStopFn
 from poker_solver.profiler.memory import MemoryProbe, MemoryReport
 from poker_solver.pushfold import PUSHFOLD_MAX_BB, is_pushfold_mode
 from poker_solver.solver import exploitability
@@ -289,6 +290,8 @@ def solve_hunl_preflop(
     seed: int | None = None,
     dcfr_kwargs: dict[str, Any] | None = None,
     allow_pushfold_range: bool = False,
+    on_progress: OnProgressFn | None = None,
+    should_stop: ShouldStopFn | None = None,
 ) -> PreflopSolveResult:
     """First end-to-end HUNL preflop solver in the Python reference tier.
 
@@ -320,6 +323,19 @@ def solve_hunl_preflop(
             a research-mode escape hatch — useful for differential
             validation of the chart against a fresh DCFR solve at edge
             stacks (5/10/15 BB). Not exposed via CLI.
+        on_progress: Optional callback fired once per ``log_every`` chunk
+            with ``(iteration_count, exploitability_mBB_per_pot, memory_report)``.
+            Mirrors the ``solve_hunl_postflop`` contract so the UI worker
+            (PR 10b) can drive both code paths uniformly. Requires
+            ``log_every`` to be set; the chunk-boundary fire-rate is the
+            same as postflop. Callback runs on the solver thread; callers
+            must be thread-safe. Exceptions inside the callback are
+            suppressed so a misbehaving UI client cannot crash the solver.
+        should_stop: Optional predicate polled at chunk boundaries. When it
+            returns True the solver exits cleanly and returns a partial
+            ``PreflopSolveResult`` whose ``iterations`` reflects how far
+            the solve progressed. Mirrors postflop's cooperative-cancel
+            contract for the UI worker.
 
     Returns:
         A ``PreflopSolveResult`` with ``average_strategy``,
@@ -357,6 +373,8 @@ def solve_hunl_preflop(
         target_exploitability=target_exploitability,
         memory_budget_gb=memory_budget_gb,
         game=game,
+        on_progress=on_progress,
+        should_stop=should_stop,
     )
 
     avg = solver.average_strategy()
@@ -466,6 +484,8 @@ def _run_with_probe(
     target_exploitability: float | None,
     memory_budget_gb: float,
     game: PreflopSubgameGame,
+    on_progress: OnProgressFn | None = None,
+    should_stop: ShouldStopFn | None = None,
 ) -> tuple[list[float], MemoryReport]:
     """Chunked DCFR with memory + exploitability checks.
 
@@ -474,6 +494,11 @@ def _run_with_probe(
     form trees solved by `DCFRSolver`). Could be lifted into a shared
     helper in a future refactor, but inlining here keeps PR 9 surgical and
     avoids touching `hunl_solver.py` (frozen per PR 5 §6 + PR 9 §6).
+
+    PR 10b fix: ``on_progress`` + ``should_stop`` hooks fire at the same
+    chunk-boundary granularity as ``solve_hunl_postflop``'s ``_run_with_probe``
+    so the UI worker (``ui/state.py::_dispatch_solve``) can drive preflop
+    and postflop with identical callback semantics.
     """
     history: list[float] = []
     if iterations <= 0:
@@ -485,6 +510,13 @@ def _run_with_probe(
     done = 0
     final_report: MemoryReport | None = None
     while done < iterations:
+        # PR 10b: cooperative cancellation between chunks. Polled before the
+        # next DCFR.solve() call so the average strategy stays consistent on
+        # exit (we never break mid-iteration). Mirrors hunl_solver._run_with_probe.
+        if should_stop is not None and should_stop():
+            final_report = probe.snapshot()
+            break
+
         step = min(chunk_size, iterations - done)
         solver.solve(step)
         done += step
@@ -503,6 +535,13 @@ def _run_with_probe(
         if log_every is not None:
             expl = exploitability(game, solver.average_strategy())
             history.append(expl)
+            # PR 10b: fire the on_progress callback with the live snapshot
+            # so the UI worker can stream expl_history without polling. We
+            # suppress exceptions so a misbehaving UI cannot crash the
+            # solver mid-iteration (mirrors hunl_solver._run_with_probe).
+            if on_progress is not None:
+                with contextlib.suppress(Exception):
+                    on_progress(done, expl, final_report)
             if target_exploitability is not None and expl <= target_exploitability:
                 break
 
