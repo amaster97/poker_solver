@@ -122,6 +122,20 @@ class HUNLConfig:
     abstraction: AbstractionRef | None = field(default=None, compare=False, hash=False)
 
     def __post_init__(self) -> None:
+        # PR 31 (task #185): type validation at the dataclass boundary so
+        # wrong-type construction fails LOUDLY here, not silently deep in the
+        # per-hand solver. W2.3 Sarah retest crashed with
+        # `AttributeError: 'int' object has no attribute 'rank'` inside the
+        # solver because a caller passed `initial_board=(int, int, int)` (card
+        # indices) instead of `tuple[Card, ...]`. Same trap exists for
+        # `initial_hole_cards`. We coerce list -> tuple silently for the
+        # collection fields (lists are reasonable user input), but reject
+        # wrong element types with a helpful message.
+        self._validate_scalar_fields()
+        self._validate_initial_board()
+        self._validate_initial_hole_cards()
+        self._validate_bet_size_fractions()
+
         if self.rake_rate != 0.0:
             raise ValueError("rake_rate must be 0.0 in PR 3 (rake lands in PR 9)")
         if self.rake_cap != 0:
@@ -160,6 +174,132 @@ class HUNLConfig:
                     "initial_contributions must sum to initial_pot (or be (0,0) "
                     "for dead-money subgames)"
                 )
+
+    # ------------------------------------------------------------------
+    # PR 31: type-validation helpers (private). Kept close to __post_init__
+    # so future field additions are obvious.
+    # ------------------------------------------------------------------
+
+    def _validate_scalar_fields(self) -> None:
+        """starting_stack / big_blind / small_blind / ante / initial_pot are
+        non-negative ints. starting_stack and big_blind must be strictly
+        positive (a 0-stack or 0-BB game is degenerate)."""
+        for name, val, must_be_positive in (
+            ("starting_stack", self.starting_stack, True),
+            ("big_blind", self.big_blind, True),
+            ("small_blind", self.small_blind, False),
+            ("ante", self.ante, False),
+            ("initial_pot", self.initial_pot, False),
+        ):
+            # `bool` is a subclass of `int` — explicitly reject to catch
+            # accidental True/False passthrough.
+            if isinstance(val, bool) or not isinstance(val, int):
+                raise TypeError(
+                    f"HUNLConfig.{name}: expected int, got {type(val).__name__}"
+                )
+            if val < 0:
+                raise ValueError(
+                    f"HUNLConfig.{name} must be non-negative; got {val}"
+                )
+            if must_be_positive and val == 0:
+                raise ValueError(
+                    f"HUNLConfig.{name} must be positive; got {val}"
+                )
+
+    def _validate_initial_board(self) -> None:
+        """`initial_board` must be tuple/list of Card. Coerce list -> tuple."""
+        board = self.initial_board
+        if not isinstance(board, (tuple, list)):
+            raise TypeError(
+                f"HUNLConfig.initial_board: expected tuple of Card, got "
+                f"{type(board).__name__}. Use parse_board(...) or "
+                f"Card.from_str(...) to construct cards."
+            )
+        for i, c in enumerate(board):
+            if not isinstance(c, Card):
+                raise TypeError(
+                    f"HUNLConfig.initial_board: expected tuple of Card, got "
+                    f"element [{i}] of type {type(c).__name__} "
+                    f"(value={c!r}). Use parse_board(...) or "
+                    f"Card.from_str(...) to construct cards."
+                )
+        if isinstance(board, list):
+            # Coerce list -> tuple so the frozen dataclass holds a consistent
+            # immutable type. Pre-PR 31 callers that passed a list saw a list
+            # stored verbatim; downstream code already tuple()s it where
+            # needed, so silently normalizing here is a strict improvement.
+            object.__setattr__(self, "initial_board", tuple(board))
+
+    def _validate_initial_hole_cards(self) -> None:
+        """`initial_hole_cards` must be either:
+          - empty `()` for the chance-enum-at-root case, OR
+          - a tuple of 2 tuples of 2 Cards each (hero pair + villain pair).
+        We coerce inner lists -> tuples but require the right shape + Card
+        element types. Caught loudly here so the solver doesn't crash on
+        `hole_cards[player][0].rank` deep in `infoset_key`."""
+        hole = self.initial_hole_cards
+        if not isinstance(hole, (tuple, list)):
+            raise TypeError(
+                f"HUNLConfig.initial_hole_cards: expected tuple of 2 pairs "
+                f"of Card (or empty tuple), got {type(hole).__name__}"
+            )
+        if len(hole) == 0:
+            return
+        if len(hole) != 2:
+            raise ValueError(
+                f"HUNLConfig.initial_hole_cards: expected exactly 2 pairs "
+                f"(hero + villain) or empty, got {len(hole)} entries"
+            )
+        normalized: list[tuple[Card, Card]] = []
+        for player_idx, pair in enumerate(hole):
+            if not isinstance(pair, (tuple, list)):
+                raise TypeError(
+                    f"HUNLConfig.initial_hole_cards[{player_idx}]: expected "
+                    f"pair of Card, got {type(pair).__name__}"
+                )
+            if len(pair) != 2:
+                raise ValueError(
+                    f"HUNLConfig.initial_hole_cards[{player_idx}]: expected "
+                    f"2 cards, got {len(pair)}"
+                )
+            for card_idx, c in enumerate(pair):
+                if not isinstance(c, Card):
+                    raise TypeError(
+                        f"HUNLConfig.initial_hole_cards[{player_idx}]"
+                        f"[{card_idx}]: expected Card, got "
+                        f"{type(c).__name__} (value={c!r}). Use "
+                        f"Card.from_str(...) to construct cards."
+                    )
+            normalized.append((pair[0], pair[1]))
+        # Coerce to canonical nested-tuple form if any inner list was passed.
+        if any(isinstance(p, list) for p in hole) or isinstance(hole, list):
+            object.__setattr__(
+                self, "initial_hole_cards", (normalized[0], normalized[1])
+            )
+
+    def _validate_bet_size_fractions(self) -> None:
+        """`bet_size_fractions` must be a tuple/list of positive floats."""
+        fracs = self.bet_size_fractions
+        if not isinstance(fracs, (tuple, list)):
+            raise TypeError(
+                f"HUNLConfig.bet_size_fractions: expected tuple of float, "
+                f"got {type(fracs).__name__}"
+            )
+        for i, x in enumerate(fracs):
+            if isinstance(x, bool) or not isinstance(x, (int, float)):
+                raise TypeError(
+                    f"HUNLConfig.bet_size_fractions[{i}]: expected float, "
+                    f"got {type(x).__name__} (value={x!r})"
+                )
+            if x <= 0:
+                raise ValueError(
+                    f"HUNLConfig.bet_size_fractions[{i}] must be positive; "
+                    f"got {x}"
+                )
+        if isinstance(fracs, list):
+            object.__setattr__(
+                self, "bet_size_fractions", tuple(float(x) for x in fracs)
+            )
 
     def to_action_config(self) -> ActionAbstractionConfig:
         return ActionAbstractionConfig(

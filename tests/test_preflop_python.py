@@ -130,14 +130,18 @@ def test_preflop_rejects_oversized_stack() -> None:
 
 
 def test_preflop_rejects_two_hole_cards_only() -> None:
-    """`initial_hole_cards` must contain exactly two entries (hero + villain)."""
-    # Build via dataclasses.replace since HUNLConfig validates in __post_init__
-    cfg = HUNLConfig(starting_stack=10_000, initial_hole_cards=_hole("AhAs", "KdKc"))
+    """`initial_hole_cards` must contain exactly two entries (hero + villain).
+
+    PR 31: validation moved up from `solve_hunl_preflop` to
+    `HUNLConfig.__post_init__` (loud failure at the dataclass boundary,
+    not deep in the solver). Constructing via `replace(...)` now triggers
+    the check directly.
+    """
     from dataclasses import replace
 
-    bad = replace(cfg, initial_hole_cards=(_hole("AhAs", "KdKc")[0],))  # 1-tuple
+    cfg = HUNLConfig(starting_stack=10_000, initial_hole_cards=_hole("AhAs", "KdKc"))
     with pytest.raises(ValueError, match="exactly 2"):
-        solve_hunl_preflop(bad, iterations=1)
+        replace(cfg, initial_hole_cards=(_hole("AhAs", "KdKc")[0],))  # 1-tuple
 
 
 # ---------------------------------------------------------------------------
