@@ -99,9 +99,7 @@ def build_page() -> None:
             ui.button(
                 "Dismiss",
                 on_click=_dismiss_banner,
-            ).props(
-                "flat"
-            ).mark("mock-mode-banner-dismiss")
+            ).props("flat").mark("mock-mode-banner-dismiss")
 
     # ----- Header -----
     with ui.row().classes("w-full items-center p-2 border-b").mark("app-header"):
@@ -234,9 +232,7 @@ def _build_theme_toggle(state: AppState) -> None:
         options,
         value=state.prefs.dark_mode,
         on_change=_on_change,
-    ).props(
-        "flat dense"
-    ).mark("theme-toggle")
+    ).props("flat dense").mark("theme-toggle")
 
 
 def _open_library_stub() -> None:

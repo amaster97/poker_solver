@@ -423,7 +423,9 @@ def cell_color(summary: CellSummary) -> str:
 # Distinct from the `cell_color()` fade anchors above; the smoke test
 # guards the convention surface so downstream consumers (export, image
 # diff, doc screenshots) can rely on pure anchors.
-DISPLAY_PALETTE: tuple[tuple[int, int, int], tuple[int, int, int], tuple[int, int, int]] = (
+DISPLAY_PALETTE: tuple[
+    tuple[int, int, int], tuple[int, int, int], tuple[int, int, int]
+] = (
     (255, 0, 0),
     (255, 255, 0),
     (0, 255, 0),

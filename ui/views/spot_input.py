@@ -144,9 +144,7 @@ def _render_board_section(state: AppState) -> None:
         "Clear board",
         icon="clear",
         on_click=_clear_all_board,
-    ).props(
-        "flat dense"
-    ).mark("board-cleared-button")
+    ).props("flat dense").mark("board-cleared-button")
 
 
 def _suit_color(btn: Any, suit_idx: int) -> None:
@@ -328,8 +326,8 @@ def _render_one_player_range(state: AppState, player: int) -> None:
 # CSS prefix in str(INPUT_PALETTE). We emit both an RGB triple and a CSS
 # hex spelling so consumers can use whichever they prefer.
 INPUT_PALETTE: tuple[tuple[tuple[int, int, int], str], ...] = (
-    ((248, 250, 252), "#f8fafc"),   # near-white
-    ((30, 100, 220), "#1e64dc"),    # saturated blue
+    ((248, 250, 252), "#f8fafc"),  # near-white
+    ((30, 100, 220), "#1e64dc"),  # saturated blue
 )
 
 
@@ -421,6 +419,7 @@ def _render_stacks_section(state: AppState) -> None:
                         position="top",
                         timeout=4000,
                     )
+
                     # Smoke 19 (X6): conformance gate — emit a marked
                     # button alongside the toast so the push/fold dispatch
                     # surface is exposed. PR 11 wires the real switch; this
@@ -535,9 +534,7 @@ def _render_reset_preset_row(state: AppState) -> None:
         "Reset spot",
         icon="refresh",
         on_click=_on_reset,
-    ).props(
-        "flat"
-    ).mark("reset-spot-button")
+    ).props("flat").mark("reset-spot-button")
 
     # Preset dropdown.
     preset_ids = list_fixture_preset_ids()
@@ -552,9 +549,7 @@ def _render_reset_preset_row(state: AppState) -> None:
             ui.button(
                 preset_id.replace("_", " "),
                 on_click=_load_preset,
-            ).props(
-                "flat dense"
-            ).classes("text-xs").mark(f"preset-{marker_suffix}")
+            ).props("flat dense").classes("text-xs").mark(f"preset-{marker_suffix}")
 
 
 def _on_load_preset(state: AppState, preset_id: str) -> None:

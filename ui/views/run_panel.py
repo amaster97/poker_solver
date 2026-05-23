@@ -72,10 +72,10 @@ _DEFAULT_LOG_EVERY: int = 50
 # measurement doc, NOT the slider tooltip.
 _TIER_DEFAULTS: tuple[tuple[str, int, float], ...] = (
     # (label, iterations, target_mBB_per_pot)
-    ("Draft", 200, 10.0),     # 1% pot
-    ("Standard", 500, 5.0),   # 0.5% pot
-    ("Tight", 1000, 2.5),     # 0.25% pot
-    ("Library", 2000, 1.0),   # 0.1% pot
+    ("Draft", 200, 10.0),  # 1% pot
+    ("Standard", 500, 5.0),  # 0.5% pot
+    ("Tight", 1000, 2.5),  # 0.25% pot
+    ("Library", 2000, 1.0),  # 0.1% pot
 )
 _TIER_LABELS: tuple[str, ...] = tuple(t[0] for t in _TIER_DEFAULTS)
 _TIER_INDEX: dict[str, tuple[int, float]] = {
@@ -197,28 +197,30 @@ def render(
         # Behind an expansion. Default value tracks the active tier; if
         # the user overrides it explicitly, that overrides the tier's
         # iteration count at solve time.
-        with ui.expansion(
-            "Custom (advanced)", icon="tune", value=False
-        ).classes("w-full").mark("custom-tier-expansion"):
-            with ui.row().classes("gap-2 items-center"):
-                iters_input = ui.number(
-                    label="Iterations",
-                    value=default_iters,
-                    min=1,
-                    max=10_000_000,
-                    step=100,
-                ).classes("w-32")
-                iters_input.mark("iterations-input")
-                handles["iters_input"] = iters_input
+        with (
+            ui.expansion("Custom (advanced)", icon="tune", value=False)
+            .classes("w-full")
+            .mark("custom-tier-expansion"),
+            ui.row().classes("gap-2 items-center"),
+        ):
+            iters_input = ui.number(
+                label="Iterations",
+                value=default_iters,
+                min=1,
+                max=10_000_000,
+                step=100,
+            ).classes("w-32")
+            iters_input.mark("iterations-input")
+            handles["iters_input"] = iters_input
 
-                target_input = ui.number(
-                    label="Target expl (mBB/pot)",
-                    value=default_mBB,
-                    step=0.1,
-                    min=0.0,
-                ).classes("w-32")
-                target_input.mark("target-exploitability-input")
-                handles["target_input"] = target_input
+            target_input = ui.number(
+                label="Target expl (mBB/pot)",
+                value=default_mBB,
+                step=0.1,
+                min=0.0,
+            ).classes("w-32")
+            target_input.mark("target-exploitability-input")
+            handles["target_input"] = target_input
 
         # Wire tier slider to refresh the read-only label + custom defaults.
         def _on_tier_change(e: Any) -> None:
@@ -253,15 +255,11 @@ def render(
                 value="Concrete",
             )
             rvr_toggle.mark("rvr-mode-toggle")
-            ui.tooltip(
-                "Slower aggregator pass; honest framing — see Plan C Stage C1."
-            )
+            ui.tooltip("Slower aggregator pass; honest framing — see Plan C Stage C1.")
             handles["rvr_toggle"] = rvr_toggle
 
             def _on_rvr_toggle(e: Any) -> None:
-                state.current_spot.rvr_mode = (
-                    str(e.value) == "Range-vs-range"
-                )
+                state.current_spot.rvr_mode = str(e.value) == "Range-vs-range"
                 save_state()
 
             rvr_toggle.on_value_change(_on_rvr_toggle)
@@ -438,7 +436,8 @@ def _wrap_solve(
     # Resolve tier (for downstream logging only — the tier's iter +
     # target values are mirrored to the custom inputs).
     tier = (
-        str(tier_slider.value) if tier_slider is not None and tier_slider.value
+        str(tier_slider.value)
+        if tier_slider is not None and tier_slider.value
         else _DEFAULT_TIER
     )
     tier_iters, tier_target_mBB = _TIER_INDEX.get(tier, _TIER_INDEX[_DEFAULT_TIER])
@@ -601,10 +600,7 @@ def _chart_quality_label(state: AppState) -> str:
     """
     rvr_mode = bool(getattr(state.current_spot, "rvr_mode", False))
     if rvr_mode:
-        return (
-            "blueprint approximation "
-            "(Pluribus-style aggregator, v1.3.0; not Nash)"
-        )
+        return "blueprint approximation (Pluribus-style aggregator, v1.3.0; not Nash)"
     backend = "python"
     solve = state.current_solve
     if solve is not None:
@@ -713,6 +709,7 @@ def _show_error(state: AppState, handles: dict[str, Any]) -> None:
             "(2) Lower iterations, (3) Use a smaller subgame."
         )
         ui.notify(msg, type="negative", position="top", timeout=8000, multi_line=True)
+
         # Smoke 18 (X5): conformance gate — surface a marked quick-action
         # button so the OOM-remediation surface is exposed to the smoke
         # test. The button is a stub that just unchecks the bigger bet
