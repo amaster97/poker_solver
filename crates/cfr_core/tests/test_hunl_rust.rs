@@ -33,9 +33,9 @@ use std::sync::Arc;
 use cfr_core::abstraction::{canonicalize, load_abstraction, lookup_bucket};
 use cfr_core::hunl::{
     default_tiny_subgame, HUNLConfig, HUNLState, Street, ACTION_ALL_IN, ACTION_BET_100,
-    ACTION_BET_150, ACTION_BET_200, ACTION_BET_33, ACTION_BET_75, ACTION_CALL,
-    ACTION_CHECK, ACTION_FOLD, ACTION_RAISE_100, ACTION_RAISE_150, ACTION_RAISE_200,
-    ACTION_RAISE_33, ACTION_RAISE_75,
+    ACTION_BET_150, ACTION_BET_200, ACTION_BET_33, ACTION_BET_75, ACTION_CALL, ACTION_CHECK,
+    ACTION_FOLD, ACTION_RAISE_100, ACTION_RAISE_150, ACTION_RAISE_200, ACTION_RAISE_33,
+    ACTION_RAISE_75,
 };
 use cfr_core::hunl_eval::Strength;
 use cfr_core::hunl_solver::{solve_hunl_postflop, HUNLSolveError};
@@ -71,9 +71,7 @@ fn py_card<'py>(py: Python<'py>, card_int: u8) -> PyResult<Bound<'py, PyAny>> {
     int_to_card.call1((card_int,))
 }
 
-fn py_river_subgame<'py>(
-    py: Python<'py>,
-) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyAny>)> {
+fn py_river_subgame<'py>(py: Python<'py>) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyAny>)> {
     let hunl_module = py.import("poker_solver.hunl")?;
     let default_tiny = hunl_module.getattr("default_tiny_subgame")?;
     let config = default_tiny.call0()?;
@@ -237,9 +235,7 @@ fn test_hunl_legal_actions_at_river_subgame_root() {
     Python::with_gil(|py| -> PyResult<()> {
         let (_cfg, game) = py_river_subgame(py)?;
         let state = game.call_method0("initial_state")?;
-        let py_actions: Vec<u8> = game
-            .call_method1("legal_actions", (state,))?
-            .extract()?;
+        let py_actions: Vec<u8> = game.call_method1("legal_actions", (state,))?.extract()?;
         assert!(
             !py_actions.is_empty(),
             "Python tier returned empty legal action set at root"
@@ -374,15 +370,13 @@ fn test_hunl_infoset_key_bucketed_format() {
         let project_root = std::env::current_dir().unwrap();
         sys_path.call_method1("insert", (0u8, project_root.to_str().unwrap()))?;
         let fixtures = py.import("tests.fixtures.hunl_solve_fixtures")?;
-        let ref_obj =
-            fixtures.call_method0("river_only_synthetic_abstraction_ref")?;
+        let ref_obj = fixtures.call_method0("river_only_synthetic_abstraction_ref")?;
         let source_path: String = ref_obj.getattr("source_path")?.extract()?;
 
         // Python tier with abstraction attached.
         let buckets = py.import("poker_solver.abstraction.buckets")?;
         let abstraction_ref_class = buckets.getattr("AbstractionRef")?;
-        let py_ref = abstraction_ref_class
-            .call1((source_path.clone(), "test-river-only-v1"))?;
+        let py_ref = abstraction_ref_class.call1((source_path.clone(), "test-river-only-v1"))?;
         let hunl_module = py.import("poker_solver.hunl")?;
         let default_tiny = hunl_module.getattr("default_tiny_subgame")?;
         let base_cfg = default_tiny.call0()?;
@@ -470,8 +464,7 @@ fn test_abstraction_lookup_bucket_matches_python() {
         let project_root = std::env::current_dir().unwrap();
         sys_path.call_method1("insert", (0u8, project_root.to_str().unwrap()))?;
         let fixtures = py.import("tests.fixtures.hunl_solve_fixtures")?;
-        let ref_obj =
-            fixtures.call_method0("river_only_synthetic_abstraction_ref")?;
+        let ref_obj = fixtures.call_method0("river_only_synthetic_abstraction_ref")?;
         let source_path: String = ref_obj.getattr("source_path")?.extract()?;
         let rs_tables = load_abstraction(std::path::Path::new(&source_path))
             .expect("Rust load_abstraction failed");
@@ -482,10 +475,8 @@ fn test_abstraction_lookup_bucket_matches_python() {
         let mut divergence_count: usize = 0;
         for i in 0..N {
             let hole = pinned_holes[i % 2];
-            let py_bucket =
-                py_lookup_bucket(py, &source_path, &board, &hole, Street::River)?;
-            let rs_bucket =
-                lookup_bucket(&rs_tables, &board, &hole, Street::River);
+            let py_bucket = py_lookup_bucket(py, &source_path, &board, &hole, Street::River)?;
+            let rs_bucket = lookup_bucket(&rs_tables, &board, &hole, Street::River);
             if rs_bucket != py_bucket {
                 if divergence_count < 5 {
                     eprintln!(
@@ -578,10 +569,22 @@ fn test_hunl_strength_eval_handles_ties() {
         12u8 * 4,     // Q♠
     ];
     let p0_hand: [u8; 7] = [
-        board[0], board[1], board[2], board[3], board[4], 2u8 * 4 + 2, 3u8 * 4 + 3,
+        board[0],
+        board[1],
+        board[2],
+        board[3],
+        board[4],
+        2u8 * 4 + 2,
+        3u8 * 4 + 3,
     ];
     let p1_hand: [u8; 7] = [
-        board[0], board[1], board[2], board[3], board[4], 4u8 * 4 + 2, 5u8 * 4 + 3,
+        board[0],
+        board[1],
+        board[2],
+        board[3],
+        board[4],
+        4u8 * 4 + 2,
+        5u8 * 4 + 3,
     ];
     let s0 = Strength::evaluate_7(&p0_hand);
     let s1 = Strength::evaluate_7(&p1_hand);
@@ -599,9 +602,7 @@ fn test_hunl_strength_eval_handles_ties() {
 #[test]
 fn test_hunl_solve_river_subgame_smoke() {
     let config = default_tiny_subgame();
-    let result = solve_hunl_postflop(
-        &config, None, 100, 1.5, 0.0, 2.0, None, Some(42),
-    );
+    let result = solve_hunl_postflop(&config, None, 100, 1.5, 0.0, 2.0, None, Some(42));
     assert!(
         result.is_ok(),
         "river subgame solve returned error: {:?}",
@@ -638,14 +639,10 @@ fn test_hunl_solve_reject_preflop() {
         initial_hole_cards: None,
         ..HUNLConfig::default()
     };
-    let result =
-        solve_hunl_postflop(&config, None, 10, 1.5, 0.0, 2.0, None, None);
+    let result = solve_hunl_postflop(&config, None, 10, 1.5, 0.0, 2.0, None, None);
     match result {
         Err(HUNLSolveError::PreflopNotSupported) => {} // expected
-        Err(e) => panic!(
-            "preflop should yield PreflopNotSupported, got: {:?}",
-            e
-        ),
+        Err(e) => panic!("preflop should yield PreflopNotSupported, got: {:?}", e),
         Ok(_) => panic!("preflop config should be rejected"),
     }
 }

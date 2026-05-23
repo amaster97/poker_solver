@@ -51,12 +51,7 @@ const HAND_STRAIGHT_FLUSH: u64 = 8;
 /// high byte holds the category; each tiebreaker takes 4 bits, ordered
 /// high → low so lex-compare matches Python tuple compare.
 fn pack(category: u64, tb1: u64, tb2: u64, tb3: u64, tb4: u64, tb5: u64) -> Strength {
-    let v = (category << 56)
-        | (tb1 << 52)
-        | (tb2 << 48)
-        | (tb3 << 44)
-        | (tb4 << 40)
-        | (tb5 << 36);
+    let v = (category << 56) | (tb1 << 52) | (tb2 << 48) | (tb3 << 44) | (tb4 << 40) | (tb5 << 36);
     Strength(v)
 }
 
@@ -94,7 +89,11 @@ fn straight_high(unique_ranks_desc: &[u8]) -> u8 {
 
 /// Evaluate the best-five-of-N hand. `cards` must have len >= 5.
 fn evaluate_n(cards: &[u8]) -> Strength {
-    assert!(cards.len() >= 5, "evaluate_n needs at least 5 cards, got {}", cards.len());
+    assert!(
+        cards.len() >= 5,
+        "evaluate_n needs at least 5 cards, got {}",
+        cards.len()
+    );
 
     // ranks_desc: sorted descending, with duplicates (matches Python's
     // `sorted((c.rank for c in cards), reverse=True)`).
@@ -204,7 +203,14 @@ fn evaluate_n(cards: &[u8]) -> Strength {
         kickers.truncate(2);
         let k0 = *kickers.first().unwrap_or(&0);
         let k1 = *kickers.get(1).unwrap_or(&0);
-        return pack(HAND_THREE_OF_A_KIND, trips as u64, k0 as u64, k1 as u64, 0, 0);
+        return pack(
+            HAND_THREE_OF_A_KIND,
+            trips as u64,
+            k0 as u64,
+            k1 as u64,
+            0,
+            0,
+        );
     }
 
     // Two pair
@@ -227,14 +233,7 @@ fn evaluate_n(cards: &[u8]) -> Strength {
         let k0 = *kickers.first().unwrap_or(&0);
         let k1 = *kickers.get(1).unwrap_or(&0);
         let k2 = *kickers.get(2).unwrap_or(&0);
-        return pack(
-            HAND_PAIR,
-            pair as u64,
-            k0 as u64,
-            k1 as u64,
-            k2 as u64,
-            0,
-        );
+        return pack(HAND_PAIR, pair as u64, k0 as u64, k1 as u64, k2 as u64, 0);
     }
 
     // High card — top 5 ranks descending
@@ -290,7 +289,10 @@ mod tests {
         let six_low = [c(6, 1), c(2, 2), c(3, 3), c(4, 0), c(5, 1)];
         let s1 = Strength::evaluate_5(&wheel);
         let s2 = Strength::evaluate_5(&six_low);
-        assert!(s1 < s2, "wheel ({s1:?}) should rank below 6-high straight ({s2:?})");
+        assert!(
+            s1 < s2,
+            "wheel ({s1:?}) should rank below 6-high straight ({s2:?})"
+        );
     }
 
     #[test]
@@ -332,8 +334,13 @@ mod tests {
     fn seven_card_picks_best_five() {
         // Five-card flush in the seven, plus two off-suit garbage.
         let seven = [
-            c(14, 0), c(11, 0), c(8, 0), c(5, 0), c(2, 0), // A-high flush
-            c(7, 1), c(6, 2), // ignored
+            c(14, 0),
+            c(11, 0),
+            c(8, 0),
+            c(5, 0),
+            c(2, 0), // A-high flush
+            c(7, 1),
+            c(6, 2), // ignored
         ];
         let five = [c(14, 0), c(11, 0), c(8, 0), c(5, 0), c(2, 0)];
         assert_eq!(Strength::evaluate_7(&seven), Strength::evaluate_5(&five));

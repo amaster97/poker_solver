@@ -23,6 +23,11 @@ crate-type = ["cdylib", "rlib"]
 # features = ["pyo3/extension-module"]` in pyproject.toml.
 default = []
 
+# PR 8 — force the scalar-fallback DCFR inner loop even on aarch64. Used
+# only by the PR 8 microbench to measure pre-PR-8 wall-clock against the
+# NEON-on default path. Library consumers should never enable this.
+force_scalar = []
+
 [dependencies]
 pyo3 = { version = "0.23" }
 # PR 6 — HUNL postflop port additions. All MIT/Apache 2.0 dual-licensed;
@@ -38,3 +43,11 @@ arrayvec = "0.7"
 # parity. `auto-initialize` so `Python::with_gil` works from `cargo test`
 # without setting up an explicit interpreter.
 pyo3 = { version = "0.23", features = ["auto-initialize"] }
+
+# PR 8 — NEON SIMD kernel microbench. Plain `Instant`-based bench harness
+# (no Criterion dep added; keeps the PR diff minimal). Run with
+# `cargo bench --bench dcfr_bench --manifest-path crates/cfr_core/Cargo.toml`.
+[[bench]]
+name = "dcfr_bench"
+harness = false
+path = "benches/dcfr_bench.rs"

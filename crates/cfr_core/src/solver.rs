@@ -39,7 +39,12 @@ fn solve_generic<G: Game>(iterations: u32, alpha: f64, beta: f64, gamma: f64) ->
     let average_strategy = solver.solve(iterations);
     let game_value = expected_value::<G>(&G::initial(), &average_strategy)[0];
     let expl = exploitability::<G>(&average_strategy);
-    SolveOutput { average_strategy, exploitability: expl, game_value, iterations }
+    SolveOutput {
+        average_strategy,
+        exploitability: expl,
+        game_value,
+        iterations,
+    }
 }
 
 /// Player 0's expected value under `strategy` (both players follow it).
@@ -158,7 +163,10 @@ fn collect_infosets<G: Game>(
     let actions = state.legal_actions();
     if player as usize == br_player {
         let key = state.infoset_key(player as u8);
-        groups.entry(key).or_default().push((state.clone(), cf_reach));
+        groups
+            .entry(key)
+            .or_default()
+            .push((state.clone(), cf_reach));
         for &action in &actions {
             collect_infosets::<G>(&state.apply(action), cf_reach, br_player, strategy, groups);
         }
@@ -200,20 +208,15 @@ fn br_state_value<G: Game>(
     if player as usize == br_player {
         let key = state.infoset_key(player as u8);
         let idx = *best_action.get(&key).unwrap_or(&0);
-        return br_state_value::<G>(
-            &state.apply(actions[idx]),
-            br_player,
-            best_action,
-            strategy,
-        );
+        return br_state_value::<G>(&state.apply(actions[idx]), br_player, best_action, strategy);
     }
     let key = state.infoset_key(player as u8);
     let default = vec![1.0 / actions.len() as f64; actions.len()];
     let probs = strategy.get(&key).unwrap_or(&default);
     let mut value = 0.0;
     for (idx, &action) in actions.iter().enumerate() {
-        value +=
-            probs[idx] * br_state_value::<G>(&state.apply(action), br_player, best_action, strategy);
+        value += probs[idx]
+            * br_state_value::<G>(&state.apply(action), br_player, best_action, strategy);
     }
     value
 }

@@ -1,0 +1,182 @@
+{
+  "schema_version": 1,
+  "meta": {
+    "captured_at": "2026-05-23",
+    "branch": "pr-8-simd-perf",
+    "base_commit": "62c75d510e74071d1085dd074f978e2640642b8a",
+    "machine": {
+      "os": "macOS 15.6.1 (Darwin 24.6.0)",
+      "build": "24G90",
+      "arch": "aarch64",
+      "cpu": "Apple M4 Pro",
+      "model_id": "arm64"
+    },
+    "toolchain": {
+      "rustc": "1.95.0 (59807616e 2026-04-14)",
+      "profile": "release",
+      "features_default": ["neon (aarch64 implicit)"],
+      "features_scalar_run": ["force_scalar"]
+    },
+    "harness": {
+      "tool": "std::time::Instant (no Criterion dep)",
+      "kernel_repeats_per_sample": 1000000,
+      "end_to_end_iters": 500,
+      "notes": "Single-run point estimates; stddev not captured by this harness (see audit_report.md should-fix #4)."
+    },
+    "honest_disclosure": {
+      "spec_section_2_spot_4_present": false,
+      "spec_section_2_spot_4_reason": "HUNL flop spot 4 (256/128/64 buckets, 5 bet sizes, 1000 iters) is not in this harness. Pre-existing HUNL abstraction-coverage bug in test_hunl_diff.py would need to land first per pr_report.md s3b.",
+      "ten_x_gate_status": "NOT MET end-to-end. Top kernel speedup 3.29x at width=8 (discount_strat). End-to-end Leduc NEON/scalar = 2287us/2256us = 1.01x (flat). HashMap+format!() dominates per visit (~67ns of ~7.9us)."
+    }
+  },
+  "kernels_neon": {
+    "description": "NEON default-binary (aarch64 implicit), 1M reps per sample. ns/iter mean.",
+    "widths": [
+      {
+        "width": 2,
+        "discount_regrets_simd_ns": 8.03,
+        "discount_regrets_scalar_ns": 1.85,
+        "discount_regrets_speedup": 0.231,
+        "discount_strategy_simd_ns": 0.97,
+        "discount_strategy_scalar_ns": 0.96,
+        "discount_strategy_speedup": 0.993,
+        "positive_total_simd_ns": 0.53,
+        "positive_total_scalar_ns": 1.06,
+        "positive_total_speedup": 2.015,
+        "update_regret_simd_ns": 0.71,
+        "update_regret_scalar_ns": 0.75,
+        "update_regret_speedup": 1.054
+      },
+      {
+        "width": 3,
+        "discount_regrets_simd_ns": 8.44,
+        "discount_regrets_scalar_ns": 2.30,
+        "discount_regrets_speedup": 0.273,
+        "discount_strategy_simd_ns": 0.91,
+        "discount_strategy_scalar_ns": 1.03,
+        "discount_strategy_speedup": 1.129,
+        "positive_total_simd_ns": 0.72,
+        "positive_total_scalar_ns": 1.30,
+        "positive_total_speedup": 1.792,
+        "update_regret_simd_ns": 0.84,
+        "update_regret_scalar_ns": 1.06,
+        "update_regret_speedup": 1.263
+      },
+      {
+        "width": 6,
+        "discount_regrets_simd_ns": 8.93,
+        "discount_regrets_scalar_ns": 4.17,
+        "discount_regrets_speedup": 0.467,
+        "discount_strategy_simd_ns": 0.95,
+        "discount_strategy_scalar_ns": 1.82,
+        "discount_strategy_speedup": 1.915,
+        "positive_total_simd_ns": 0.80,
+        "positive_total_scalar_ns": 2.17,
+        "positive_total_speedup": 2.690,
+        "update_regret_simd_ns": 1.06,
+        "update_regret_scalar_ns": 1.82,
+        "update_regret_speedup": 1.708
+      },
+      {
+        "width": 8,
+        "discount_regrets_simd_ns": 8.36,
+        "discount_regrets_scalar_ns": 3.49,
+        "discount_regrets_speedup": 0.417,
+        "discount_strategy_simd_ns": 1.02,
+        "discount_strategy_scalar_ns": 3.37,
+        "discount_strategy_speedup": 3.293,
+        "positive_total_simd_ns": 1.04,
+        "positive_total_scalar_ns": 1.12,
+        "positive_total_speedup": 1.071,
+        "update_regret_simd_ns": 1.34,
+        "update_regret_scalar_ns": 3.40,
+        "update_regret_speedup": 2.531
+      },
+      {
+        "width": 16,
+        "discount_regrets_simd_ns": 8.70,
+        "discount_regrets_scalar_ns": 5.71,
+        "discount_regrets_speedup": 0.656,
+        "discount_strategy_simd_ns": 3.07,
+        "discount_strategy_scalar_ns": 3.58,
+        "discount_strategy_speedup": 1.167,
+        "positive_total_simd_ns": 2.03,
+        "positive_total_scalar_ns": 2.11,
+        "positive_total_speedup": 1.041,
+        "update_regret_simd_ns": 3.42,
+        "update_regret_scalar_ns": 3.52,
+        "update_regret_speedup": 1.029
+      },
+      {
+        "width": 32,
+        "discount_regrets_simd_ns": 9.26,
+        "discount_regrets_scalar_ns": 10.66,
+        "discount_regrets_speedup": 1.151,
+        "discount_strategy_simd_ns": 5.36,
+        "discount_strategy_scalar_ns": 5.94,
+        "discount_strategy_speedup": 1.108,
+        "positive_total_simd_ns": 4.98,
+        "positive_total_scalar_ns": 4.19,
+        "positive_total_speedup": 0.842,
+        "update_regret_simd_ns": 7.12,
+        "update_regret_scalar_ns": 4.89,
+        "update_regret_speedup": 0.687
+      },
+      {
+        "width": 64,
+        "discount_regrets_simd_ns": 14.98,
+        "discount_regrets_scalar_ns": 20.91,
+        "discount_regrets_speedup": 1.396,
+        "discount_strategy_simd_ns": 9.39,
+        "discount_strategy_scalar_ns": 6.77,
+        "discount_strategy_speedup": 0.721,
+        "positive_total_simd_ns": 9.35,
+        "positive_total_scalar_ns": 8.48,
+        "positive_total_speedup": 0.907,
+        "update_regret_simd_ns": 9.57,
+        "update_regret_scalar_ns": 7.53,
+        "update_regret_speedup": 0.787
+      }
+    ]
+  },
+  "kernels_scalar_forced": {
+    "description": "force_scalar feature flag enabled; both simd:: and *_scalar route through scalar fallback. ns/iter mean.",
+    "widths": [
+      { "width": 2,  "discount_regrets_ns": 1.85,  "discount_strategy_ns": 0.92, "positive_total_ns": 0.99, "update_regret_ns": 0.74 },
+      { "width": 3,  "discount_regrets_ns": 2.34,  "discount_strategy_ns": 1.42, "positive_total_ns": 1.41, "update_regret_ns": 1.03 },
+      { "width": 6,  "discount_regrets_ns": 4.11,  "discount_strategy_ns": 2.56, "positive_total_ns": 2.57, "update_regret_ns": 1.82 },
+      { "width": 8,  "discount_regrets_ns": 3.89,  "discount_strategy_ns": 3.34, "positive_total_ns": 1.04, "update_regret_ns": 3.37 },
+      { "width": 16, "discount_regrets_ns": 5.92,  "discount_strategy_ns": 3.66, "positive_total_ns": 2.08, "update_regret_ns": 3.57 },
+      { "width": 32, "discount_regrets_ns": 10.60, "discount_strategy_ns": 5.96, "positive_total_ns": 4.26, "update_regret_ns": 4.85 },
+      { "width": 64, "discount_regrets_ns": 23.01, "discount_strategy_ns": 6.66, "positive_total_ns": 8.35, "update_regret_ns": 7.38 }
+    ]
+  },
+  "end_to_end": {
+    "kuhn": {
+      "infosets": 12,
+      "iterations": 500,
+      "neon_per_iter_ns": 14714.1,
+      "scalar_forced_per_iter_ns": 10061.6,
+      "end_to_end_speedup": 0.684,
+      "notes": "Kuhn is width-2 dominated; NEON regresses vs scalar (kernel-level matches table at width=2)."
+    },
+    "leduc": {
+      "infosets": 288,
+      "iterations": 500,
+      "neon_per_iter_ns": 2286762.2,
+      "scalar_forced_per_iter_ns": 2255871.3,
+      "end_to_end_speedup": 0.986,
+      "notes": "Leduc is flat. HashMap+format!() lookup dominates per visit; kernel arithmetic is <100ns per visit (see reality_check.md)."
+    }
+  },
+  "kernels_at_hunl_row_widths": {
+    "description": "NEON-vs-scalar speedup at HUNL-relevant row widths (3-8 actions). These are the spec's target widths for the 10x gate (top-kernel speedup ceiling).",
+    "best_speedups": {
+      "discount_strategy_at_width_8": 3.293,
+      "positive_regrets_total_at_width_6": 2.690,
+      "update_regret_at_width_8": 2.531,
+      "discount_regrets_at_width_64": 1.396
+    },
+    "verdict_vs_10x_gate": "Top kernel speedup 3.29x at HUNL widths. 10x not met."
+  }
+}

@@ -12,7 +12,9 @@ mod dcfr;
 mod game;
 mod kuhn;
 mod leduc;
-mod solver;
+// `solver` is `pub` so the PR 8 microbench in `benches/dcfr_bench.rs` can
+// drive `solve_kuhn` / `solve_leduc` end-to-end for wall-clock timing.
+pub mod solver;
 
 // PR 6 — HUNL Rust production tier (Agent A's modules + Agent B's pipeline).
 // All modules are `pub` so integration tests (`crates/cfr_core/tests/*.rs`)
@@ -22,6 +24,14 @@ pub mod hunl;
 pub mod hunl_eval;
 pub mod hunl_solver;
 pub mod hunl_tree;
+
+// PR 8 — NEON SIMD kernels + cache-blocked infoset layout + public chance
+// sampling. SIMD/layout/PCS are `pub` so the microbench in
+// `crates/cfr_core/benches/dcfr_bench.rs` can exercise them directly without
+// going through the full CFR loop.
+pub mod layout;
+pub mod pcs;
+pub mod simd;
 
 use crate::solver::SolveOutput;
 

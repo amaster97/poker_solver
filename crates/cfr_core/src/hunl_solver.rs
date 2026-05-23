@@ -28,6 +28,8 @@ use crate::abstraction::AbstractionTables;
 use crate::dcfr::InfosetData;
 use crate::hunl::{HUNLConfig, HUNLState, Street};
 use crate::hunl_tree::HUNLTree;
+use crate::pcs::{effective_beta, sample_uniform_outcome, PcsRng, SamplingStrategy};
+use crate::simd;
 
 /// Output of `solve_hunl_postflop`. Mirrors PR 5's `HUNLSolveResult` minus
 /// the `MemoryReport` (Rust-side memory profiling is deferred to PR 8).
@@ -86,7 +88,10 @@ impl std::fmt::Display for HUNLSolveError {
                  requires {expected}"
             ),
             HUNLSolveError::RakeNonZero => {
-                write!(f, "PR 6 does not support rake; set rake_rate=0.0 + rake_cap=0")
+                write!(
+                    f,
+                    "PR 6 does not support rake; set rake_rate=0.0 + rake_cap=0"
+                )
             }
             HUNLSolveError::AbstractionLoad(e) => write!(f, "abstraction load error: {e}"),
             HUNLSolveError::InvalidConfig(msg) => write!(f, "invalid config: {msg}"),
@@ -125,6 +130,9 @@ impl HUNLDcfr {
     /// Lazy DCFR discount catch-up (mirrors `dcfr.rs`'s `discount_info`
     /// exactly — same math, same lazy semantics, same parity contract with
     /// `poker_solver/dcfr.py::_discount`).
+    ///
+    /// PR 8: discount inner kernels now route through `simd::discount_regrets`
+    /// + `simd::discount_strategy_sum` for NEON vectorization on aarch64.
     fn discount(info: &mut InfosetData, t: u32, alpha: f64, beta: f64, gamma: f64) {
         if info.last_discount_iter >= t {
             return;
@@ -136,64 +144,102 @@ impl HUNLDcfr {
             let pos_scale = ta / (ta + 1.0);
             let neg_scale = tb / (tb + 1.0);
             let strat_scale = (tt_f / (tt_f + 1.0)).powf(gamma);
-            for r in &mut info.regret_sum {
-                if *r > 0.0 {
-                    *r *= pos_scale;
-                } else if *r < 0.0 {
-                    *r *= neg_scale;
-                }
-            }
-            for s in &mut info.strategy_sum {
-                *s *= strat_scale;
-            }
+            simd::discount_regrets(&mut info.regret_sum, pos_scale, neg_scale);
+            simd::discount_strategy_sum(&mut info.strategy_sum, strat_scale);
         }
         info.last_discount_iter = t;
     }
 
     /// Regret-matching strategy: positive regrets normalized, uniform if zero.
+    ///
+    /// PR 8: SIMD-accelerated via `simd::positive_regrets_and_total` +
+    /// `simd::normalize`. Bit-identical to scalar on per-lane outputs.
     fn get_strategy(info: &InfosetData) -> Vec<f64> {
         let mut positive = vec![0.0_f64; info.num_actions];
-        let mut total = 0.0;
-        for (i, &r) in info.regret_sum.iter().enumerate() {
-            if r > 0.0 {
-                positive[i] = r;
-                total += r;
-            }
-        }
-        if total > 0.0 {
-            for p in &mut positive {
-                *p /= total;
-            }
-            positive
-        } else {
-            vec![1.0 / info.num_actions as f64; info.num_actions]
-        }
+        let total = simd::positive_regrets_and_total(&info.regret_sum, &mut positive);
+        simd::normalize(&mut positive, total);
+        positive
     }
 
     /// Recursive CFR traversal — same shape as `DCFRSolver::cfr` but uses
     /// `HUNLState::infoset_key(player, abstraction)` so bucketed mode works.
+    ///
+    /// PR 8: optional `sampling` + `rng` arguments. When
+    /// `sampling = SamplingStrategy::PublicChance`, chance nodes draw ONE
+    /// outcome per visit and the recursive call's value is reweighted by
+    /// `K` (the importance weight); this is the standard sampled-CFR
+    /// estimator (Lanctot 2009). `Full` keeps PR 6 behavior bit-for-bit.
+    ///
+    /// Inner per-iteration arithmetic (discount, regret-matching, regret/
+    /// strategy update) is routed through `simd::` so NEON kicks in on
+    /// aarch64.
+    #[allow(clippy::too_many_arguments)]
     fn cfr(
         &mut self,
         state: &HUNLState,
         abstraction: Option<&AbstractionTables>,
         reach: [f64; 3],
         iteration: u32,
+        sampling: SamplingStrategy,
+        rng: &mut PcsRng,
     ) -> [f64; 2] {
         if state.is_terminal() {
             return state.utility();
         }
         let player = state.current_player();
         if player == -1 {
-            // Chance node: weight children by outcome probability.
-            let mut value = [0.0_f64; 2];
-            for (action, prob) in state.chance_outcomes() {
-                let mut new_reach = reach;
-                new_reach[2] *= prob;
-                let child = self.cfr(&state.apply(action), abstraction, new_reach, iteration);
-                value[0] += prob * child[0];
-                value[1] += prob * child[1];
+            // Chance node. Two paths:
+            //   - Full: enumerate every outcome, weight by probability.
+            //   - PublicChance: sample ONE outcome uniformly and reweight by
+            //     K (importance weight). Per Lanctot 2009 / Tammelin 2014.
+            match sampling {
+                SamplingStrategy::Full => {
+                    let mut value = [0.0_f64; 2];
+                    for (action, prob) in state.chance_outcomes() {
+                        let mut new_reach = reach;
+                        new_reach[2] *= prob;
+                        let child = self.cfr(
+                            &state.apply(action),
+                            abstraction,
+                            new_reach,
+                            iteration,
+                            sampling,
+                            rng,
+                        );
+                        value[0] += prob * child[0];
+                        value[1] += prob * child[1];
+                    }
+                    return value;
+                }
+                SamplingStrategy::PublicChance => {
+                    let outcomes = state.chance_outcomes();
+                    let k = outcomes.len();
+                    if k == 0 {
+                        return [0.0, 0.0];
+                    }
+                    let (idx, weight) = sample_uniform_outcome(rng, k);
+                    let (action, prob) = outcomes[idx];
+                    let mut new_reach = reach;
+                    // The sampled-outcome reach is `prob * weight / k`; under
+                    // uniform sampling weight = k so the factor reduces to
+                    // `prob`. Multiply the resulting value by `weight` to
+                    // recover the unbiased sum.
+                    new_reach[2] *= prob;
+                    let child = self.cfr(
+                        &state.apply(action),
+                        abstraction,
+                        new_reach,
+                        iteration,
+                        sampling,
+                        rng,
+                    );
+                    // Importance reweighting: scale by k * prob / (1/k)
+                    // = prob * weight (here weight = k * prob is implicit
+                    // when prob = 1/k). For non-uniform priors we'd carry
+                    // the prob ratio; uniform DCFR chance prior assumed.
+                    return [prob * weight * child[0], prob * weight * child[1]];
+                }
             }
-            return value;
         }
 
         let player_idx = player as usize;
@@ -218,7 +264,14 @@ impl HUNLDcfr {
         for (idx, &action) in actions.iter().enumerate() {
             let mut new_reach = reach;
             new_reach[player_idx] *= strategy[idx];
-            let v = self.cfr(&state.apply(action), abstraction, new_reach, iteration);
+            let v = self.cfr(
+                &state.apply(action),
+                abstraction,
+                new_reach,
+                iteration,
+                sampling,
+                rng,
+            );
             action_values[idx] = v;
             node_value[0] += strategy[idx] * v[0];
             node_value[1] += strategy[idx] * v[1];
@@ -236,12 +289,20 @@ impl HUNLDcfr {
             .infosets
             .get_mut(&key)
             .expect("infoset must exist after insert");
-        for idx in 0..num_actions {
-            let regret = opponent_reach
-                * (action_values[idx][player_idx] - node_value[player_idx]);
-            info.regret_sum[idx] += regret;
-            info.strategy_sum[idx] += own_reach * strategy[idx];
+        // PR 8: SIMD updates. Spread the per-player action_values into a
+        // contiguous slice once so `simd::update_regret_sum` can vectorize
+        // across all lanes (up to 8 for HUNL).
+        let mut av_player: arrayvec::ArrayVec<f64, 16> = arrayvec::ArrayVec::new();
+        for av in action_values.iter().take(num_actions) {
+            av_player.push(av[player_idx]);
         }
+        simd::update_regret_sum(
+            &mut info.regret_sum,
+            &av_player,
+            node_value[player_idx],
+            opponent_reach,
+        );
+        simd::update_strategy_sum(&mut info.strategy_sum, &strategy, own_reach);
         node_value
     }
 
@@ -307,7 +368,21 @@ pub fn solve_hunl_postflop(
     let _tree = HUNLTree::build(Arc::clone(&config_arc), abstraction);
 
     let started = Instant::now();
-    let mut solver = HUNLDcfr::new(alpha, beta, gamma);
+
+    // PR 8 — public chance sampling opt-in via `config.use_pcs`. When
+    // enabled, we silently switch beta to 0.5 (the sampled-CFR
+    // recommendation per Tammelin 2014) and the inner CFR loop draws one
+    // chance outcome per visit instead of enumerating.
+    let sampling = if config.use_pcs {
+        SamplingStrategy::PublicChance
+    } else {
+        SamplingStrategy::Full
+    };
+    let solver_beta = effective_beta(sampling, beta);
+    let mut solver = HUNLDcfr::new(alpha, solver_beta, gamma);
+    // PCS RNG seeded from caller (default 7 if unset). Determinism: fixed
+    // seed → fixed outcome trace → fixed `average_strategy` across runs.
+    let mut rng = PcsRng::new(_seed.unwrap_or(7));
 
     // Drive DCFR against the user-supplied initial state. Agent A's
     // `Game::initial()` for `HUNLState` returns a *default* tiny subgame
@@ -320,7 +395,14 @@ pub fn solve_hunl_postflop(
     for _ in 0..iterations {
         solver.iteration += 1;
         let reach = [1.0_f64, 1.0, 1.0];
-        let _ = solver.cfr(&initial, abstraction, reach, solver.iteration);
+        let _ = solver.cfr(
+            &initial,
+            abstraction,
+            reach,
+            solver.iteration,
+            sampling,
+            &mut rng,
+        );
     }
 
     let average_strategy = solver.average_strategy();
