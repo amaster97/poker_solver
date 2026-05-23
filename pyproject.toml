@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "poker_solver"
-version = "1.4.3"
+version = "1.5.0"
 description = "Texas Hold'em equity + GTO solver: hand evaluation, Monte Carlo equity, range parsing, CFR engine"
 readme = "README.md"
 requires-python = ">=3.9"

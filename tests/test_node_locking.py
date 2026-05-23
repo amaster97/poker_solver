@@ -369,7 +369,7 @@ def test_pushfold_conflict_raises_without_override() -> None:
         starting_stack=1000,
         starting_street=Street.PREFLOP,
         initial_board=(),
-        initial_hole_cards=None,
+        initial_hole_cards=(),
     )
     game = HUNLPoker(cfg)
     with pytest.raises(ValueError, match="force_tree_solve"):

@@ -13,9 +13,9 @@ In-flight on feature branches; not yet merged to `main`.
 - v1.5/v2 follow-ups (Q3 exploitability slider reframe; range-based
   dealing; Rust callbacks; full-tree preflop).
 
-## [1.5.0] - candidate (PR 23)
+## [1.5.0] - 2026-05-23
 
-### Added — Rust DCFR widening for true range-vs-range Nash (PR 23)
+### Added — Vector-form CFR + Brown apples-to-apples acceptance (PR 23 + PR 28)
 
 - New `crates/cfr_core/src/dcfr_vector.rs` module implementing vector-form
   DCFR — per-infoset `hand_count × action_count` regret + strategy_sum
@@ -48,6 +48,16 @@ In-flight on feature branches; not yet merged to `main`.
   RvR Nash strategies are non-unique in mixed form when hands are
   indifferent; both Python and Rust achieve <= 0.05 BB exploitability
   on the Case A spot.
+
+### Added — Brown apples-to-apples acceptance test (PR 28)
+
+- New `tests/test_v1_5_brown_apples_to_apples.py` (574 LOC) — opt-in
+  via `-m parity_noambrown` — runs Brown's `river_solver_optimized`
+  reference binary and the new Rust vector-form CFR on the same two
+  test spots (`dry_K72_rainbow`, `dry_A83_rainbow`), compares average
+  strategies at matching histories, and asserts <= 5e-3 strategy diff
+  on >= 80% of histories. Gracefully skips when Brown's binary has not
+  been built locally (CI default).
 
 ### Unchanged
 

@@ -253,7 +253,7 @@ def _build_rust_config_for_spot(spot: Any) -> Any:
         initial_board=tuple(spot.board),
         initial_pot=pot,
         initial_contributions=(pot // 2, pot - pot // 2),
-        initial_hole_cards=None,
+        initial_hole_cards=(),
         postflop_raise_cap=int(spot.max_raises),
         bet_size_fractions=tuple(spot.bet_sizes),
         include_all_in=bool(spot.include_all_in),

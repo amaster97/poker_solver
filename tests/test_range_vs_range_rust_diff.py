@@ -201,7 +201,7 @@ def _build_rvr_config(
         initial_board=board,
         initial_pot=1000,
         initial_contributions=(500, 500),
-        initial_hole_cards=None,
+        initial_hole_cards=(),
         postflop_raise_cap=postflop_raise_cap,
         bet_size_fractions=bet_size_fractions,
         include_all_in=False,
