@@ -264,10 +264,24 @@ struct PreflopDcfr {
     iteration: u32,
     infosets: HashMap<String, InfosetData>,
     equity_cache: EquityCache,
+    /// v1.4 node-locking: see `crate::dcfr::DCFRSolver::locked_strategies`.
+    locked_strategies: HashMap<String, Vec<f64>>,
+    validated_locked_keys: std::collections::HashSet<String>,
 }
 
 impl PreflopDcfr {
+    /// v1.3-compat constructor (no locks). Lock-aware variant: `with_locked`.
+    #[allow(dead_code)]
     fn new(alpha: f64, beta: f64, gamma: f64) -> Self {
+        Self::with_locked(alpha, beta, gamma, HashMap::new())
+    }
+
+    fn with_locked(
+        alpha: f64,
+        beta: f64,
+        gamma: f64,
+        locked_strategies: HashMap<String, Vec<f64>>,
+    ) -> Self {
         Self {
             alpha,
             beta,
@@ -275,7 +289,39 @@ impl PreflopDcfr {
             iteration: 0,
             infosets: HashMap::new(),
             equity_cache: EquityCache::new(),
+            locked_strategies,
+            validated_locked_keys: std::collections::HashSet::new(),
         }
+    }
+
+    /// Lock-entry validation mirrors `dcfr.rs`. Lazy: first visit only.
+    fn validate_locked_entry(
+        key: &str,
+        vec: &[f64],
+        num_actions: usize,
+    ) -> Result<(), String> {
+        if vec.len() != num_actions {
+            return Err(format!(
+                "locked_strategies['{key}'] has length {} but the engine \
+                 emits {num_actions} legal actions; usually means \
+                 bet_size_fractions changed since the lock was created.",
+                vec.len()
+            ));
+        }
+        if vec.iter().any(|&p| p < 0.0) {
+            return Err(format!(
+                "locked_strategies['{key}'] contains a negative entry \
+                 ({vec:?}); probabilities must be non-negative."
+            ));
+        }
+        let total: f64 = vec.iter().sum();
+        if (total - 1.0).abs() > 1e-9 {
+            return Err(format!(
+                "locked_strategies['{key}'] sums to {total}, not 1.0 \
+                 (tolerance 1e-9); normalize before passing in."
+            ));
+        }
+        Ok(())
     }
 
     fn discount(info: &mut InfosetData, t: u32, alpha: f64, beta: f64, gamma: f64) {
@@ -351,6 +397,29 @@ impl PreflopDcfr {
         let actions = state.legal_actions();
         let num_actions = actions.len();
 
+        // v1.4 node-locking: see `dcfr.rs` for the canonical pattern. The
+        // locked vector is read; regret / strategy-sum updates are skipped.
+        if let Some(locked_vec) = self.locked_strategies.get(&key) {
+            if !self.validated_locked_keys.contains(&key) {
+                if let Err(msg) =
+                    Self::validate_locked_entry(&key, locked_vec, num_actions)
+                {
+                    panic!("{msg}");
+                }
+                self.validated_locked_keys.insert(key.clone());
+            }
+            let strategy = locked_vec.clone();
+            let mut node_value = [0.0_f64; 2];
+            for (idx, &action) in actions.iter().enumerate() {
+                let mut new_reach = reach;
+                new_reach[player_idx] *= strategy[idx];
+                let v = self.cfr(&state.apply(action), abstraction, new_reach, iteration);
+                node_value[0] += strategy[idx] * v[0];
+                node_value[1] += strategy[idx] * v[1];
+            }
+            return node_value;
+        }
+
         let info = self
             .infosets
             .entry(key.clone())
@@ -405,6 +474,10 @@ impl PreflopDcfr {
             };
             out.insert(key.clone(), probs);
         }
+        // v1.4 node-locking: bit-identical passthrough of locked vectors.
+        for (key, vec) in &self.locked_strategies {
+            out.insert(key.clone(), vec.clone());
+        }
         out
     }
 }
@@ -423,6 +496,7 @@ pub fn solve_hunl_preflop(
     gamma: f64,
     _target_exploitability: Option<f64>,
     _seed: Option<u64>,
+    locked_strategies: Option<HashMap<String, Vec<f64>>>,
 ) -> Result<PreflopSolveOutput, PreflopSolveError> {
     if config.starting_street != Street::Preflop {
         return Err(PreflopSolveError::NotPreflop);
@@ -436,7 +510,9 @@ pub fn solve_hunl_preflop(
 
     let config_arc = Arc::new(config.clone());
     let started = Instant::now();
-    let mut solver = PreflopDcfr::new(alpha, beta, gamma);
+    // v1.4 node-locking: route lock map into the solver.
+    let locked = locked_strategies.unwrap_or_default();
+    let mut solver = PreflopDcfr::with_locked(alpha, beta, gamma, locked);
 
     let initial = HUNLState::initial(Arc::clone(&config_arc));
     let abstraction: Option<&AbstractionTables> = None;
@@ -502,7 +578,7 @@ mod tests {
             initial_hole_cards: Some([[card(14, 0), card(14, 1)], [card(13, 2), card(13, 3)]]),
             ..Default::default()
         };
-        let res = solve_hunl_preflop(&cfg, 10, 1.5, 0.0, 2.0, None, None);
+        let res = solve_hunl_preflop(&cfg, 10, 1.5, 0.0, 2.0, None, None, None);
         assert!(res.is_ok(), "preflop solve should succeed: {:?}", res.err());
         let out = res.unwrap();
         assert_eq!(out.iterations, 10);
@@ -512,7 +588,7 @@ mod tests {
     #[test]
     fn preflop_solver_rejects_missing_hole_cards() {
         let cfg = HUNLConfig::default(); // no hole cards
-        let res = solve_hunl_preflop(&cfg, 10, 1.5, 0.0, 2.0, None, None);
+        let res = solve_hunl_preflop(&cfg, 10, 1.5, 0.0, 2.0, None, None, None);
         assert!(matches!(res, Err(PreflopSolveError::MissingHoleCards)));
     }
 }

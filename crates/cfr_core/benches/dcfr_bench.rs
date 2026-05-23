@@ -166,9 +166,9 @@ fn bench_kernel(width: usize) -> (f64, f64, f64, f64, f64, f64, f64, f64) {
 
 fn bench_leduc_solve() -> (f64, u32) {
     // Warm up the binary cache by solving once with a small iter count.
-    let _ = solver::solve_leduc(50, 1.5, 0.0, 2.0);
+    let _ = solver::solve_leduc(50, 1.5, 0.0, 2.0, None);
     let started = Instant::now();
-    let out = solver::solve_leduc(LEDUC_ITERS, 1.5, 0.0, 2.0);
+    let out = solver::solve_leduc(LEDUC_ITERS, 1.5, 0.0, 2.0, None);
     let elapsed = started.elapsed();
     let nanos = elapsed.as_nanos() as f64;
     let per_iter_ns = nanos / LEDUC_ITERS as f64;
@@ -177,9 +177,9 @@ fn bench_leduc_solve() -> (f64, u32) {
 }
 
 fn bench_kuhn_solve() -> (f64, u32) {
-    let _ = solver::solve_kuhn(50, 1.5, 0.0, 2.0);
+    let _ = solver::solve_kuhn(50, 1.5, 0.0, 2.0, None);
     let started = Instant::now();
-    let out = solver::solve_kuhn(LEDUC_ITERS, 1.5, 0.0, 2.0);
+    let out = solver::solve_kuhn(LEDUC_ITERS, 1.5, 0.0, 2.0, None);
     let elapsed = started.elapsed();
     let nanos = elapsed.as_nanos() as f64;
     let per_iter_ns = nanos / LEDUC_ITERS as f64;

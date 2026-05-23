@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import contextlib
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -109,6 +109,7 @@ def solve_hunl_postflop(
     dcfr_kwargs: dict[str, Any] | None = None,
     on_progress: OnProgressFn | None = None,
     should_stop: ShouldStopFn | None = None,
+    locked_strategies: Mapping[str, Sequence[float]] | None = None,
 ) -> HUNLSolveResult:
     """First end-to-end HUNL postflop solver in the Python reference tier.
 
@@ -183,6 +184,11 @@ def solve_hunl_postflop(
     extra_kwargs: dict[str, Any] = dict(dcfr_kwargs or {})
     if seed is not None and "seed" not in extra_kwargs:
         extra_kwargs["seed"] = seed
+    # v1.4 node-locking: thread `locked_strategies` into the DCFR solver.
+    # Empty/`None` is bit-identical to v1.3 (the dict is frozen empty and
+    # the lock-check fast-path returns immediately on every infoset visit).
+    if locked_strategies is not None and len(locked_strategies) > 0:
+        extra_kwargs["locked_strategies"] = locked_strategies
     solver = DCFRSolver(game, **extra_kwargs)
     probe = MemoryProbe(solver, include_abstraction=abstraction)
 

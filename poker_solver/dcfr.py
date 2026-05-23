@@ -20,7 +20,9 @@ This is the Python reference implementation. Each iteration t:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any
 
 import numpy as np
@@ -46,6 +48,18 @@ class DCFRSolver:
         gamma: strategy-sum discount exponent. Default 2.0 (Brown 2019).
         seed: unused (DCFR is deterministic), accepted for forward-compat
             with sampling variants.
+        locked_strategies: optional v1.4 node-locking map. Keys are infoset
+            keys (matching ``game.infoset_key(state, player)``); values are
+            probability vectors over the legal-action ordering at that
+            infoset. Locked infosets bypass regret-matching and contribute
+            neither to ``regret_sum`` nor ``strategy_sum``; the unlocked
+            side updates against the locked strategy as if it were part of
+            the game's structure. Validated lazily on first visit
+            (length / non-negative / sum-to-one) — the catch fires on
+            iteration 1, so the cost of validation is paid only on infosets
+            the solver actually visits. The map is frozen at construction
+            via ``MappingProxyType`` so post-construction mutation is a
+            ``TypeError`` rather than a silent corruption (spec §Appendix #1).
     """
 
     def __init__(
@@ -56,6 +70,7 @@ class DCFRSolver:
         beta: float = 0.0,
         gamma: float = 2.0,
         seed: int | None = None,
+        locked_strategies: Mapping[str, list[float]] | None = None,
     ) -> None:
         self.game = game
         self.alpha = float(alpha)
@@ -64,6 +79,57 @@ class DCFRSolver:
         self.seed = seed
         self.infosets: dict[str, InfosetData] = {}
         self.iteration: int = 0
+        # Internal storage: locked vectors as np.ndarray (avoids per-call
+        # array allocation in the hot CFR loop). The public view returns
+        # ``list[float]`` per the spec API contract.
+        if locked_strategies is None:
+            self._locked_strategies: Mapping[str, np.ndarray] = MappingProxyType({})
+        else:
+            if not isinstance(locked_strategies, Mapping):
+                raise TypeError(
+                    f"locked_strategies must be a mapping (dict-like), got "
+                    f"{type(locked_strategies).__name__!r}."
+                )
+            frozen: dict[str, np.ndarray] = {}
+            for key, vec in locked_strategies.items():
+                if not isinstance(key, str):
+                    raise TypeError(
+                        f"locked_strategies keys must be str, got "
+                        f"{type(key).__name__!r}: {key!r}."
+                    )
+                arr = np.asarray(vec, dtype=np.float64)
+                if arr.ndim != 1:
+                    raise ValueError(
+                        f"locked_strategies[{key!r}] must be a 1D vector, "
+                        f"got shape {arr.shape!r}."
+                    )
+                frozen[key] = arr
+            self._locked_strategies = MappingProxyType(frozen)
+        # Track which locked keys were actually visited so callers can
+        # detect dead locks (R4: infoset-key churn). Surfaced via
+        # ``unvisited_locked_keys()``.
+        self._visited_locked_keys: set[str] = set()
+        # Validation memo: only validate each key on FIRST visit, not every
+        # CFR pass. Saves a per-call sum + shape check on the hot path.
+        self._validated_locked_keys: set[str] = set()
+
+    @property
+    def locked_strategies(self) -> Mapping[str, np.ndarray]:
+        """Read-only view of the locked-strategy map (frozen at construction).
+
+        Values are ``np.ndarray``; convert via ``.tolist()`` if you need
+        ``list[float]`` for serialization.
+        """
+        return self._locked_strategies
+
+    def unvisited_locked_keys(self) -> set[str]:
+        """Return the set of locked infoset keys that were never visited.
+
+        Useful for diagnosing R4 (lock keys tied to the active action
+        abstraction). Empty after a successful solve means every lock was
+        applied at least once.
+        """
+        return set(self._locked_strategies.keys()) - self._visited_locked_keys
 
     def _get_infoset(self, key: str, num_actions: int) -> InfosetData:
         info = self.infosets.get(key)
@@ -119,6 +185,27 @@ class DCFRSolver:
 
         key = self.game.infoset_key(state, player)
         actions = self.game.legal_actions(state)
+        # v1.4 node-locking: if this infoset is locked, READ the strategy
+        # from the lock map and SKIP both `regret_sum` and `strategy_sum`
+        # updates. The locked vector IS the average strategy at output time;
+        # appending iteration contributions would dilute it back toward Nash
+        # (spec §2.2). One dict lookup per infoset visit; allocation-free
+        # in the locked branch.
+        locked_vec = self._locked_strategies.get(key)
+        if locked_vec is not None:
+            if key not in self._validated_locked_keys:
+                self._validate_locked_entry(key, locked_vec, len(actions))
+                self._validated_locked_keys.add(key)
+            self._visited_locked_keys.add(key)
+            strategy = locked_vec
+            node_value = np.zeros(self.game.num_players, dtype=np.float64)
+            for idx, action in enumerate(actions):
+                new_reach = reach.copy()
+                new_reach[player] *= strategy[idx]
+                child = self._cfr(self.game.apply(state, action), new_reach, iteration)
+                node_value += strategy[idx] * child
+            return node_value
+
         info = self._get_infoset(key, len(actions))
         self._discount(info, iteration)
         strategy = self._get_strategy(info)
@@ -147,6 +234,32 @@ class DCFRSolver:
         info.strategy_sum += own_reach * strategy
         return node_value
 
+    @staticmethod
+    def _validate_locked_entry(key: str, vec: np.ndarray, num_actions: int) -> None:
+        """Lazy validation of a locked-strategy entry. Fires on first visit.
+
+        Enforces: length matches legal-action count; entries non-negative;
+        sum within 1e-9 of 1.0. Failure raises ``ValueError`` with
+        actionable remediation per spec §3.4.
+        """
+        if len(vec) != num_actions:
+            raise ValueError(
+                f"locked_strategies[{key!r}] has length {len(vec)} but the "
+                f"engine emits {num_actions} legal actions; usually means "
+                "bet_size_fractions changed since the lock was created."
+            )
+        if (vec < 0.0).any():
+            raise ValueError(
+                f"locked_strategies[{key!r}] contains a negative entry "
+                f"({vec.tolist()!r}); probabilities must be non-negative."
+            )
+        total = float(vec.sum())
+        if abs(total - 1.0) > 1e-9:
+            raise ValueError(
+                f"locked_strategies[{key!r}] sums to {total!r}, not 1.0 "
+                f"(tolerance 1e-9); normalize before passing in."
+            )
+
     def solve(self, iterations: int) -> dict[str, list[float]]:
         """Run DCFR for `iterations` iterations; return the average strategy."""
         for _ in range(iterations):
@@ -166,4 +279,10 @@ class DCFRSolver:
                 out[key] = (info.strategy_sum / total).tolist()
             else:
                 out[key] = [1.0 / info.num_actions] * info.num_actions
+        # v1.4 node-locking: locked infosets are never inserted into
+        # `self.infosets` (the engine never updates regret/strategy for
+        # them), so merge their bit-identical vectors back into the output
+        # here (spec §3.3). The lock entry IS the average strategy.
+        for key, vec in self._locked_strategies.items():
+            out[key] = vec.tolist()
         return out

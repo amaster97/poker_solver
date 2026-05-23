@@ -13,6 +13,79 @@ In-flight on feature branches; not yet merged to `main`.
 - v1.5/v2 follow-ups (Q3 exploitability slider reframe; range-based
   dealing; Rust callbacks; full-tree preflop).
 
+## [1.4.0] - 2026-05-23
+
+### Added — Node locking (marquee feature; PR 21)
+
+- New optional `locked_strategies: dict[str, list[float]] | None` kwarg on
+  `solve()`, `solve_hunl_postflop()`, and `solve_hunl_preflop()`. Pins a
+  player's strategy at one or more infosets to a fixed probability
+  distribution over its legal actions; the unlocked side updates against
+  the locked strategy as if it were part of the game's structure (spec:
+  `docs/pr_proposals/v1_4_node_locking.md`, §2.2).
+- Threading through both Python (`poker_solver/dcfr.py`) and Rust
+  (`crates/cfr_core/src/{dcfr,hunl_solver,preflop,solver}.rs`) DCFR
+  loops. PyO3 binding marshals `Option<HashMap<String, Vec<f64>>>`.
+- Bit-identical passthrough: `result.average_strategy[locked_key]` returns
+  the supplied lock vector verbatim (spec §3.3).
+- Lazy validation on first visit: length-mismatch, negative entries, and
+  non-normalized vectors each raise `ValueError` with remediation text.
+- Frozen lock map via `MappingProxyType` to prevent mid-solve mutation
+  (spec §Appendix #1).
+- Push/fold conflict: locks under ≤15 BB HUNL preflop raise `ValueError`
+  pointing at `force_tree_solve=True` (spec §Appendix #3); the chart is
+  non-trainable so silent passthrough would mislead.
+- New tests in `tests/test_node_locking.py` (19 tests) covering:
+  empty-lock equivalence, passthrough on both tiers, validation paths,
+  cross-tier diff under `[empty, one-key, ten-key]` lock configurations,
+  EV monotonicity, best-response heuristic (Daniel persona workflow),
+  push/fold conflict, frozen mapping check, and per-iteration overhead.
+
+### Daniel persona workflows unblocked (4 of 5)
+
+- W3.1 / W-DL-01 — Villain never bluffs rivers (lock bet → 0 at bluff-blocked
+  river infosets).
+- W3.2 / W-DL-02 — GTO-vs-actual EV comparison (lock villain's preflop call
+  frequency to a leaky 60%).
+- W3.3 / W-DL-03 — Merged range / villain donk-leads small only with draws.
+- W-DL-04 — Hero's preferred line (lock hero, ask villain BR — inverse).
+- W3.4 / MDF half-pot — queued for v1.4.1 via PR 22 (asymmetric
+  initial-contributions); not in this ship.
+- W-DL-05 (multi-street tree visualizer) remains GUI-only, deferred to
+  v1.4.1 GUI polish.
+
+### Honest framing
+
+- Still a per-combo solve (the engine's infoset key already embeds hole
+  cards, so per-hand locking IS per-infoset locking; no range-vector
+  representation borrowed from postflop-solver).
+- The best-response API (a standalone `best_response()` function returning
+  a strategy + EV against a fixed opponent) is NOT included; node-lock +
+  re-solve gives equivalent capability (lock the villain, the unlocked
+  hero converges to the BR). Deferred per user 2026-05-23.
+- Convergence under one-sided locking is single-agent regret minimization
+  against a fixed environment — provably correct semantics, but the DCFR
+  α=1.5/β=0/γ=2.0 schedule was tuned for two-sided play; observed
+  exploitability decay may be slightly softer. Caveat documented in
+  `SolveResult.exploitability_history` semantics (represents the unlocked
+  side's regret only).
+- This is the v1.4.0 ship per the stagger-fallback path in
+  `docs/leg9_v1_4_0_ship_plan.md`. PR 22 (asymmetric initial-contributions,
+  unblocks W3.4 MDF queries) is queued for v1.4.1; it would compound MDF
+  use cases.
+
+### Performance
+
+- Measured Rust-tier overhead on Leduc with 28-of-288 lock keys (≈10% of
+  infosets): 1.6% vs unlocked (target: <10% per spec A4).
+
+### Resolves
+
+- v1.4.0 marquee feature ship; Daniel persona W3.1 / W3.2 / W3.3 workflows
+  unblocked. Per the persona acceptance discipline (integration sequencing
+  §6.5), W3.1 / W3.2 / W3.3 will be re-tested post-ship to confirm the
+  loop closes.
+
 ## [1.3.2] - 2026-05-23
 
 ### Added — Rust port of exploitability + game-value walks (PR 15 / Option A)

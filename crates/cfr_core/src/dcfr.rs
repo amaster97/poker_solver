@@ -65,19 +65,77 @@ pub struct DCFRSolver<G: Game> {
     pub gamma: f64,
     pub infosets: HashMap<String, InfosetData>,
     pub iteration: u32,
+    /// v1.4 node-locking: map of infoset key → fixed probability vector.
+    /// Locked infosets bypass regret-matching; the unlocked side updates
+    /// against them as if they were part of the game's structure. Empty
+    /// when no locks; one HashMap lookup per infoset visit (allocation-
+    /// free in the locked branch).
+    pub locked_strategies: HashMap<String, Vec<f64>>,
+    /// Set of locked keys validated on first visit (length + non-negative
+    /// + sum-to-one). Cached so the per-visit cost is amortized.
+    validated_locked_keys: std::collections::HashSet<String>,
     _phantom: std::marker::PhantomData<G>,
 }
 
 impl<G: Game> DCFRSolver<G> {
+    /// Construct a solver without any lock map (v1.3 behavior).
+    ///
+    /// Kept for binary-API compatibility with PR 8's microbench and
+    /// downstream test helpers that don't carry a HashMap argument.
+    #[allow(dead_code)]
     pub fn new(alpha: f64, beta: f64, gamma: f64) -> Self {
+        Self::with_locked(alpha, beta, gamma, HashMap::new())
+    }
+
+    /// Construct a solver with a pre-populated lock map (v1.4 node-locking).
+    pub fn with_locked(
+        alpha: f64,
+        beta: f64,
+        gamma: f64,
+        locked_strategies: HashMap<String, Vec<f64>>,
+    ) -> Self {
         Self {
             alpha,
             beta,
             gamma,
             infosets: HashMap::new(),
             iteration: 0,
+            locked_strategies,
+            validated_locked_keys: std::collections::HashSet::new(),
             _phantom: std::marker::PhantomData,
         }
+    }
+
+    /// Validate a locked strategy entry on first visit. Mirrors the Python
+    /// tier's `_validate_locked_entry`: length matches legal-action count,
+    /// non-negative entries, sum-to-one within 1e-9.
+    fn validate_locked_entry(
+        key: &str,
+        vec: &[f64],
+        num_actions: usize,
+    ) -> Result<(), String> {
+        if vec.len() != num_actions {
+            return Err(format!(
+                "locked_strategies['{key}'] has length {} but the engine \
+                 emits {num_actions} legal actions; usually means \
+                 bet_size_fractions changed since the lock was created.",
+                vec.len()
+            ));
+        }
+        if vec.iter().any(|&p| p < 0.0) {
+            return Err(format!(
+                "locked_strategies['{key}'] contains a negative entry \
+                 ({vec:?}); probabilities must be non-negative."
+            ));
+        }
+        let total: f64 = vec.iter().sum();
+        if (total - 1.0).abs() > 1e-9 {
+            return Err(format!(
+                "locked_strategies['{key}'] sums to {total}, not 1.0 \
+                 (tolerance 1e-9); normalize before passing in."
+            ));
+        }
+        Ok(())
     }
 
     /// Regret-matching strategy: positive regrets normalized, uniform if zero.
@@ -150,6 +208,33 @@ impl<G: Game> DCFRSolver<G> {
         let key = state.infoset_key(player as u8);
         let actions = state.legal_actions();
         let num_actions = actions.len();
+
+        // v1.4 node-locking: if this infoset is locked, READ the strategy
+        // from the lock map and SKIP both `update_regret_sum` and
+        // `update_strategy_sum`. The locked vector IS the average strategy
+        // at output time; appending iteration contributions would dilute
+        // it back toward Nash (spec §2.2). One HashMap lookup per infoset
+        // visit; allocation-free in the locked branch.
+        if let Some(locked_vec) = self.locked_strategies.get(&key) {
+            if !self.validated_locked_keys.contains(&key) {
+                if let Err(msg) =
+                    Self::validate_locked_entry(&key, locked_vec, num_actions)
+                {
+                    panic!("{msg}");
+                }
+                self.validated_locked_keys.insert(key.clone());
+            }
+            let strategy = locked_vec.clone();
+            let mut node_value = [0.0_f64; 2];
+            for (idx, &action) in actions.iter().enumerate() {
+                let mut new_reach = reach;
+                new_reach[player_idx] *= strategy[idx];
+                let v = self.cfr(&state.apply(action), new_reach, iteration);
+                node_value[0] += strategy[idx] * v[0];
+                node_value[1] += strategy[idx] * v[1];
+            }
+            return node_value;
+        }
 
         // Lazy discount, then sample the current strategy (regret matching).
         let info = self
@@ -234,6 +319,13 @@ impl<G: Game> DCFRSolver<G> {
                 vec![1.0 / info.num_actions as f64; info.num_actions]
             };
             out.insert(key.clone(), probs);
+        }
+        // v1.4 node-locking: merge locked vectors back into the output
+        // bit-identically. Locked infosets are never inserted into
+        // `self.infosets` (the engine never updates regret/strategy for
+        // them), so this is the canonical passthrough (spec §3.3).
+        for (key, vec) in &self.locked_strategies {
+            out.insert(key.clone(), vec.clone());
         }
         out
     }

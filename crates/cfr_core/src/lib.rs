@@ -4,6 +4,8 @@
 //! this crate is a structural port for performance. The differential test
 //! (`tests/test_dcfr_diff.py`) keeps the two implementations in lockstep.
 
+use std::collections::HashMap;
+
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -72,16 +74,37 @@ fn solve_output_to_py(py: Python<'_>, out: SolveOutput) -> PyResult<PyObject> {
 ///   - `exploitability`: float
 ///   - `game_value`: float (player 0's expected value)
 ///   - `iterations`: int
+///
+/// v1.4: optional `locked_strategies` parameter pins specific infoset
+/// strategies (node-locking).
 #[pyfunction]
+#[pyo3(signature = (
+    iterations,
+    alpha,
+    beta,
+    gamma,
+    locked_strategies=None,
+))]
 fn solve_kuhn(
     py: Python<'_>,
     iterations: u32,
     alpha: f64,
     beta: f64,
     gamma: f64,
+    locked_strategies: Option<HashMap<String, Vec<f64>>>,
 ) -> PyResult<PyObject> {
-    let out = solver::solve_kuhn(iterations, alpha, beta, gamma);
-    solve_output_to_py(py, out)
+    // Wrap solver invocation in `catch_unwind` so locked-strategy
+    // validation panics surface as PyValueError instead of aborting the
+    // Python interpreter (PyO3's default unwind-panic-from-Rust is an
+    // abort in release builds with `panic = "abort"`, and a hang in
+    // debug; catching here keeps the API surface predictable).
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        solver::solve_kuhn(iterations, alpha, beta, gamma, locked_strategies)
+    }));
+    match result {
+        Ok(out) => solve_output_to_py(py, out),
+        Err(payload) => Err(PyValueError::new_err(panic_message(&payload))),
+    }
 }
 
 /// Run the full Leduc DCFR solve. Same dict shape as `solve_kuhn`.
@@ -89,15 +112,39 @@ fn solve_kuhn(
 /// Leduc has 288 infosets (6-card deck collapsed by rank, two betting rounds);
 /// per-infoset action vectors are 1–3 wide depending on betting context.
 #[pyfunction]
+#[pyo3(signature = (
+    iterations,
+    alpha,
+    beta,
+    gamma,
+    locked_strategies=None,
+))]
 fn solve_leduc(
     py: Python<'_>,
     iterations: u32,
     alpha: f64,
     beta: f64,
     gamma: f64,
+    locked_strategies: Option<HashMap<String, Vec<f64>>>,
 ) -> PyResult<PyObject> {
-    let out = solver::solve_leduc(iterations, alpha, beta, gamma);
-    solve_output_to_py(py, out)
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        solver::solve_leduc(iterations, alpha, beta, gamma, locked_strategies)
+    }));
+    match result {
+        Ok(out) => solve_output_to_py(py, out),
+        Err(payload) => Err(PyValueError::new_err(panic_message(&payload))),
+    }
+}
+
+/// Extract a String from a `catch_unwind` payload (panic message).
+fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else if let Some(s) = payload.downcast_ref::<&'static str>() {
+        s.to_string()
+    } else {
+        "Rust panic with non-string payload".to_string()
+    }
 }
 
 /// HUNL postflop solve entry exposed to Python as `_rust.solve_hunl_postflop`.
@@ -132,6 +179,7 @@ fn solve_leduc(
     gamma,
     target_exploitability=None,
     seed=None,
+    locked_strategies=None,
 ))]
 #[allow(clippy::too_many_arguments)]
 fn solve_hunl_postflop(
@@ -144,6 +192,7 @@ fn solve_hunl_postflop(
     gamma: f64,
     target_exploitability: Option<f64>,
     seed: Option<u64>,
+    locked_strategies: Option<HashMap<String, Vec<f64>>>,
 ) -> PyResult<PyObject> {
     // GIL-bound prep (cheap): deserialize config + load abstraction. We can't
     // hold `Option<&AbstractionTables>` across `allow_threads` because the
@@ -161,18 +210,22 @@ fn solve_hunl_postflop(
 
     // Release the GIL for the duration of the pure-Rust DCFR loop. Critical
     // to avoid GIL contention with the calling Python thread (spec §9 #11).
-    let result = py.allow_threads(|| {
-        hunl_solver::solve_hunl_postflop(
-            &config,
-            abstraction.as_ref(),
-            iterations,
-            alpha,
-            beta,
-            gamma,
-            target_exploitability,
-            seed,
-        )
-    });
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        py.allow_threads(|| {
+            hunl_solver::solve_hunl_postflop(
+                &config,
+                abstraction.as_ref(),
+                iterations,
+                alpha,
+                beta,
+                gamma,
+                target_exploitability,
+                seed,
+                locked_strategies,
+            )
+        })
+    }));
+    let result = result.map_err(|payload| PyValueError::new_err(panic_message(&payload)))?;
     let out = result.map_err(|e| PyValueError::new_err(format!("{e}")))?;
 
     // Marshal the output back into a Python dict matching the existing
@@ -211,6 +264,7 @@ fn solve_hunl_postflop(
     gamma,
     target_exploitability=None,
     seed=None,
+    locked_strategies=None,
 ))]
 #[allow(clippy::too_many_arguments)]
 fn solve_hunl_preflop(
@@ -222,22 +276,27 @@ fn solve_hunl_preflop(
     gamma: f64,
     target_exploitability: Option<f64>,
     seed: Option<u64>,
+    locked_strategies: Option<HashMap<String, Vec<f64>>>,
 ) -> PyResult<PyObject> {
     let config: hunl::HUNLConfig = serde_json::from_str(config_json)
         .map_err(|e| PyValueError::new_err(format!("invalid HUNLConfig JSON: {e}")))?;
 
     // Release the GIL during the pure-Rust DCFR loop.
-    let result = py.allow_threads(|| {
-        preflop::solve_hunl_preflop(
-            &config,
-            iterations,
-            alpha,
-            beta,
-            gamma,
-            target_exploitability,
-            seed,
-        )
-    });
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        py.allow_threads(|| {
+            preflop::solve_hunl_preflop(
+                &config,
+                iterations,
+                alpha,
+                beta,
+                gamma,
+                target_exploitability,
+                seed,
+                locked_strategies,
+            )
+        })
+    }));
+    let result = result.map_err(|payload| PyValueError::new_err(panic_message(&payload)))?;
     let out = result.map_err(|e| PyValueError::new_err(format!("{e}")))?;
 
     let dict = PyDict::new(py);

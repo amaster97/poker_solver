@@ -26,16 +26,37 @@ pub struct SolveOutput {
     pub iterations: u32,
 }
 
-pub fn solve_kuhn(iterations: u32, alpha: f64, beta: f64, gamma: f64) -> SolveOutput {
-    solve_generic::<KuhnState>(iterations, alpha, beta, gamma)
+pub fn solve_kuhn(
+    iterations: u32,
+    alpha: f64,
+    beta: f64,
+    gamma: f64,
+    locked_strategies: Option<HashMap<String, Vec<f64>>>,
+) -> SolveOutput {
+    solve_generic::<KuhnState>(iterations, alpha, beta, gamma, locked_strategies)
 }
 
-pub fn solve_leduc(iterations: u32, alpha: f64, beta: f64, gamma: f64) -> SolveOutput {
-    solve_generic::<LeducState>(iterations, alpha, beta, gamma)
+pub fn solve_leduc(
+    iterations: u32,
+    alpha: f64,
+    beta: f64,
+    gamma: f64,
+    locked_strategies: Option<HashMap<String, Vec<f64>>>,
+) -> SolveOutput {
+    solve_generic::<LeducState>(iterations, alpha, beta, gamma, locked_strategies)
 }
 
-fn solve_generic<G: Game>(iterations: u32, alpha: f64, beta: f64, gamma: f64) -> SolveOutput {
-    let mut solver = DCFRSolver::<G>::new(alpha, beta, gamma);
+fn solve_generic<G: Game>(
+    iterations: u32,
+    alpha: f64,
+    beta: f64,
+    gamma: f64,
+    locked_strategies: Option<HashMap<String, Vec<f64>>>,
+) -> SolveOutput {
+    // v1.4 node-locking: route lock map into the solver. Empty/`None` is
+    // bit-identical to v1.3.
+    let locked = locked_strategies.unwrap_or_default();
+    let mut solver = DCFRSolver::<G>::with_locked(alpha, beta, gamma, locked);
     let average_strategy = solver.solve(iterations);
     let game_value = expected_value::<G>(&G::initial(), &average_strategy)[0];
     let expl = exploitability::<G>(&average_strategy);
