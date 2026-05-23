@@ -781,6 +781,7 @@ and a hybrid exact / Monte Carlo equity calculator.
 
 [Unreleased]: https://github.com/amaster97/poker_solver/compare/v1.0.0...HEAD
 [1.0.0]: https://github.com/amaster97/poker_solver/releases/tag/v1.0.0
+[0.6.1]: https://github.com/amaster97/poker_solver/releases/tag/v0.6.1
 [0.6.0]: https://github.com/amaster97/poker_solver/releases/tag/v0.6.0
 [0.5.2]: https://github.com/amaster97/poker_solver/releases/tag/v0.5.2
 [0.5.1]: https://github.com/amaster97/poker_solver/releases/tag/v0.5.1
