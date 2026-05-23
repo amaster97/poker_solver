@@ -11,8 +11,11 @@ locking. Goalpost: PioSolver-class HU local solving on a MacBook.
 
 ## Status
 
-- **Latest tagged release:** v1.5.1 (test rigor + docs honesty). The
-  v1.0 → v1.5.1 trajectory is documented in [`CHANGELOG.md`](CHANGELOG.md).
+- **Latest tagged release:** v1.6.0 (GUI Gate 2 surfaces — PR 24a + PR 24b). The
+  v1.0 → v1.6.0 trajectory is documented in [`CHANGELOG.md`](CHANGELOG.md).
+  v1.7.0 (aggregator→vector wiring + CLI subcommands) is in flight;
+  v1.6.1 (engine bundle, deep-cap investigation) is held pending the
+  A83 acceptance test resolution.
 - **License:** MIT.
 - **Platforms:** macOS (Apple Silicon primary), Linux. Intel Mac is
   source-build only.
