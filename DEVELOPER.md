@@ -47,6 +47,37 @@ port to Rust, then pass the diff test. Performance-only changes (a
 SIMD inner loop, a cache-blocking pass) land in Rust and are gated by
 the existing diff tests plus a perf benchmark.
 
+### Two-tier honesty (v1.4.x → v1.5.0)
+
+A clarification the diff-test gate does not surface: the Python and
+Rust tiers diff bit-exact on the spots they both implement, but they
+target **different solve regimes** and are not algorithmically
+equivalent across the full range of inputs.
+
+- **Python tier — `solve_hunl_postflop`.** Chance-enum-at-root
+  architecture. Correct on tiny games (Kuhn, Leduc) and on fixed-cards
+  postflop subgames (one combo vs one combo, or pinned hero / villain
+  cards). For range-vs-range from `initial_hole_cards=()`, the post-
+  solve exploitability walk hits a wall: empirically >10 minutes on
+  standard river spots and impractical for flop / turn (see USAGE.md
+  §7b for the user-facing framing). The Python tier is the readable
+  spec; do not expect it to scale to full Nash range-vs-range.
+- **Rust tier — `solve_range_vs_range_rust` (v1.5.0+, PR 23).**
+  Vector-form CFR per Brown's `cpp/trainer.cpp:138-209` vector path.
+  Iterates over the full combo grid per chance node without enumerating
+  at the root, which is the algorithmic shift that closes the ~100x
+  DCFR slowdown observed in v1.4.1 W2b benchmarks. Diff against
+  Brown's solver lives in `docs/brown_apples_to_apples_2026-05-23.md`
+  for the algorithmic side-by-side.
+- **Implication.** Python `solve_hunl_postflop` and Rust
+  `solve_range_vs_range_rust` are **not algorithmically equivalent**.
+  The bit-exact diff tests cover the regimes they share (fixed-cards
+  postflop subgames); they do **not** cover full RvR, because the
+  Python tier cannot complete those solves in tractable time. Future
+  diff tests for the vector-form path will need a different oracle
+  (Brown's `cpp/trainer.cpp` solve on shared seeds, not the Python
+  reference).
+
 ## 2. Repo tour
 
 Top-level layout:
@@ -237,6 +268,77 @@ contamination is permanent.
   logged with date, rationale, and the references consulted.
 - **No emojis in code or docs** unless explicitly requested by the
   user.
+
+## 9a. Extending the action abstraction
+
+[`poker_solver/action_abstraction.py`](poker_solver/action_abstraction.py)
+exposes `ActionAbstractionConfig` (and a per-street variant
+`HUNLActionAbstractionConfig`) as the knob for the postflop action
+set. Two fields drive the menu size:
+
+- `bet_size_fractions: tuple[float, ...]` — pot fractions the solver
+  exposes as bet / raise sizes. Default is `(0.33, 0.75, 1.00, 1.50, 2.00)`.
+  Set to `()` to drop discretionary bet sizes entirely.
+- `include_all_in: bool` — whether the menu includes the all-in size.
+  Default `True`.
+
+Setting both to their minimal values produces a 2-action SB menu
+(check/fold + the single forced size, no raises) — useful for
+algorithm-development unit tests where you want a tree small enough
+to walk by hand or to converge in seconds.
+
+```python
+from poker_solver.action_abstraction import ActionAbstractionConfig
+
+minimal = ActionAbstractionConfig(
+    bet_size_fractions=(),     # no discretionary bet sizes
+    include_all_in=False,      # drop the shove
+)
+```
+
+Cross-reference `tests/test_action_abstraction.py` for the legal-
+action enumeration tests and the per-config invariants the validator
+asserts. When porting a new bet-sizing menu to Rust, mirror the
+Python config one-to-one and let
+[`tests/test_hunl_diff.py`](tests/test_hunl_diff.py) gate it.
+
+## 9b. Library round-trip semantics
+
+[`poker_solver/library.py`](poker_solver/library.py) persists solves
+to SQLite. A subtle behavior surfaced by the W2.4 retest pass:
+
+- **`exploitability_history` is truncated on round-trip.** `put`
+  stores only the terminal value (`history[-1]`); `get` reconstructs
+  the field as a single-element list `[exploitability]` (NaN-safe
+  guard included). A caller that stores a 100-sample history and
+  retrieves it gets back a 1-element list. This is intentional — the
+  library's slot is for the converged result, not the convergence
+  trajectory — but call sites that expected the original list shape
+  will get surprised. Either snapshot the history before `put`, or
+  treat the round-tripped `exploitability_history` strictly as
+  "final exploitability wrapped in a list."
+
+If you change the persistence schema to keep the full history, bump
+`_SCHEMA_VERSION` and add a forward-migration path; the library
+schema is `library_schema.sql` and the version constant is at the top
+of `library.py`.
+
+## 9c. `--workers > 1` parallelism caveat
+
+`scripts/batch_solve.py` accepts a `--workers N` flag and threads a
+per-worker memory budget through to `solve_hunl_postflop`, but the
+multi-worker path is **wired but not exercised by the test suite**
+(see the dataclass-comment "single-process; --workers > 1 is wired
+but the dry-run path is the only path exercised by tests" in
+`scripts/batch_solve.py:255-257`). Treat the parallel path as
+unverified for large library builds: smoke-test it on a small CSV
+before committing an overnight job to it, and validate the per-worker
+memory ceiling actually holds under the workload before relying on
+it to keep a fleet of solves under the 14 GB budget.
+
+The single-worker path is the production-blessed one today (it is
+what the CLI subcommand `poker-solver batch-solve` exercises by
+default) and it survives the dry-run / spot-skip idempotency tests.
 
 ## 10. Where to go next
 
