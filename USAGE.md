@@ -536,42 +536,102 @@ description, so the same configuration always resolves to the same row.
 
 ---
 
-## 7a. Known CLI gaps (v1.4.x)
+## 7a. Ergonomic subcommands (v1.5.2+)
 
-A few workflows that the library API supports are not yet wired
-through the `poker-solver` CLI. Drop down to a one-line Python
-invocation in the meantime — these gaps are tracked for a future PR.
+PR 39 added three thin CLI wrappers for workflows that previously
+required Python one-liners. Library APIs are unchanged; these are pure
+convenience shortcuts.
 
-- **No `poker-solver pushfold` subcommand.** Push/fold queries auto-
-  dispatch via the `solve` path on short configs (§3a), but there is no
-  dedicated `pushfold` subcommand. Use the library directly:
+### `poker-solver pushfold` — short-stack chart lookup
 
-  ```python
-  from poker_solver.pushfold import get_pushfold_strategy
-  get_pushfold_strategy(stack_bb=9, position='sb_jam', hand='88')
-  ```
+Look up a single (depth, position, hand) cell or dump the full 169-cell
+chart for one (depth, position) cell.
 
-- **No `poker-solver river --hero --villain-range` subcommand.**
-  Concrete hero hole-cards vs. a villain range on a river spot is
-  expressible through the library but not through a CLI flag pair. Use
-  `solve_hunl_postflop` with fixed `initial_hole_cards`:
+```bash
+# Frequency that SB jams 88 at 9 BB:
+poker-solver pushfold --stack 9 --position sb_jam --hand 88
 
-  ```python
-  from poker_solver import Card, HUNLConfig, Street, solve_hunl_postflop
-  cfg = HUNLConfig(
-      starting_stack=10_000,
-      starting_street=Street.RIVER,
-      initial_board=tuple(Card.from_str(c) for c in ("As","7c","2d","Kh","5s")),
-      initial_pot=1_000,
-      initial_contributions=(500, 500),
-      initial_hole_cards=((h1, h2), (v1, v2)),  # both pinned
-  )
-  result = solve_hunl_postflop(cfg, iterations=500)
-  ```
+# BB call frequency vs SB jam, JSON form:
+poker-solver pushfold --stack 8 --position bb_call_vs_jam --hand AKs --json
 
-  For range-on-one-side queries, build a wrapper that loops the villain
-  combos and aggregates by combo weight (the §5.2 aggregator pattern,
-  but with hero pinned to specific cards).
+# Full 13x13 chart for one cell:
+poker-solver pushfold --stack 10 --position sb_jam --full-range
+```
+
+Flags:
+
+- `--stack <BB>` — effective stack in BB (integer, 2-15 inclusive).
+- `--position <sb_jam|bb_call_vs_jam>` — chart side.
+- `--hand <CLASS>` — hand-class string (`AA`, `AKs`, `AKo`). Required
+  unless `--full-range` is set.
+- `--full-range` — emit all 169 cells instead of one lookup.
+- `--json` — JSON output instead of human-readable.
+
+Out-of-range stack depths (>15 BB) exit with code 2 and a message
+pointing at the tree-builder solver.
+
+### `poker-solver river` — fixed hero vs villain range, river-only
+
+Solve a river spot with a fixed hero combo against a villain range, then
+aggregate hero's first-decision frequencies across the villain combos
+(weighted equally per combo; matches the §5.2 aggregator pattern but
+with hero pinned).
+
+```bash
+poker-solver river \
+    --board "As 7c 2d Kh 5s" \
+    --hero AhKh \
+    --villain-range "QQ,JJ,AKs" \
+    --iters 200
+```
+
+Flags:
+
+- `--board <CARDS>` — exactly 5 river cards.
+- `--hero <HOLE>` — hero's 2-card hole (e.g. `AhKh`).
+- `--villain-range <RANGE>` — PioSolver-notation range (e.g. `QQ,JJ,AKs`).
+  Combos that share a card with `--hero` or `--board` are filtered out
+  automatically.
+- `--iters <N>` — DCFR iterations per per-combo solve (default 200).
+- `--pot-bb <BB>` / `--stack-bb <BB>` — starting pot and per-player
+  effective stack in BB (defaults: pot 10 BB, stack 100 BB).
+
+Output: per-combo solve, then hero's averaged action distribution at
+the first decision (`action_0` is fold, `action_1` is call/check, etc.,
+in the order the engine's action abstraction emits them). The Mean
+game value line is hero's EV in BB averaged over the villain combos.
+
+### `poker-solver parity` — diff against Noam Brown's binary
+
+Surfaces the river-spot parity machinery from
+`tests/test_river_diff.py` (PR 7) as a one-shot CLI for ad-hoc sanity
+checks.
+
+```bash
+# Diff against the bundled dry-board fixture:
+poker-solver parity --fixture dry_K72_rainbow --iters 2000
+
+# Custom fixture path:
+poker-solver parity --fixture my_spot --fixture-path ./my_spots.json
+```
+
+Flags:
+
+- `--fixture <ID>` — fixture id from `tests/data/river_spots.json`.
+  Unknown ids exit code 2 with the available-id list.
+- `--fixture-path <PATH>` — override the fixture JSON location.
+- `--iters <N>` — DCFR iterations on both engines (default 2000, matches
+  PR 7).
+
+Brown's binary must already be built (`scripts/build_noambrown.sh`);
+when it isn't, the command exits 2 with a build hint — same protocol
+as the diff-test harness.
+
+Output: per-side infoset-key counts, the overlap percentage, our
+game-value, and (when Brown's stdout exposes it) the game-value diff.
+Per-action numeric diff stays delegated to `test_river_diff.py`.
+
+### Still missing from the CLI
 
 - **`poker-solver batch-solve` CSV quoting.** The `bet_sizes` column is
   comma-separated within a single CSV cell, so multi-value entries must

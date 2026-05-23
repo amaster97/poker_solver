@@ -578,6 +578,338 @@ def _cmd_batch_solve(args: argparse.Namespace) -> int:
     )
 
 
+def _cmd_pushfold(args: argparse.Namespace) -> int:
+    """PR 39: thin CLI wrapper around ``poker_solver.pushfold.get_pushfold_strategy``.
+
+    Surfaces the short-stack push/fold chart lookup that previously required
+    a one-line Python invocation (USAGE.md §7a "no `poker-solver pushfold`
+    subcommand" gap). Maps ``ValueError`` / ``PushFoldChartUnavailable``
+    cleanly into exit code 2 with a stderr message; ``main()`` already
+    catches ``ValueError`` so the chart-unavailable branch (a ValueError
+    subclass) routes the same way.
+
+    Output format on success: one line ``<hand> <position> <stack>BB: <freq>``
+    so the value is greppable + scriptable. With ``--json`` we emit a JSON
+    object for downstream tooling.
+    """
+    from poker_solver.pushfold import (
+        PushFoldChartUnavailable,
+        get_full_range,
+        get_pushfold_strategy,
+    )
+
+    if args.full_range:
+        try:
+            chart = get_full_range(args.stack, args.position)
+        except (PushFoldChartUnavailable, ValueError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        if args.json:
+            print(_json.dumps(chart, indent=2, sort_keys=True))
+            return 0
+        for hand in sorted(chart):
+            print(f"{hand}\t{chart[hand]:.6f}")
+        return 0
+
+    if args.hand is None:
+        print(
+            "error: --hand is required unless --full-range is set",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        freq = get_pushfold_strategy(args.stack, args.position, args.hand)
+    except (PushFoldChartUnavailable, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(
+            _json.dumps(
+                {
+                    "stack_bb": args.stack,
+                    "position": args.position,
+                    "hand": args.hand,
+                    "frequency": freq,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+    print(f"{args.hand} {args.position} {args.stack}BB: {freq:.6f}")
+    return 0
+
+
+def _cmd_river(args: argparse.Namespace) -> int:
+    """PR 39: river spot solve with fixed hero hole cards vs villain range.
+
+    Closes the USAGE.md §7a "no `poker-solver river --hero --villain-range`"
+    gap. Wraps ``solve_hunl_postflop`` with ``initial_hole_cards`` pinned
+    to the hero combo and the villain combo enumerated from
+    ``--villain-range``. For range-on-one-side queries we follow the
+    USAGE.md §7a suggested pattern: loop villain combos, aggregate by
+    combo weight. The output reports aggregated frequencies across the
+    villain range plus the per-combo EV.
+
+    Sample usage::
+
+        poker-solver river --board "As 7c 2d Kh 5s" --hero AhKh \\
+            --villain-range "QQ,JJ,AKs" --iters 200
+    """
+    from poker_solver.hunl import HUNLConfig, Street
+    from poker_solver.hunl_solver import solve_hunl_postflop
+
+    board_cards = parse_board(args.board)
+    if len(board_cards) != 5:
+        raise ValueError(
+            f"--board must specify 5 river cards; got {len(board_cards)}"
+        )
+
+    hero_cards = parse_hand(args.hero)
+    if len(hero_cards) != 2:
+        raise ValueError(
+            f"--hero must be a 2-card hole (e.g. 'AhKh'); got {args.hero!r}"
+        )
+    hero_pair = (hero_cards[0], hero_cards[1])
+
+    board_set = set(board_cards)
+    if hero_pair[0] in board_set or hero_pair[1] in board_set:
+        raise ValueError(
+            f"--hero {args.hero!r} overlaps with --board {args.board!r}"
+        )
+
+    villain_range = parse_range(args.villain_range)
+    villain_combos = [
+        combo
+        for combo in villain_range
+        if combo[0] not in board_set
+        and combo[1] not in board_set
+        and combo[0] != hero_pair[0]
+        and combo[0] != hero_pair[1]
+        and combo[1] != hero_pair[0]
+        and combo[1] != hero_pair[1]
+    ]
+    if not villain_combos:
+        raise ValueError(
+            "no villain combos compatible with --hero + --board (every combo "
+            "in --villain-range shares a card with hero or the board)."
+        )
+
+    # Per-spot accounting: 100 BB symmetric, dead-money river pot of 10 BB
+    # (matches the USAGE.md §3b convention; users can rebuild a custom config
+    # in Python for non-standard stacks).
+    big_blind = 100
+    pot_bb = max(1, int(args.pot_bb))
+    stack_bb = max(2, int(args.stack_bb))
+    initial_pot = pot_bb * big_blind
+    half = initial_pot // 2
+    starting_stack = stack_bb * big_blind
+
+    print(f"Board:        {' '.join(str(c) for c in board_cards)}")
+    print(f"Hero:         {' '.join(str(c) for c in hero_pair)}")
+    print(
+        f"Villain range: {args.villain_range} "
+        f"({len(villain_combos)} combos after card removal)"
+    )
+    print(f"Iterations:   {args.iters}")
+    print()
+
+    aggregate: dict[str, float] = {}
+    total_weight = 0.0
+    ev_sum = 0.0
+    for villain_pair in villain_combos:
+        cfg = HUNLConfig(
+            starting_stack=starting_stack,
+            small_blind=big_blind // 2,
+            big_blind=big_blind,
+            starting_street=Street.RIVER,
+            initial_board=tuple(board_cards),
+            initial_pot=initial_pot,
+            initial_contributions=(half, half),
+            initial_hole_cards=(hero_pair, villain_pair),
+        )
+        result = solve_hunl_postflop(cfg, iterations=args.iters)
+        # Hero is P0 (button); postflop P1 (BB / OOP) acts first. We want
+        # hero's FIRST decision — the shortest-history infoset whose hole
+        # matches hero. We pick the lex-shortest history string among the
+        # matching keys per villain combo to stay robust to differing
+        # opening lines (villain check -> hero IP-bets, or villain leads
+        # -> hero faces a bet).
+        hero_keys = [
+            (key, probs)
+            for key, probs in result.average_strategy.items()
+            if len(key.split("|")) == 4
+            and _hole_matches(key.split("|")[0], hero_pair)
+        ]
+        if hero_keys:
+            # Sort by history length then lex; take the first decision (smallest).
+            hero_keys.sort(key=lambda kp: (len(kp[0].split("|")[3]), kp[0]))
+            _, first_probs = hero_keys[0]
+            for i, p in enumerate(first_probs):
+                aggregate.setdefault(f"action_{i}", 0.0)
+                aggregate[f"action_{i}"] += p
+        total_weight += 1.0
+        ev_sum += result.game_value
+
+    if total_weight == 0:
+        raise ValueError("no hero infosets aggregated (unexpected)")
+    for k in aggregate:
+        aggregate[k] /= total_weight
+
+    print("Hero first-decision aggregate (average over villain combos):")
+    for k in sorted(aggregate):
+        print(f"  {k:<10}  {aggregate[k]:.6f}")
+    print(f"\nMean game value (BB, P0 perspective): {ev_sum / total_weight:+.6f}")
+    return 0
+
+
+def _hole_matches(hole_str: str, hero_pair: tuple) -> bool:
+    """True iff `hole_str` (sorted-card form from infoset key) matches `hero_pair`.
+
+    Our `infoset_key` sorts the hole by ``(rank, suit)`` ascending (see
+    `hunl._sorted_card_string`); we replicate that sort here so the user's
+    authoring order in `--hero` doesn't matter for the comparison.
+    """
+    if len(hole_str) != 4:
+        return False
+    c1, c2 = hero_pair
+    if (c1.rank, c1.suit) > (c2.rank, c2.suit):
+        c1, c2 = c2, c1
+    return hole_str == f"{c1}{c2}"
+
+
+def _cmd_parity(args: argparse.Namespace) -> int:
+    """PR 39: parity-diff wrapper around ``poker_solver.parity.noambrown_wrapper``.
+
+    Surfaces the river-spot diff machinery already used by
+    ``tests/test_river_diff.py`` as a one-shot CLI command for ad-hoc
+    sanity checks (W4.3 retest). Loads a fixture by id from
+    ``tests/data/river_spots.json`` (or a user-supplied path via
+    ``--fixture-path``), invokes Brown's binary, runs our solver, and
+    prints the headline coverage + game-value diff.
+
+    Brown's binary must be built (``scripts/build_noambrown.sh``) and on
+    the canonical path returned by ``find_brown_binary()``. When the
+    binary is missing we exit 2 with a hint — same protocol the test
+    harness uses for in-test skips.
+    """
+    from poker_solver.hunl import HUNLConfig, Street
+    from poker_solver.hunl_solver import solve_hunl_postflop
+    from poker_solver.parity.noambrown_wrapper import (
+        canonicalize_brown_history,
+        canonicalize_our_history,
+        find_brown_binary,
+        load_spots,
+        run_brown_solver,
+    )
+
+    fixture_path = Path(
+        args.fixture_path
+        if args.fixture_path
+        else Path(__file__).resolve().parent.parent
+        / "tests"
+        / "data"
+        / "river_spots.json"
+    )
+    if not fixture_path.is_file():
+        print(
+            f"error: river fixtures not found at {fixture_path}",
+            file=sys.stderr,
+        )
+        return 2
+    spots = load_spots(fixture_path)
+    spot = next((s for s in spots if s.id == args.fixture), None)
+    if spot is None:
+        available = ", ".join(s.id for s in spots)
+        print(
+            f"error: fixture {args.fixture!r} not found. Available: {available}",
+            file=sys.stderr,
+        )
+        return 2
+
+    binary = find_brown_binary()
+    if binary is None:
+        print(
+            "error: Brown's binary not built. Run "
+            "`scripts/build_noambrown.sh` from the repo root, then retry.",
+            file=sys.stderr,
+        )
+        return 2
+
+    iterations = (
+        spot.iterations_override if spot.iterations_override is not None else args.iters
+    )
+
+    print(f"Fixture:     {spot.id}")
+    print(f"Description: {spot.description}")
+    print(f"Iterations:  {iterations}")
+    print()
+
+    brown_dump = run_brown_solver(spot, binary, iterations=iterations)
+
+    cfg = HUNLConfig(
+        starting_stack=spot.stack + spot.pot // 2,
+        small_blind=50,
+        big_blind=100,
+        starting_street=Street.RIVER,
+        initial_board=tuple(spot.board),
+        initial_pot=spot.pot,
+        initial_contributions=(spot.pot // 2, spot.pot // 2),
+        bet_size_fractions=spot.bet_sizes,
+        include_all_in=spot.include_all_in,
+        postflop_raise_cap=spot.max_raises,
+    )
+    our_result = solve_hunl_postflop(cfg, iterations=iterations)
+
+    # Canonical-history coverage diff. Mirrors the coverage check in
+    # tests/test_river_diff.py; per-action numeric diff is delegated to
+    # that test harness (Agent B owns the full matrix walk).
+    brown_keys: set[str] = set()
+    for player_profile in brown_dump.players:
+        for hist_key in player_profile.profile:
+            canonical = canonicalize_brown_history(hist_key, spot=spot)
+            brown_keys.add(_canonical_str(canonical))
+
+    our_keys: set[str] = set()
+    for key in our_result.average_strategy:
+        parts = key.split("|")
+        if len(parts) != 4:
+            continue
+        canonical = canonicalize_our_history(parts[3], spot=spot)
+        our_keys.add(_canonical_str(canonical))
+
+    overlap = brown_keys & our_keys
+    coverage = (len(overlap) / len(brown_keys)) if brown_keys else 1.0
+
+    print("Parity diff:")
+    print(f"  Brown infoset keys:      {len(brown_keys)}")
+    print(f"  Ours canonicalized keys: {len(our_keys)}")
+    print(f"  Overlap:                 {len(overlap)} ({coverage:.1%})")
+    print(f"  Our game value (BB):     {our_result.game_value:+.6f}")
+    if brown_dump.exploitability_chips is not None:
+        print(
+            f"  Brown final exploitability (chips): "
+            f"{brown_dump.exploitability_chips:.6f}"
+        )
+    if brown_dump.game_value_p0 is not None:
+        gv_diff = our_result.game_value - brown_dump.game_value_p0
+        print(f"  Game-value diff:         {gv_diff:+.6f}")
+    return 0
+
+
+def _canonical_str(canonical: tuple) -> str:
+    """Render a canonical history tuple to a stable string (PR 7 §5)."""
+    if not canonical:
+        return "root"
+    parts = []
+    for kind, amt in canonical:
+        if kind in ("f", "c"):
+            parts.append(kind)
+        else:
+            parts.append(f"{kind}{amt}")
+    return "/".join(parts)
+
+
 def _add_library_path_flag(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--library-path",
@@ -850,6 +1182,111 @@ def build_parser() -> argparse.ArgumentParser:
     lib_stats.add_argument("--json", action="store_true")
     _add_library_path_flag(lib_stats)
     lib_stats.set_defaults(func=_cmd_library_stats)
+
+    # ---- PR 39: ergonomic short-cut subcommands (pushfold / river / parity).
+    # Each is a thin wrapper around an existing library API (see _cmd_*
+    # above); zero engine changes. Closes USAGE.md §7a "Known CLI gaps".
+    pf = sub.add_parser(
+        "pushfold",
+        help="Look up a short-stack push/fold chart cell.",
+    )
+    pf.add_argument(
+        "--stack",
+        type=int,
+        required=True,
+        help="Effective stack in BB (integer 2-15 inclusive).",
+    )
+    pf.add_argument(
+        "--position",
+        choices=("sb_jam", "bb_call_vs_jam"),
+        required=True,
+        help="Chart side: 'sb_jam' (SB shove frequency) or 'bb_call_vs_jam' "
+        "(BB call frequency vs a SB jam).",
+    )
+    pf.add_argument(
+        "--hand",
+        type=str,
+        default=None,
+        help="Hand class to look up (e.g. '88', 'AKs', 'AKo'). Required unless "
+        "--full-range is set.",
+    )
+    pf.add_argument(
+        "--full-range",
+        action="store_true",
+        help="Emit the full 169-cell chart for the (stack, position) cell.",
+    )
+    pf.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit JSON instead of the human-readable line(s).",
+    )
+    pf.set_defaults(func=_cmd_pushfold)
+
+    rv = sub.add_parser(
+        "river",
+        help="Solve a river spot with fixed hero cards vs a villain range.",
+    )
+    rv.add_argument(
+        "--board",
+        type=str,
+        required=True,
+        help="The 5 river cards, e.g. 'As 7c 2d Kh 5s'.",
+    )
+    rv.add_argument(
+        "--hero",
+        type=str,
+        required=True,
+        help="Hero's 2-card hole, e.g. 'AhKh'.",
+    )
+    rv.add_argument(
+        "--villain-range",
+        type=str,
+        required=True,
+        help="Villain range in PioSolver notation, e.g. 'QQ,JJ,AKs'.",
+    )
+    rv.add_argument(
+        "--iters",
+        type=int,
+        default=200,
+        help="DCFR iterations per per-combo solve (default: 200).",
+    )
+    rv.add_argument(
+        "--pot-bb",
+        type=int,
+        default=10,
+        help="Starting pot in BB (default: 10).",
+    )
+    rv.add_argument(
+        "--stack-bb",
+        type=int,
+        default=100,
+        help="Per-player effective stack in BB (default: 100).",
+    )
+    rv.set_defaults(func=_cmd_river)
+
+    pp = sub.add_parser(
+        "parity",
+        help="Diff our river solve vs Noam Brown's binary on a fixture spot.",
+    )
+    pp.add_argument(
+        "--fixture",
+        type=str,
+        required=True,
+        help="Spot id from tests/data/river_spots.json (e.g. 'dry_K72_rainbow').",
+    )
+    pp.add_argument(
+        "--fixture-path",
+        type=str,
+        default=None,
+        help="Override fixture JSON path; defaults to tests/data/river_spots.json.",
+    )
+    pp.add_argument(
+        "--iters",
+        type=int,
+        default=2000,
+        help="DCFR iterations on both engines (default: 2000, matches PR 7).",
+    )
+    pp.set_defaults(func=_cmd_parity)
 
     # ---- PR 11: batch-solve top-level subcommand ----
     bs = sub.add_parser(
