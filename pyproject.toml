@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "poker_solver"
-version = "1.2.0"
+version = "1.2.1"
 description = "Texas Hold'em equity + GTO solver: hand evaluation, Monte Carlo equity, range parsing, CFR engine"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -36,6 +36,16 @@ features = ["pyo3/extension-module"]
 # Bundle push/fold chart data into the wheel so importlib.resources can
 # load it from an installed package (not just an editable source tree).
 include = ["poker_solver/charts/*.json"]
+# macOS distribution builds MUST target universal2 (arm64 + x86_64 lipo'd)
+# so the .so works under both Apple Silicon native Python and x86_64 Python
+# (e.g., pyenv-managed; Rosetta).  Phase 1 persona test W1.4 caught
+# ImportError: incompatible architecture ('have arm64, need x86_64') when
+# `poker-solver --backend rust` is invoked from x86_64 Python against a
+# single-arch arm64 build.  maturin does not accept `target` as a
+# pyproject.toml field (CLI-only); developers and CI must pass:
+#     maturin {build,develop} --release --target universal2-apple-darwin
+# Prerequisite (one-time): rustup target add x86_64-apple-darwin aarch64-apple-darwin
+# scripts/build_macos_dmg.sh rejects single-arch .so files at pre-flight.
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -2,7 +2,8 @@
 # build_macos_dmg.sh — package Poker Solver as a macOS .app + .dmg.
 #
 # Pipeline (11 steps):
-#   1. Pre-flight: verify python 3.13, pyinstaller, xcrun, create-dmg, _rust.so.
+#   1. Pre-flight: verify python 3.13, pyinstaller, xcrun, create-dmg, _rust.so
+#      (including a universal2 arch check — see Phase 1 W1.4 mitigation below).
 #   2. Clean build/ + dist/.
 #   3. Run PyInstaller against scripts/poker_solver.spec.
 #   4. In-bundle _rust smoke test (TOP risk mitigation; spec §12.1).
@@ -57,7 +58,11 @@ UNSIGNED FALLBACK (Apple Developer enrollment not required):
 PREREQUISITES:
     - Python 3.13 with pip install -e ".[distribution]"
     - Xcode Command Line Tools (xcode-select --install)
-    - maturin develop  — produces poker_solver/_rust.cpython-313-darwin.so
+    - maturin develop --release --target universal2-apple-darwin
+        produces a universal2 (arm64 + x86_64 lipo'd) _rust.cpython-313-darwin.so.
+        Single-arch builds will be REJECTED by step 1 pre-flight (Phase 1 W1.4
+        ImportError mitigation: x86_64 Python cannot dlopen an arm64-only .so).
+    - rustup target add x86_64-apple-darwin aarch64-apple-darwin  (one-time)
     - brew install create-dmg
 
 ENVIRONMENT:
@@ -112,7 +117,7 @@ if [[ -z "$APP_VERSION" ]]; then
 fi
 APP_NAME="Poker Solver"
 BUNDLE_ID="com.poker_solver.app"
-DMG_NAME="Poker-Solver-${APP_VERSION}-arm64.dmg"
+DMG_NAME="Poker-Solver-${APP_VERSION}-universal2.dmg"
 ENTITLEMENTS="scripts/entitlements.plist"
 RUST_SO="poker_solver/_rust.cpython-313-darwin.so"
 
@@ -145,8 +150,21 @@ fi
 
 # _rust.so existence is load-bearing per spec §12.1.
 if [[ ! -f "$RUST_SO" ]]; then
-    err "$RUST_SO not found.  Run 'maturin develop' first to build the Rust extension."
+    err "$RUST_SO not found.  Run 'maturin develop --release --target universal2-apple-darwin' first to build the Rust extension."
 fi
+
+# _rust.so architecture check (Phase 1 persona test W1.4 mitigation).
+# A single-arch .so will ImportError on the other arch (e.g., x86_64 Python
+# under pyenv attempting to dlopen an arm64-only build).  Reject anything
+# that isn't a universal binary with both arm64 and x86_64 slices.
+RUST_SO_FILE_OUT="$(file "$RUST_SO")"
+if ! echo "$RUST_SO_FILE_OUT" | grep -q "universal binary"; then
+    err "$RUST_SO is single-arch:\n  $RUST_SO_FILE_OUT\nRebuild with: maturin develop --release --target universal2-apple-darwin"
+fi
+if ! echo "$RUST_SO_FILE_OUT" | grep -q "arm64" || ! echo "$RUST_SO_FILE_OUT" | grep -q "x86_64"; then
+    err "$RUST_SO universal binary is missing one of {arm64, x86_64}:\n  $RUST_SO_FILE_OUT\nRebuild with: maturin develop --release --target universal2-apple-darwin"
+fi
+echo "[preflight] _rust.so: universal2 (arm64 + x86_64) — OK"
 
 # ui/app.py entry exists (PR 10 prerequisite per spec decision 13.13).
 if [[ ! -f "ui/app.py" ]]; then
