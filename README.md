@@ -16,10 +16,6 @@ validation vs `noambrown/poker_solver`, macOS `.dmg` packaging.
 ## Status
 
 - **Current version:** 1.0.0 (GA) — see [`CHANGELOG.md`](CHANGELOG.md).
-  Historical release notes:
-  [`docs/release_notes_v0.3.md`](docs/release_notes_v0.3.md),
-  [`docs/release_notes_v0.3.1.md`](docs/release_notes_v0.3.1.md).
-- **Roadmap:** see [`PLAN.md`](PLAN.md).
 - **License:** MIT.
 - **Platform:** macOS / Linux; M-series MacBook is the primary target.
 - **Python:** 3.9+ (developed on 3.13). Rust toolchain required for the
@@ -62,8 +58,7 @@ validation vs `noambrown/poker_solver`, macOS `.dmg` packaging.
   Exploitability after convergence is essentially 0 BB/100 (spec target
   was < 0.05). `solve()` auto-dispatches to chart lookup when the
   effective stack lands in this range. See `poker_solver/pushfold.py`,
-  `poker_solver/charts/pushfold_v1.json`,
-  `docs/pushfold_v1_generation_notes.md`, and `tests/test_pushfold.py`.
+  `poker_solver/charts/pushfold_v1.json`, and `tests/test_pushfold.py`.
 - **Card abstraction (EMD bucketing)** — imperfect-recall EMD-based
   clustering at 256/128/64 buckets (flop/turn/river) with
   suit-isomorphism canonicalization. Slumbot-MIT inspired kmeans++ +
@@ -80,9 +75,8 @@ validation vs `noambrown/poker_solver`, macOS `.dmg` packaging.
   on shared seeds. See `tests/test_noambrown_diff.py`.
 - **NiceGUI app (mock-first scaffold)** — browser UI with 13x13 range
   matrix, board picker, solver controls, and decision-tree browser.
-  Ships against a fixture-backed mock solver behind a banner; PR 10b
-  swaps in the real solver via a single DI point. See
-  [`docs/pr10_prep/`](docs/pr10_prep/).
+  Ships against a fixture-backed mock solver behind a banner; a future
+  PR swaps in the real solver via a single DI point.
 - **Library mode** — clean Python API surface (`equity`, `solve`,
   `get_pushfold_strategy`, `HUNLPoker`, `HUNLConfig`, ...) so the engine
   is usable as a dependency, not just a CLI.
@@ -192,10 +186,8 @@ poker-solver ui
 Launches NiceGUI on `http://127.0.0.1:8080` with a 13x13 range matrix
 (Pio palette), board picker, solver controls with live exploitability,
 and a decision-tree browser. v1 ships behind a "Mock mode" banner
-(fixture-backed) which downgrades to a subtle `(mock)` chip when PR 10b
-swaps in the real solver. See
-[`docs/pr10_prep/pr10a_spec.md`](docs/pr10_prep/pr10a_spec.md) and
-[`docs/pr10_prep/pr10b_spec.md`](docs/pr10_prep/pr10b_spec.md).
+(fixture-backed) which will downgrade to a subtle `(mock)` chip when a
+future PR swaps in the real solver.
 
 ## Architecture (brief)
 
@@ -206,9 +198,9 @@ Every algorithm lands in Python first, ports to Rust, and is gated by
 diff tests in `tests/test_dcfr_diff.py` / `tests/test_leduc_diff.py`
 before the Rust side is trusted. The algorithm is tabular DCFR
 (Brown & Sandholm 2019) with paper-default hyperparameters
-(alpha=1.5, beta=0, gamma=2.0). For the full architectural breakdown
-including the planned bucketed card abstraction and HUNL solver layout,
-see [`PLAN.md`](PLAN.md) section 3.
+(alpha=1.5, beta=0, gamma=2.0). See [`DEVELOPER.md`](DEVELOPER.md) for
+the full architectural breakdown including the bucketed card
+abstraction and HUNL solver layout.
 
 ## Development
 
@@ -230,27 +222,26 @@ sh scripts/check_pr.sh
 From PR 3 onward every change ships on its own feature branch
 (`pr-N-<title>`), passes `scripts/check_pr.sh`, and receives a fresh-agent
 audit reviewing the diff with no implementation context. Both
-`pr_report.md` and `audit_report.md` must be clean before merge. See
-[`PLAN.md`](PLAN.md) section 4 for the full validation chain.
+`pr_report.md` and `audit_report.md` must be clean before merge.
 
 ## Contributing
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the dev-environment, test,
 and PR-flow contract. The TL;DR: this is a personal solo build right
 now; the surface area is small and the design choices are deliberately
-load-bearing. Before opening a PR, please read [`PLAN.md`](PLAN.md) for
-the locked decisions (algorithm, abstraction, stack range, license
-posture) and the PR roadmap, and skim the per-PR audit pattern.
-Reference-first rule: every technical claim in this repo cites a paper,
-a competitor repo, or a test — please match the norm.
+load-bearing. Before opening a PR, please review the locked design
+decisions (algorithm, abstraction, stack range, license posture) and
+skim the per-PR audit pattern in `CONTRIBUTING.md`. Reference-first
+rule: every technical claim in this repo cites a paper, a competitor
+repo, or a test — please match the norm.
 
 ## References
 
-The CFR / DCFR / HUNL literature and competitor codebases are kept local
-under `references/` (gitignored at `references/code/`) — papers are not
-redistributed, AGPL repos are read-only inspiration only, and MIT /
-Apache 2.0 repos are eligible for porting with attribution. To clone the
-public references for your own study:
+The CFR / DCFR / HUNL literature and competitor codebases are kept
+local under `references/` (the entire `references/` tree is gitignored)
+— papers are not redistributed, AGPL repos are read-only inspiration
+only, and MIT / Apache 2.0 repos are eligible for porting with
+attribution. To clone the public references for your own study:
 
 ```bash
 sh scripts/setup_references.sh

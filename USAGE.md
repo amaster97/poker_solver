@@ -26,7 +26,7 @@ cloud-hosted library service like GTO Wizard.
 
 v1.0.0 (2026-05-22) is the first end-user-shippable artifact. CLI and
 Python library are stable; the NiceGUI desktop app ships alongside in
-mock mode (see §4). Roadmap: [`PLAN.md`](PLAN.md).
+mock mode (see §4).
 
 ---
 
@@ -35,8 +35,8 @@ mock mode (see §4). Roadmap: [`PLAN.md`](PLAN.md).
 ### Path A: `.dmg` (recommended for non-developers)
 
 A codesigned and notarized `.dmg` is the v1.0.0 distribution format.
-Distribution channel (web download vs GitHub Release) is TBD; for now,
-build it locally:
+A prebuilt `.dmg` is attached to the v1.0.0 GitHub Release; to build
+your own:
 
 ```bash
 sh scripts/build_macos_dmg.sh
@@ -162,11 +162,9 @@ per-combo inspector strip below the matrix.
 **Mock-mode banner — plain terms.** When you click **Solve**, the
 results panel is populated from a fixture, not from a real solve. All
 the visuals, frequencies, and EV numbers are placeholders for UI
-development. A banner across the top makes this explicit. PR 10a
-(shipped in v1.0.0) deliberately built the UX against this mock surface
-so v1.0.0 could ship now; PR 10b swaps in the real solver, expected
-with v1.1. See [`docs/pr10_prep/pr10a_spec.md`](docs/pr10_prep/pr10a_spec.md)
-and [`docs/pr10_prep/pr10b_spec.md`](docs/pr10_prep/pr10b_spec.md).
+development. A banner across the top makes this explicit. v1.0.0
+deliberately built the UX against this mock surface so v1.0.0 could
+ship now; a future PR swaps in the real solver, expected with v1.1.
 
 Still useful in v1.0.0 for: getting familiar with the workflow,
 planning analysis sessions, giving feedback. For real strategies
@@ -232,7 +230,7 @@ description, so the same configuration always resolves to the same row.
 
 ## 7. What's coming
 
-Tracked in [`PLAN.md`](PLAN.md). The three items most likely to matter:
+The three items most likely to matter:
 
 - **PR 9 — full HUNL preflop solve.** Replaces the `NotImplementedError`
   above 15 BB. ~2 weeks.
@@ -252,6 +250,6 @@ explicitly-approximate mode.
 ## 8. Getting help
 
 - Bug reports / feature requests: GitHub issues.
-- Roadmap context: [`PLAN.md`](PLAN.md).
-- Release notes: [`docs/release_notes_v1.0.0.md`](docs/release_notes_v1.0.0.md).
+- Release notes: see [`CHANGELOG.md`](CHANGELOG.md) and the v1.0.0
+  GitHub Release.
 - License: MIT, see [`LICENSE`](LICENSE).

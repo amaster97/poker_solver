@@ -8,9 +8,11 @@ area is small and design choices are deliberately load-bearing.
 Before opening anything non-trivial, please read:
 
 - [`README.md`](README.md) — what ships today, install, quick start.
-- [`PLAN.md`](PLAN.md) — locked decisions (algorithm, abstraction, stack
-  range, license posture), PR roadmap, validation chain.
 - [`CHANGELOG.md`](CHANGELOG.md) — what landed in each version.
+
+The project has locked decisions on algorithm (DCFR), abstraction
+(bucketed 256/128/64), stack range (2-250 BB), and license posture
+(MIT); revisiting these requires empirical evidence, not preference.
 
 ## Development environment
 
@@ -98,16 +100,15 @@ contaminate.
 - **Rust:** `cargo clippy --all-targets -- -D warnings` clean. Zero
   warnings.
 - **Reference-first rule:** every non-obvious technical claim in code
-  comments, docstrings, or docs should cite a paper (`references/papers/`),
-  a competitor repo, or a test. Do not assert behavior the codebase
-  cannot defend.
+  comments, docstrings, or docs should cite a paper, a competitor repo,
+  or a test. Do not assert behavior the codebase cannot defend.
 - **No floating-point chip math** in `poker_solver/hunl.py`. Integer
   cents only; convert to BB-floats at terminal states.
 
 ## Proposing a substantive change
 
 If your change is non-trivial — new module, new algorithm, change to a
-locked decision in `PLAN.md`, or anything cross-cutting — please open an
+locked design decision, or anything cross-cutting — please open an
 issue first describing what you want to do and why. Locked decisions
 (algorithm = DCFR, abstraction = bucketed 256/128/64, stack range =
 2-250 BB, license = MIT, no GPU, no Deep CFR for v1) can be revisited
