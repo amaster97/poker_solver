@@ -137,7 +137,10 @@ fn test_06_raise_cap_postflop() {
     let any_raise = acts.iter().any(|a| (8..=12).contains(a));
     assert!(!any_raise, "expected no raise actions at cap; got {acts:?}");
     let any_bet = acts.iter().any(|a| (3..=7).contains(a));
-    assert!(!any_bet, "bets shouldn't appear when facing a raise; got {acts:?}");
+    assert!(
+        !any_bet,
+        "bets shouldn't appear when facing a raise; got {acts:?}"
+    );
     assert!(acts.contains(&ACTION_FOLD));
     assert!(acts.contains(&ACTION_CALL));
     assert!(acts.contains(&ACTION_ALL_IN));
@@ -210,7 +213,7 @@ fn test_10_infoset_key_with_history() {
     // the call so cur_player still has an action.
     let after_check = s.apply(ACTION_CHECK); // P1 checks, P0 to act
     let after_bet = after_check.apply(ACTION_BET_100); // P0 bets 100% pot
-    // After bet, P1 to act. P1's infoset key should reflect history "x" + "b{amount}".
+                                                       // After bet, P1 to act. P1's infoset key should reflect history "x" + "b{amount}".
     let key = after_bet.infoset_key(1, None);
     // History format: "/".join("".join(tokens) for tokens in all_streets).
     // No completed streets yet → just current "x" + "b{amount}".
@@ -297,8 +300,8 @@ fn test_13_compute_raise_to_min_increment() {
     // contribution. Verify raise_to math.
     let s = flop_state(100_000, 200);
     let after_bet = s.apply(ACTION_BET_100); // pot was 200, bet 200 → contributions become [100, 300]
-    // Now pot = 100 + 300 = 400 (sum contribs) - 200 (initial contributions = sum 200) + 200 (initial_pot)
-    // = 400 - 200 + 200 = 400. to_call = 200 (P0 needs to match P1's 300 - own 100).
+                                             // Now pot = 100 + 300 = 400 (sum contribs) - 200 (initial contributions = sum 200) + 200 (initial_pot)
+                                             // = 400 - 200 + 200 = 400. to_call = 200 (P0 needs to match P1's 300 - own 100).
     let ctx = after_bet.action_context();
     assert_eq!(ctx.pot, 400);
     assert_eq!(ctx.to_call, 200);
@@ -333,7 +336,10 @@ fn test_15_tree_terminals() {
     let mut showdown_seen = false;
     for node in &tree.nodes {
         match node.terminal_kind {
-            TerminalKind::Fold { winner, contribution_loss } => {
+            TerminalKind::Fold {
+                winner,
+                contribution_loss,
+            } => {
                 fold_seen = true;
                 assert!(winner < 2);
                 assert!(contribution_loss > 0);
@@ -441,8 +447,16 @@ fn test_18_showdown_tie_returns_zero_utility() {
     let terminal = s.apply(ACTION_CHECK).apply(ACTION_CHECK);
     assert!(terminal.is_terminal());
     let u = terminal.utility();
-    assert!(u[0].abs() < 1e-9, "tied utility[0] should be 0, got {}", u[0]);
-    assert!(u[1].abs() < 1e-9, "tied utility[1] should be 0, got {}", u[1]);
+    assert!(
+        u[0].abs() < 1e-9,
+        "tied utility[0] should be 0, got {}",
+        u[0]
+    );
+    assert!(
+        u[1].abs() < 1e-9,
+        "tied utility[1] should be 0, got {}",
+        u[1]
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -473,8 +487,8 @@ fn test_20_all_in_runout_single_card_chance() {
     // Both shove pre-betting → triggers all-in run-out.
     let s1 = s.apply(ACTION_ALL_IN); // P1 shoves
     let s2 = s1.apply(ACTION_CALL); // P0 calls
-    // After call closes the flop, the runout begins: street advances and
-    // chance node deals one card at a time.
+                                    // After call closes the flop, the runout begins: street advances and
+                                    // chance node deals one card at a time.
     assert!(s2.all_in[0] && s2.all_in[1], "both should be all-in");
     assert_eq!(s2.cur_player, -1, "expected chance node after all-in/call");
     // Walk the runout to terminal.
@@ -488,6 +502,13 @@ fn test_20_all_in_runout_single_card_chance() {
         cur = cur.apply(outcomes[0].0);
         iters += 1;
     }
-    assert!(cur.is_terminal(), "runout should terminate within bounded iterations");
-    assert_eq!(cur.board.len(), 5, "runout should fill the board to 5 cards");
+    assert!(
+        cur.is_terminal(),
+        "runout should terminate within bounded iterations"
+    );
+    assert_eq!(
+        cur.board.len(),
+        5,
+        "runout should fill the board to 5 cards"
+    );
 }

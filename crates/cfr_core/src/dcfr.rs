@@ -34,6 +34,7 @@
 use std::collections::HashMap;
 
 use crate::game::Game;
+use crate::simd;
 
 /// Per-infoset cumulative regret and strategy-sum vectors.
 #[derive(Clone, Debug)]
@@ -80,23 +81,18 @@ impl<G: Game> DCFRSolver<G> {
     }
 
     /// Regret-matching strategy: positive regrets normalized, uniform if zero.
+    ///
+    /// PR 8: routes through `simd::positive_regrets_and_total` +
+    /// `simd::normalize` so the per-iteration hot path benefits from the
+    /// NEON-vectorized clamp + sum + divide on aarch64. Behavior is
+    /// bit-identical to the scalar fallback on the per-lane outputs;
+    /// horizontal-sum reduction order can differ by ULP≤1 (pairwise vs
+    /// sequential).
     pub fn get_strategy(info: &InfosetData) -> Vec<f64> {
         let mut positive = vec![0.0_f64; info.num_actions];
-        let mut total = 0.0;
-        for (i, &r) in info.regret_sum.iter().enumerate() {
-            if r > 0.0 {
-                positive[i] = r;
-                total += r;
-            }
-        }
-        if total > 0.0 {
-            for p in &mut positive {
-                *p /= total;
-            }
-            positive
-        } else {
-            vec![1.0 / info.num_actions as f64; info.num_actions]
-        }
+        let total = simd::positive_regrets_and_total(&info.regret_sum, &mut positive);
+        simd::normalize(&mut positive, total);
+        positive
     }
 
     /// Lazy DCFR discount catch-up. Iterates from `last_discount_iter + 1`
@@ -119,16 +115,12 @@ impl<G: Game> DCFRSolver<G> {
             let pos_scale = ta / (ta + 1.0);
             let neg_scale = tb / (tb + 1.0);
             let strat_scale = (tt_f / (tt_f + 1.0)).powf(gamma);
-            for r in &mut info.regret_sum {
-                if *r > 0.0 {
-                    *r *= pos_scale;
-                } else if *r < 0.0 {
-                    *r *= neg_scale;
-                }
-            }
-            for s in &mut info.strategy_sum {
-                *s *= strat_scale;
-            }
+            // PR 8: NEON-vectorized discount kernels. The sign-conditional
+            // regret discount uses `vbslq_f64` over the `> 0` mask;
+            // strategy-sum is a flat `*= scale`. Behavior is bit-identical
+            // to the scalar fallback (no FMA in these paths).
+            simd::discount_regrets(&mut info.regret_sum, pos_scale, neg_scale);
+            simd::discount_strategy_sum(&mut info.strategy_sum, strat_scale);
         }
         info.last_discount_iter = t;
     }
@@ -192,12 +184,23 @@ impl<G: Game> DCFRSolver<G> {
         let own_reach = reach[player_idx];
 
         // Re-borrow the infoset to update regrets/strategy sum after recursion.
-        let info = self.infosets.get_mut(&key).expect("infoset must exist after insert");
-        for idx in 0..num_actions {
-            let regret = opponent_reach * (action_values[idx][player_idx] - node_value[player_idx]);
-            info.regret_sum[idx] += regret;
-            info.strategy_sum[idx] += own_reach * strategy[idx];
+        let info = self
+            .infosets
+            .get_mut(&key)
+            .expect("infoset must exist after insert");
+        // PR 8: SIMD updates. Spread action_values into a contiguous per-player
+        // slice once so `simd::update_regret_sum` can vectorize across lanes.
+        let mut av_player: arrayvec::ArrayVec<f64, 16> = arrayvec::ArrayVec::new();
+        for av in action_values.iter().take(num_actions) {
+            av_player.push(av[player_idx]);
         }
+        simd::update_regret_sum(
+            &mut info.regret_sum,
+            &av_player,
+            node_value[player_idx],
+            opponent_reach,
+        );
+        simd::update_strategy_sum(&mut info.strategy_sum, &strategy, own_reach);
         node_value
     }
 

@@ -224,8 +224,11 @@ impl LeducState {
                 next.num_calls += 1;
             }
             LEDUC_RAISE => {
-                let raise_amount =
-                    if next.round_num == 1 { LEDUC_FIRST_RAISE } else { LEDUC_SECOND_RAISE };
+                let raise_amount = if next.round_num == 1 {
+                    LEDUC_FIRST_RAISE
+                } else {
+                    LEDUC_SECOND_RAISE
+                };
                 next.stakes += raise_amount;
                 next.ante[player] = next.stakes;
                 next.num_raises += 1;

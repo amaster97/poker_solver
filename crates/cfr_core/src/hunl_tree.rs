@@ -33,13 +33,18 @@ pub enum TerminalKind {
     /// A fold ended the hand. `winner` is the player who collects the pot;
     /// `contribution_loss` is the loser's contribution (chip cost, used to
     /// reconstruct the utility without re-walking the state).
-    Fold { winner: u8, contribution_loss: i32 },
+    Fold {
+        winner: u8,
+        contribution_loss: i32,
+    },
     /// Showdown leaf — the actual winner depends on the dealt cards, so the
     /// solver evaluates `Strength` at solve time. `board_complete` indicates
     /// whether the board has all 5 cards (vs an all-in run-out leaf that
     /// preceded full board reveal, which shouldn't happen in PR 6 because
     /// run-outs deal one card at a time).
-    Showdown { board_complete: bool },
+    Showdown {
+        board_complete: bool,
+    },
 }
 
 /// One node in the flat tree. The `children` array indexes into
@@ -156,7 +161,11 @@ impl MemoKey {
             stacks: state.stacks,
             street: state.street,
             street_history: state.street_history.clone(),
-            completed_streets: state.betting_tokens.iter().map(|s| s.concat().into_bytes()).collect(),
+            completed_streets: state
+                .betting_tokens
+                .iter()
+                .map(|s| s.concat().into_bytes())
+                .collect(),
             current_street_tokens: state.current_street_tokens.clone(),
             folded: state.folded,
             all_in: state.all_in,

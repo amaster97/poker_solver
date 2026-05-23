@@ -51,9 +51,8 @@ impl<'de> serde::Deserialize<'de> for Street {
         D: serde::Deserializer<'de>,
     {
         let value: u8 = serde::Deserialize::deserialize(deserializer)?;
-        Street::from_u8(value).ok_or_else(|| {
-            serde::de::Error::custom(format!("invalid Street integer: {value}"))
-        })
+        Street::from_u8(value)
+            .ok_or_else(|| serde::de::Error::custom(format!("invalid Street integer: {value}")))
     }
 }
 
@@ -223,9 +222,15 @@ pub struct HUNLConfig {
     /// disk-side seam (path + version).
     pub abstraction_path: Option<String>,
     pub abstraction_version: Option<String>,
-    /// PCS opt-in flag for PR 8. Default `false`. PR 6 ignores this field;
-    /// PR 8 introduces the actual code path. Pre-included per consistency
-    /// review I6 to avoid forced schema migration.
+    /// PCS opt-in flag for PR 8 (v1.0.1: **Rust-internal only**).
+    ///
+    /// Default `false`. PR 6 ignores this field; PR 8 introduces the actual
+    /// code path inside the Rust solver and microbench. The Python
+    /// `HUNLConfig` dataclass (`poker_solver/hunl.py`) does NOT expose this
+    /// field — the Python serializer at `_serialize_hunl_config` hardcodes
+    /// `"use_pcs": False`, so Python callers cannot toggle PCS on. Exposing
+    /// `use_pcs` to the Python tier is deferred to a follow-up PR; this
+    /// avoids landing a half-wired Python surface for v1.0.1.
     pub use_pcs: bool,
 }
 
@@ -873,7 +878,10 @@ fn min_raise_increment(ctx: &ActionContext) -> i32 {
 /// half-integer corner cases. We assume `value >= 0.0` here (true for all
 /// pot-fraction products in HUNL).
 fn python_round_positive(value: f64) -> i32 {
-    debug_assert!(value >= 0.0, "python_round_positive expects non-negative input");
+    debug_assert!(
+        value >= 0.0,
+        "python_round_positive expects non-negative input"
+    );
     (value + 0.5).floor() as i32
 }
 
@@ -1154,9 +1162,12 @@ mod tests {
         let s2 = s1.apply(ACTION_RAISE_100); // raises=2
         assert!(s2.legal_actions().iter().any(|&a| is_raise(a)));
         let s3 = s2.apply(ACTION_RAISE_100); // raises=3 → at cap
-        // At cap → no raises legal (only fold/call/all-in).
+                                             // At cap → no raises legal (only fold/call/all-in).
         let acts = s3.legal_actions();
-        assert!(!acts.iter().any(|&a| is_raise(a)), "raise after cap: {acts:?}");
+        assert!(
+            !acts.iter().any(|&a| is_raise(a)),
+            "raise after cap: {acts:?}"
+        );
         assert!(acts.contains(&ACTION_FOLD));
         assert!(acts.contains(&ACTION_CALL));
     }

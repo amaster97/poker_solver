@@ -189,8 +189,7 @@ pub fn load_abstraction(path: &Path) -> Result<AbstractionTables, AbstractionErr
         )));
     }
     let file = File::open(path)?;
-    let mut npz =
-        NpzReader::new(file).map_err(|e| AbstractionError::Npz(e.to_string()))?;
+    let mut npz = NpzReader::new(file).map_err(|e| AbstractionError::Npz(e.to_string()))?;
 
     let flop_assignments = read_u8_vec(&mut npz, "flop_assignments")?;
     let turn_assignments = read_u8_vec(&mut npz, "turn_assignments")?;
@@ -231,10 +230,7 @@ pub fn load_abstraction(path: &Path) -> Result<AbstractionTables, AbstractionErr
 }
 
 /// Read a 1-D `u8` array out of the `.npz` and convert it to `Vec<u8>`.
-fn read_u8_vec(
-    npz: &mut NpzReader<File>,
-    name: &str,
-) -> Result<Vec<u8>, AbstractionError> {
+fn read_u8_vec(npz: &mut NpzReader<File>, name: &str) -> Result<Vec<u8>, AbstractionError> {
     let arr: ndarray::ArrayBase<OwnedRepr<u8>, Ix1> = npz
         .by_name(name)
         .map_err(|e| AbstractionError::Npz(format!("{name}: {e}")))?;
@@ -247,17 +243,15 @@ fn decode_str_int_dict(
     name: &str,
 ) -> Result<HashMap<String, u32>, AbstractionError> {
     let raw = read_u8_vec(npz, name)?;
-    let value: serde_json::Value = serde_json::from_slice(&raw)
-        .map_err(|e| AbstractionError::Json(format!("{name}: {e}")))?;
-    let obj = value.as_object().ok_or_else(|| {
-        AbstractionError::Malformed(format!("{name} JSON is not an object"))
-    })?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&raw).map_err(|e| AbstractionError::Json(format!("{name}: {e}")))?;
+    let obj = value
+        .as_object()
+        .ok_or_else(|| AbstractionError::Malformed(format!("{name} JSON is not an object")))?;
     let mut out: HashMap<String, u32> = HashMap::with_capacity(obj.len());
     for (k, v) in obj {
         let n = v.as_u64().ok_or_else(|| {
-            AbstractionError::Malformed(format!(
-                "{name}[{k:?}] is not a non-negative integer"
-            ))
+            AbstractionError::Malformed(format!("{name}[{k:?}] is not a non-negative integer"))
         })?;
         if n > u32::MAX as u64 {
             return Err(AbstractionError::Malformed(format!(
@@ -276,11 +270,11 @@ fn decode_nested_dict(
     name: &str,
 ) -> Result<HashMap<String, HashMap<String, u32>>, AbstractionError> {
     let raw = read_u8_vec(npz, name)?;
-    let value: serde_json::Value = serde_json::from_slice(&raw)
-        .map_err(|e| AbstractionError::Json(format!("{name}: {e}")))?;
-    let obj = value.as_object().ok_or_else(|| {
-        AbstractionError::Malformed(format!("{name} JSON is not an object"))
-    })?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&raw).map_err(|e| AbstractionError::Json(format!("{name}: {e}")))?;
+    let obj = value
+        .as_object()
+        .ok_or_else(|| AbstractionError::Malformed(format!("{name} JSON is not an object")))?;
     let mut out: HashMap<String, HashMap<String, u32>> = HashMap::with_capacity(obj.len());
     for (k, v) in obj {
         let inner = v.as_object().ok_or_else(|| {

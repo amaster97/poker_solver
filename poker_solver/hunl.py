@@ -704,8 +704,13 @@ def _serialize_hunl_config(config: HUNLConfig) -> str:
         "rake_cap": int(config.rake_cap),
         "abstraction_path": abstraction_path,
         "abstraction_version": abstraction_version,
-        # PR 8 forward-compat (consistency review I6). Default False until
-        # PR 8 introduces the public-chance-sampling code path.
+        # PR 8 v1.0.1: PCS exists in the Rust tier but is **not exposed**
+        # from Python. The Rust HUNLConfig.use_pcs field is Rust-internal
+        # for now; this serializer hard-codes False so the Python <-> Rust
+        # JSON shape stays consistent. Surfacing `use_pcs` as a real Python
+        # HUNLConfig field is deferred to a follow-up PR (would require
+        # threading through the dataclass + validation + tests). See
+        # docs/pr8_prep/audit_report.md should-fix #2 for the rationale.
         "use_pcs": False,
     }
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))

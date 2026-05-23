@@ -31,7 +31,11 @@ pub struct KuhnState {
 
 impl KuhnState {
     pub fn initial() -> Self {
-        Self { cards: [-1, -1], history: Vec::new(), chance_phase: 0 }
+        Self {
+            cards: [-1, -1],
+            history: Vec::new(),
+            chance_phase: 0,
+        }
     }
 
     /// Render the history as a "p"/"b" string for infoset keys.
@@ -101,8 +105,12 @@ impl KuhnState {
                 dealt[(c - 11) as usize] = true;
             }
         }
-        let remaining: Vec<i8> =
-            KUHN_DECK.iter().copied().enumerate().filter_map(|(i, c)| (!dealt[i]).then_some(c)).collect();
+        let remaining: Vec<i8> = KUHN_DECK
+            .iter()
+            .copied()
+            .enumerate()
+            .filter_map(|(i, c)| (!dealt[i]).then_some(c))
+            .collect();
         let p = 1.0 / remaining.len() as f64;
         remaining.into_iter().map(|c| (c as u8, p)).collect()
     }
