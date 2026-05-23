@@ -117,7 +117,10 @@ if [[ -z "$APP_VERSION" ]]; then
 fi
 APP_NAME="Poker Solver"
 BUNDLE_ID="com.poker_solver.app"
-DMG_NAME="Poker-Solver-${APP_VERSION}-universal2.dmg"
+# PR 44 fix: DMG filename matches the actual binary arch.  The .app's
+# PyInstaller-bundled Python is arm64-only (scripts/poker_solver.spec line
+# 104: target_arch="arm64"), so labeling the DMG `universal2` was incorrect.
+DMG_NAME="Poker-Solver-${APP_VERSION}-arm64.dmg"
 ENTITLEMENTS="scripts/entitlements.plist"
 RUST_SO="poker_solver/_rust.cpython-313-darwin.so"
 
@@ -141,6 +144,15 @@ command -v pyinstaller >/dev/null || err \
     "pyinstaller not found.  Install with: pip install -e '.[distribution]'"
 command -v xcrun >/dev/null || err \
     "xcrun not found.  Install Xcode Command Line Tools: xcode-select --install"
+
+# PR 44 fix: ensure `nicegui` is importable in the build venv BEFORE we
+# burn 1-3 min on PyInstaller.  The v1.4.0 DMG smoke verification caught
+# a 14 MB DMG that was built without nicegui in the venv (silent fail —
+# PyInstaller's `hiddenimports` is "include IF FOUND", not "install if
+# missing").  This pre-flight is defense in depth on top of pyproject's
+# [distribution] extra now including nicegui.
+python -c "import nicegui" 2>/dev/null || err \
+    "nicegui not importable in build Python.  Run: pip install -e '.[distribution]'  (which now includes nicegui)."
 
 # Python version check (warn but don't fail; user may have 3.13 under a different name)
 PY_VER="$(python -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')"

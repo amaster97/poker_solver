@@ -23,7 +23,11 @@ dev = ["black>=24.0", "maturin>=1.7", "pytest>=7.0", "pytest-timeout>=2.3", "ruf
 ui = ["nicegui>=3.0,<4.0"]
 # PyInstaller is OPT-IN: only installed when packaging the macOS .app.
 # Default `pip install -e .` does NOT pull it in.  See assets/README.md.
-distribution = ["pyinstaller>=6.0"]
+# PR 44 fix: `distribution` inlines `nicegui` so the build venv has the UI
+# runtime deps that PyInstaller's analyzer needs to bundle.  Without this,
+# `pip install -e ".[distribution]"` produced a venv missing nicegui and the
+# resulting .dmg shipped without it (v1.4.0 smoke verification §3).
+distribution = ["pyinstaller>=6.0", "nicegui>=3.0,<4.0"]
 
 [project.scripts]
 poker-solver = "poker_solver.cli:main"
