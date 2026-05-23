@@ -741,6 +741,34 @@ def _show_error(state: AppState, handles: dict[str, Any]) -> None:
             timeout=8000,
             multi_line=True,
         )
+    elif isinstance(err, ValueError) and "locked_strategies" in str(err):
+        # PR 24b §3.5: push/fold + node-locking guard (solver.py:74-86).
+        # Surface the engine ValueError with a "Use tree-builder mode"
+        # remediation button that flips force_tree_solve=True and
+        # retries on the next solve click.
+        ui.notify(
+            f"Node-locking is incompatible with the push/fold chart "
+            f"short-circuit (≤15 BB HUNL preflop): {err}",
+            type="negative",
+            position="top",
+            timeout=10000,
+            multi_line=True,
+        )
+
+        def _retry_with_force_tree(_e: Any = None) -> None:
+            state.runner._pending_force_tree_solve = True
+            ui.notify(
+                "force_tree_solve=True set; click Solve again to retry.",
+                type="info",
+                position="top",
+                timeout=5000,
+            )
+
+        ui.button(
+            "Use tree-builder mode",
+            icon="account_tree",
+            on_click=_retry_with_force_tree,
+        ).props("flat dense").mark("force-tree-solve-button")
     else:
         ui.notify(
             f"Solve failed ({name}): {err}",

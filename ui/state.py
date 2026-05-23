@@ -375,6 +375,39 @@ class Spot:
     # ``RangeVsRangeResult.position`` field between ``"aggressor"`` and
     # ``"defender"``.
     hero_player: int = 0
+    # PR 24b §3.5: node-locking editor (v1.4.0 ``locked_strategies``
+    # surface). Maps infoset key -> probability vector aligned to the
+    # engine's legal-actions ordering at that node. Threaded into
+    # ``poker_solver.solver.solve(..., locked_strategies=...)`` via
+    # ``SolveRunner.start``. Empty dict is bit-identical to the v1.3
+    # no-locks behaviour. Per ``poker_solver/solver.py:74-86`` the solver
+    # raises ``ValueError`` when locks are non-empty AND the spot is a
+    # ≤15 BB HUNL preflop config; the UI catches this and surfaces a
+    # remediation button that retries with ``force_tree_solve=True``.
+    locked_strategies: dict[str, list[float]] = field(default_factory=dict)
+    # PR 24b §3.6: asymmetric ``initial_contributions`` (v1.4.1 facing-bet
+    # subgame surface; PR 22 / ``docs/pr_proposals/v1_4_asymmetric_contributions.md``
+    # Fix A landed the engine support). When ``villain_bet_bb > 0`` the
+    # engine sees an asymmetric pot where one side has already put in
+    # more chips than the other — the facing-bet player (lower
+    # contribution side) acts first per the engine convention. Per the
+    # engine post-fix the facing-bet side's ``to_call`` is computed
+    # automatically from ``max(contributions) - min(contributions)``;
+    # the UI just plumbs the seat assignment.
+    #
+    # ``pot_so_far_bb``: dead-money pot already in the middle BEFORE the
+    # villain's bet (BB units). For a half-pot c-bet on the flop with a
+    # 2 BB preflop pot: pot_so_far_bb=2.0, villain_bet_bb=1.0.
+    # ``villain_bet_bb``: the bet size the bettor has put in (BB). When
+    # zero (default), the engine sees a symmetric subgame and falls
+    # back to the existing (bb, bb) contributions plumbing — preserving
+    # every existing smoke.
+    # ``bettor_is_p0``: True if P0 (SB / BTN) is the bettor (so P1
+    # faces the bet); False if P1 faces. Default True matches the
+    # common "BTN bets, BB defends" workflow.
+    pot_so_far_bb: float = 0.0
+    villain_bet_bb: float = 0.0
+    bettor_is_p0: bool = True
 
     @property
     def starting_street(self) -> Street:
@@ -442,6 +475,28 @@ class Spot:
         if starting_street == Street.PREFLOP:
             initial_pot = 0
             initial_contributions: tuple[int, int] = (0, 0)
+        elif self.villain_bet_bb > 0:
+            # PR 24b §3.6: asymmetric facing-bet subgame (v1.4.1 surface).
+            # ``pot_so_far_bb`` = dead-money pot already in the middle
+            # BEFORE the bet; ``villain_bet_bb`` = the bet the bettor put
+            # in. The bettor's contribution = pot_half + bet; the
+            # facing-bet player's contribution = pot_half. The engine
+            # honors the asymmetric initial_contributions per
+            # ``docs/pr_proposals/v1_4_asymmetric_contributions.md`` Fix A
+            # — ``to_call = max - min`` is derived; ``cur_player`` =
+            # facing-bet side (lower contribution).
+            pot_so_far_cents = int(self.pot_so_far_bb * bb_blind_cents)
+            villain_bet_cents = int(self.villain_bet_bb * bb_blind_cents)
+            pot_half_cents = pot_so_far_cents // 2
+            # The "bettor" puts in pot_half + bet; the "facer" puts in
+            # pot_half. Order maps onto seats via ``bettor_is_p0``.
+            bettor_contrib = pot_half_cents + villain_bet_cents
+            facer_contrib = pot_half_cents
+            if self.bettor_is_p0:
+                initial_contributions = (bettor_contrib, facer_contrib)
+            else:
+                initial_contributions = (facer_contrib, bettor_contrib)
+            initial_pot = bettor_contrib + facer_contrib
         else:
             # Subgame: pot is whatever's been put in over the previous
             # streets. PR 10b derives an effective pot from the
@@ -626,6 +681,13 @@ class SolveRunner:
         # widening that dataclass for one PR.
         self._pending_target_expl: float | None = None
         self._pending_tier_label: str = "Standard"
+        # PR 24b §3.5: node-locking plumbing. ``ui/app.py:_on_solve``
+        # reads these when calling ``start(...)``. ``_pending_force_tree_solve``
+        # is set to True when the user clicks the remediation button on
+        # the push/fold ValueError notify; the next solve retries with
+        # the override.
+        self._pending_locked_strategies: dict[str, list[float]] | None = None
+        self._pending_force_tree_solve: bool = False
         # ETA-extrapolation fields (smoke 20 / pr10a_spec.md §6 edge #1).
         # Defaults are `None` so `compute_eta()` returns `None` when the
         # runner is idle; the worker sets them once it starts.
@@ -659,6 +721,14 @@ class SolveRunner:
         rvr_hero_range: list[HandClass] | None = None,
         rvr_villain_range: list[HandClass] | None = None,
         rvr_hero_player: int = 0,
+        # PR 24b §3.5: node-locking. ``locked_strategies`` maps infoset
+        # key -> probability vector aligned to the engine's legal-action
+        # ordering at that node. Empty/None falls through to existing
+        # behaviour. ``force_tree_solve`` escapes the push/fold
+        # short-circuit when locks are set on a ≤15 BB preflop config
+        # (see ``poker_solver/solver.py:74-86``).
+        locked_strategies: dict[str, list[float]] | None = None,
+        force_tree_solve: bool = False,
     ) -> None:
         """Spawn the worker thread.
 
@@ -705,6 +775,8 @@ class SolveRunner:
                 "rvr_hero_range": rvr_hero_range,
                 "rvr_villain_range": rvr_villain_range,
                 "rvr_hero_player": rvr_hero_player,
+                "locked_strategies": locked_strategies,
+                "force_tree_solve": force_tree_solve,
             },
             daemon=True,
             name="poker-solver-ui-worker",
@@ -817,6 +889,8 @@ class SolveRunner:
         rvr_hero_range: list[HandClass] | None = None,
         rvr_villain_range: list[HandClass] | None = None,
         rvr_hero_player: int = 0,
+        locked_strategies: dict[str, list[float]] | None = None,
+        force_tree_solve: bool = False,
     ) -> None:
         """The worker-thread body. Runs on a daemon ``threading.Thread``.
 
@@ -943,6 +1017,8 @@ class SolveRunner:
                 iterations=iterations,
                 on_progress=_on_progress,
                 should_stop=_should_stop,
+                locked_strategies=locked_strategies,
+                force_tree_solve=force_tree_solve,
                 **kwargs,
             )
         except MemoryError as exc:
@@ -1013,6 +1089,8 @@ class SolveRunner:
         target_exploitability: float | None,
         memory_budget_gb: float,
         seed: int | None,
+        locked_strategies: dict[str, list[float]] | None = None,
+        force_tree_solve: bool = False,
     ) -> SolveResult:
         """Real-solver dispatch composition (PR 10b §6).
 
@@ -1024,17 +1102,42 @@ class SolveRunner:
           3. HUNL preflop (PR 9) — uses `solver.solve` which currently
              raises NotImplementedError on the Rust path; Python tier lands
              with PR 9 merge.
+
+        PR 24b §3.5: ``locked_strategies`` is threaded into both the postflop
+        and preflop branches. The push/fold short-circuit raises
+        ``ValueError`` per ``poker_solver/solver.py:74-86`` if locks are
+        non-empty (and ``force_tree_solve`` is False). When the UI surfaces
+        the remediation button, it sets ``force_tree_solve=True`` so the
+        push/fold branch is skipped and the tree-builder runs instead.
         """
         from poker_solver.pushfold import is_pushfold_mode, solve_pushfold
         from poker_solver.solver import solve as canonical_solve
 
         cfg = game.config
+        # Normalize locks: empty dict and None are bit-identical to "no
+        # locks" per solver.py:60-61. Drop empties so downstream guards
+        # don't treat {} as "locked."
+        if not locked_strategies:
+            locked_strategies = None
 
         # 1. Push/fold short-circuit (≤15 BB preflop) — instantaneous chart
         # lookup; no progress callback or cancellation needed.
-        if cfg.starting_street == Street.PREFLOP and is_pushfold_mode(
-            cfg.starting_stack, cfg.big_blind
+        # PR 24b: refuse locks here per solver.py:74-86 unless
+        # ``force_tree_solve`` is set; the UI's notify-remediation
+        # button flips that flag before the retry.
+        if (
+            cfg.starting_street == Street.PREFLOP
+            and is_pushfold_mode(cfg.starting_stack, cfg.big_blind)
+            and not force_tree_solve
         ):
+            if locked_strategies:
+                raise ValueError(
+                    "locked_strategies is incompatible with the push/fold "
+                    "chart short-circuit (≤15 BB HUNL preflop). The chart "
+                    "is precomputed and non-trainable; locks would be "
+                    "silently ignored. Use the 'Use tree-builder mode' "
+                    "remediation button to retry with force_tree_solve=True."
+                )
             return solve_pushfold(cfg)
 
         # 2. HUNL postflop — direct call so on_progress + should_stop reach
@@ -1059,6 +1162,7 @@ class SolveRunner:
                 seed=seed,
                 on_progress=on_progress,
                 should_stop=should_stop,
+                locked_strategies=locked_strategies,
             )
 
         # 3. Preflop > 15 BB. PR 9's `solve_hunl_preflop` is the future
@@ -1084,17 +1188,43 @@ class SolveRunner:
                     "cards) or reduce stacks to <=15 BB to dispatch to the "
                     "push/fold chart."
                 ) from exc
-            return solve_hunl_preflop(
-                cfg,
-                abstraction=None,
-                iterations=iterations,
-                target_exploitability=target_exploitability,
-                memory_budget_gb=memory_budget_gb,
-                log_every=log_every,
-                seed=seed,
-                on_progress=on_progress,
-                should_stop=should_stop,
-            )
+            # PR 24b: pass locks through to the preflop solver. Accepting
+            # the kwarg via try/except keeps us forward-compat with PR 9
+            # preflop builds that may not yet expose ``locked_strategies``.
+            try:
+                return solve_hunl_preflop(
+                    cfg,
+                    abstraction=None,
+                    iterations=iterations,
+                    target_exploitability=target_exploitability,
+                    memory_budget_gb=memory_budget_gb,
+                    log_every=log_every,
+                    seed=seed,
+                    on_progress=on_progress,
+                    should_stop=should_stop,
+                    locked_strategies=locked_strategies,
+                )
+            except TypeError:
+                # Older preflop solver builds don't accept ``locked_strategies``.
+                # Fall back to the no-locks call and log; the locks would
+                # have been silently dropped. We do this rather than fail
+                # because preflop is currently NotImplementedError on most
+                # builds anyway.
+                logger.info(
+                    "solve_hunl_preflop doesn't accept locked_strategies; "
+                    "dropping locks for this call."
+                )
+                return solve_hunl_preflop(
+                    cfg,
+                    abstraction=None,
+                    iterations=iterations,
+                    target_exploitability=target_exploitability,
+                    memory_budget_gb=memory_budget_gb,
+                    log_every=log_every,
+                    seed=seed,
+                    on_progress=on_progress,
+                    should_stop=should_stop,
+                )
         # Kuhn / Leduc / other Game protocols don't currently flow through
         # the UI but we keep the fallback for forward-compat with the CLI
         # path. These don't use on_progress/should_stop.
@@ -1103,6 +1233,8 @@ class SolveRunner:
             iterations,
             backend=backend,
             log_every=log_every,
+            locked_strategies=locked_strategies,
+            force_tree_solve=force_tree_solve,
         )
 
     def _run_rvr_path(

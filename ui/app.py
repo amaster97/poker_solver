@@ -278,10 +278,39 @@ def _on_solve(state: AppState) -> None:
     PR 24a §3.7: ``state.runner._pending_target_expl`` (set by the run
     panel's ``_wrap_solve``) is forwarded to ``SolveRunner.start`` so the
     tier-slider value reaches the engine.
+
+    PR 24b §3.5/§3.6: ``state.current_spot.locked_strategies`` is threaded
+    into ``SolveRunner.start``; ``villain_bet_bb`` is validated against
+    the bettor's effective stack before solving; the push/fold ValueError
+    is caught and re-surfaced as a notify with a remediation button that
+    sets ``runner._pending_force_tree_solve=True`` and retries.
     """
     from nicegui import ui
 
     spot = state.current_spot
+    # PR 24b §3.6: validate the facing-bet input before building the
+    # config so the user sees an actionable error instead of an engine
+    # ValueError. The bettor's effective stack is stack_bb minus the
+    # half-pot they already put in over previous streets.
+    if spot.villain_bet_bb > 0:
+        bettor_idx = 0 if spot.bettor_is_p0 else 1
+        bettor_stack_bb = float(spot.stacks_bb[bettor_idx])
+        # The bettor's already-in chips = pot_half (their share of
+        # pot_so_far) + bet. Effective remaining stack post-bet must be
+        # non-negative.
+        pot_half_bb = spot.pot_so_far_bb / 2.0
+        if pot_half_bb + spot.villain_bet_bb > bettor_stack_bb:
+            ui.notify(
+                f"Villain bet ({spot.villain_bet_bb} BB) exceeds the "
+                f"bettor's effective stack ({bettor_stack_bb} BB after "
+                f"contributing {pot_half_bb} BB to the pot).",
+                type="negative",
+                position="top",
+                timeout=6000,
+                multi_line=True,
+            )
+            return
+
     try:
         config = spot.to_hunl_config()
     except ValueError as exc:
@@ -311,6 +340,13 @@ def _on_solve(state: AppState) -> None:
     # PR 24a §3.7: pull the tier-slider target out of the
     # runner-side pending attribute. None means "use the default".
     target_exploitability = getattr(state.runner, "_pending_target_expl", None)
+    # PR 24b §3.5: pull node-locks + force_tree_solve override from the
+    # runner-side pending attributes. The locks live on the spot (so
+    # they round-trip through state.json + library serialization); the
+    # force_tree_solve flag lives on the runner (per-click escape hatch
+    # set by the push/fold remediation notify button).
+    locked_strategies = dict(spot.locked_strategies) if spot.locked_strategies else None
+    force_tree_solve = bool(getattr(state.runner, "_pending_force_tree_solve", False))
 
     # ----- Range-vs-range branch (PR 24a §3.2) -----
     if spot.rvr_mode:
@@ -365,6 +401,8 @@ def _on_solve(state: AppState) -> None:
             log_every=log_every,
             backend=backend,
             target_exploitability=target_exploitability,
+            locked_strategies=locked_strategies,
+            force_tree_solve=force_tree_solve,
         )
     except RuntimeError as exc:
         ui.notify(f"Solve already running: {exc}", type="warning", position="top")
@@ -378,6 +416,10 @@ def _on_solve(state: AppState) -> None:
         started_at=state.runner.started_at,
         runner=state.runner,
     )
+    # PR 24b §3.5: reset the force_tree_solve escape after consuming it
+    # so subsequent solves don't silently bypass the push/fold chart.
+    # The notify-remediation button re-arms it per click.
+    state.runner._pending_force_tree_solve = False
 
 
 def _on_pause(state: AppState) -> None:
