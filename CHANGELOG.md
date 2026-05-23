@@ -13,6 +13,26 @@ In-flight on feature branches; not yet merged to `main`.
 - v1.5/v2 follow-ups (Q3 exploitability slider reframe; range-based
   dealing; Rust callbacks; full-tree preflop).
 
+## [1.7.0] - 2026-05-23
+
+### Added
+
+- `solve_range_vs_range_nash` direct API for joint range Nash equilibrium (PR 43)
+  - Routes through the Rust vector-form CFR; distinct from the aggregator
+    pattern's per-combo blueprint approach
+  - 12 tests including W3.5-style monotone polarization validation
+- CLI subcommands (PR 39):
+  - `poker-solver pushfold` — preflop push/fold chart lookup
+  - `poker-solver river` — river-only solve
+  - `poker-solver parity` — Brown reference parity comparison
+
+### Status
+
+- v1.6.1 engine bundle: HELD pending acceptance gate redefinition
+  (deep-cap Brown apples-to-apples reveals architectural divergence
+  in payoff convention; see docs/v1_6_1_no_go_synthesis*)
+- PR 44 .dmg packaging fix: VERIFIED on disk; ready for Gate 5 attachment
+
 ## [1.6.0] - 2026-05-23
 
 ### Added — GUI Gate 2 (UI completeness)
