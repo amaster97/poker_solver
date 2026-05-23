@@ -303,6 +303,7 @@ def _compare_action_distributions(
 
 
 @pytest.mark.parity_noambrown
+@pytest.mark.slow
 @pytest.mark.timeout(int(BROWN_TIMEOUT_SEC) + 60)
 @pytest.mark.parametrize("spot", _SPOTS, ids=_spot_id)
 def test_river_parity_vs_brown(spot: Any) -> None:
