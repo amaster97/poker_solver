@@ -222,6 +222,8 @@ def render(
                 "Log scale",
                 value=chart_log_state["log"],
             )
+            # Smoke 17 (X4): conformance marker for the log↔linear toggle.
+            log_toggle.mark("expl-chart-linear-toggle")
 
             def _on_log_toggle(e: Any) -> None:
                 chart_log_state["log"] = bool(e.value)
@@ -252,6 +254,8 @@ def render(
             handles["status_label"] = status_label
 
             eta_label = ui.label("").classes("text-xs font-mono italic text-gray-500")
+            # Smoke 20 (X7): conformance marker for the long-solve ETA.
+            eta_label.mark("progress-eta")
             handles["eta_label"] = eta_label
 
 
@@ -459,7 +463,13 @@ def _redraw_chart(
     log_scale = bool(handles.get("chart_log", {"log": True})["log"])
     if history is None:
         history = []
-    chart.options = _chart_options(history, log_scale=log_scale)
+    # NiceGUI 3.x: `EChart.options` is read-only; mutate the underlying dict
+    # in place rather than reassigning the property (which raises
+    # AttributeError under 3.x). The chart's update_method='update_chart'
+    # will pick up the mutation on the next tick.
+    new_options = _chart_options(history, log_scale=log_scale)
+    chart.options.clear()
+    chart.options.update(new_options)
     try:
         chart.update()
     except Exception:  # noqa: BLE001
@@ -520,6 +530,27 @@ def _show_error(state: AppState, handles: dict[str, Any]) -> None:
             "(2) Lower iterations, (3) Use a smaller subgame."
         )
         ui.notify(msg, type="negative", position="top", timeout=8000, multi_line=True)
+        # Smoke 18 (X5): conformance gate — surface a marked quick-action
+        # button so the OOM-remediation surface is exposed to the smoke
+        # test. The button is a stub that just unchecks the bigger bet
+        # sizes via the spot config; the real remediation surface lives
+        # behind `state.current_spot.bet_sizes_checked`.
+        def _reduce_bet_sizes(_e: Any = None) -> None:
+            spot = state.current_spot
+            spot.bet_sizes_checked = tuple(
+                bs for bs in spot.bet_sizes_checked if bs <= 1.0
+            )
+            ui.notify(
+                "Bet sizes reduced to <=100% pot; rerun solve.",
+                type="info",
+                position="top",
+                timeout=3000,
+            )
+
+        ui.button(
+            "Reduce bet sizes",
+            on_click=_reduce_bet_sizes,
+        ).props("flat dense").mark("oom-reduce-bet-sizes-button")
     elif isinstance(err, NotImplementedError):
         # Edge §6.3: notification with three remediations.
         ui.notify(

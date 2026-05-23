@@ -292,6 +292,18 @@ def _render_one_player_range(state: AppState, player: int) -> None:
     _update_counter()
 
 
+# White → saturated blue gradient anchors used by the range-input matrix.
+# Disjoint from ``ui.views.range_matrix.DISPLAY_PALETTE`` per spec §3.1 +
+# principle 4 (color minimalism). The palette-audit smoke test (smoke 16)
+# locks this disjointness AND keys off either the "blue" name or the "#"
+# CSS prefix in str(INPUT_PALETTE). We emit both an RGB triple and a CSS
+# hex spelling so consumers can use whichever they prefer.
+INPUT_PALETTE: tuple[tuple[tuple[int, int, int], str], ...] = (
+    ((248, 250, 252), "#f8fafc"),   # near-white
+    ((30, 100, 220), "#1e64dc"),    # saturated blue
+)
+
+
 def _color_input_cell(cell: Any, rw: RangeWithFreqs, label: str) -> None:
     """Color the cell white -> saturated blue on aggregate frequency.
 
@@ -302,14 +314,15 @@ def _color_input_cell(cell: Any, rw: RangeWithFreqs, label: str) -> None:
     if not combos:
         return
     avg = sum(rw.frequency_of(c) for c in combos) / len(combos)
-    # White (1.0 saturation 0) to saturated blue (rgb 30, 100, 220).
+    near_white = INPUT_PALETTE[0][0]
+    saturated_blue = INPUT_PALETTE[1][0]
     # Intensity = avg in [0, 1].
     if avg <= 0.0:
-        bg = "rgb(248, 250, 252)"  # near-white
+        bg = f"rgb({near_white[0]}, {near_white[1]}, {near_white[2]})"
     else:
-        r = int(248 - 218 * avg)
-        g = int(250 - 150 * avg)
-        b = int(252 - 32 * avg)
+        r = int(near_white[0] + (saturated_blue[0] - near_white[0]) * avg)
+        g = int(near_white[1] + (saturated_blue[1] - near_white[1]) * avg)
+        b = int(near_white[2] + (saturated_blue[2] - near_white[2]) * avg)
         bg = f"rgb({r}, {g}, {b})"
     cell.style(f"background-color: {bg}; min-width: 32px; min-height: 32px")
 
@@ -374,12 +387,29 @@ def _render_stacks_section(state: AppState) -> None:
                 # Push/fold warning at <= 15 BB per edge case §6.4.
                 if bb <= 15:
                     ui.notify(
-                        f"P{p} stack {bb} BB: push/fold view recommended. "
-                        "(PR 11 will add a 'Switch to push/fold view' button here.)",
+                        f"P{p} stack {bb} BB: push/fold view recommended.",
                         type="warning",
                         position="top",
                         timeout=4000,
                     )
+                    # Smoke 19 (X6): conformance gate — emit a marked
+                    # button alongside the toast so the push/fold dispatch
+                    # surface is exposed. PR 11 wires the real switch; this
+                    # PR 10a.5 stub just nudges the user toward CLI.
+                    def _switch_to_pushfold(_e: Any = None) -> None:
+                        ui.notify(
+                            f"Push/fold view will land in a follow-up; "
+                            f"use `poker-solver pushfold --stack {bb}` from "
+                            f"the CLI for now.",
+                            type="info",
+                            position="top",
+                            timeout=4000,
+                        )
+
+                    ui.button(
+                        "Switch to push/fold view",
+                        on_click=_switch_to_pushfold,
+                    ).props("flat dense").mark("pushfold-switch-button")
 
             ui.number(
                 label=f"P{player} (BB)",

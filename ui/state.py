@@ -487,6 +487,12 @@ class SolveRunner:
         self.error: BaseException | None = None
         self.started_at: float = 0.0
         self.partial_report: MemoryReport | None = None
+        # ETA-extrapolation fields (smoke 20 / pr10a_spec.md §6 edge #1).
+        # Defaults are `None` so `compute_eta()` returns `None` when the
+        # runner is idle; the worker sets them once it starts.
+        self.start_time_monotonic: float | None = None
+        self.current_time_monotonic: float | None = None
+        self.target_iterations: int | None = None
 
     def start(
         self,
@@ -593,6 +599,40 @@ class SolveRunner:
         """Block until the worker thread exits (or ``timeout`` seconds elapse)."""
         if self._thread is not None:
             self._thread.join(timeout=timeout)
+
+    def compute_eta(self) -> float | None:
+        """Return the linear-extrapolation ETA in seconds, or None if N/A.
+
+        Uses elapsed wall-clock (``current_time_monotonic`` -
+        ``start_time_monotonic`` if both set, else ``time.time() -
+        started_at``) divided by ``iteration`` to get iters/sec, then
+        (target_iterations - iteration) / rate. Returns None when:
+
+          * ``iteration <= 0``, or
+          * elapsed wall-clock is zero, or
+          * the target is missing / already reached.
+
+        Per `pr10a_spec.md` §6 edge #1: the UI surfaces an ETA after 30s
+        of forward progress so the user can decide whether to stop.
+        """
+        iters = self.iteration
+        if iters <= 0:
+            return None
+        start = getattr(self, "start_time_monotonic", None)
+        now = getattr(self, "current_time_monotonic", None)
+        if start is not None and now is not None:
+            elapsed = float(now) - float(start)
+        else:
+            elapsed = time.time() - self.started_at if self.started_at else 0.0
+        if elapsed <= 0:
+            return None
+        target = getattr(self, "target_iterations", None)
+        if target is None or target <= iters:
+            return None
+        rate = iters / elapsed  # iters per second
+        if rate <= 0:
+            return None
+        return (target - iters) / rate
 
     def _worker(
         self,
@@ -933,7 +973,11 @@ def list_fixture_preset_ids() -> list[str]:
         from ui.mock_solver import list_fixture_presets
 
         presets = list_fixture_presets()
-        return [str(getattr(p, "preset_id", p)) for p in presets]
+        # FixturePreset.id is the canonical attribute name (see
+        # ui/mock_solver_fixtures.py:35); the older `preset_id` lookup is a
+        # legacy fallback that historically left preset markers stamped
+        # with the full repr of the dataclass instead of the id string.
+        return [str(getattr(p, "id", getattr(p, "preset_id", p))) for p in presets]
     except (ImportError, ModuleNotFoundError, AttributeError):
         return [
             "river_tiny_subgame",
