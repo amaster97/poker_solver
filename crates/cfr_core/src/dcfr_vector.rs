@@ -547,6 +547,32 @@ impl EvalContext {
     pub fn from_suit_iso(_initial: &HUNLState) -> Self {
         unimplemented!("suit-iso reduction is v1.5.1 follow-up — see spec §8 Q2 (c)")
     }
+
+    /// Build an `EvalContext` from explicit per-player hand lists. Used by
+    /// the differential test in `tests/test_range_vs_range_rust_diff.py`
+    /// to construct a small enough case (<= 10 hands per player) that
+    /// Python's `dcfr.py` ground truth can complete in reasonable wall-
+    /// clock. Production callers go through `from_root` which enumerates
+    /// the full C(deck, 2) hand vector.
+    ///
+    /// The hand lists must already be filtered for board collisions.
+    /// We do NOT validate further here; the differential test owns that
+    /// invariant.
+    pub fn from_hand_lists(
+        p0_holes: Vec<[u8; 2]>,
+        p1_holes: Vec<[u8; 2]>,
+        big_blind: i32,
+    ) -> Self {
+        let hand_count = [p0_holes.len(), p1_holes.len()];
+        let hole_str_p0: Vec<String> = p0_holes.iter().map(|&h| hole_string(h)).collect();
+        let hole_str_p1: Vec<String> = p1_holes.iter().map(|&h| hole_string(h)).collect();
+        Self {
+            hand_count,
+            hole: [p0_holes, p1_holes],
+            hole_str: [hole_str_p0, hole_str_p1],
+            big_blind,
+        }
+    }
 }
 
 /// Terminal-leaf value vector for `update_player`.
@@ -666,6 +692,28 @@ pub fn solve_range_vs_range_postflop(
     beta: f64,
     gamma: f64,
 ) -> Result<VectorSolveOutput, String> {
+    solve_range_vs_range_postflop_with_hands(config, None, iterations, alpha, beta, gamma)
+}
+
+/// Vector-form DCFR with explicit per-player hand lists.
+///
+/// Same as `solve_range_vs_range_postflop` but lets callers specify the
+/// exact hands the solver should vectorize over. Used by the
+/// differential test in `tests/test_range_vs_range_rust_diff.py` to
+/// build cases small enough that Python's `dcfr.py` ground truth can
+/// finish within the test budget.
+///
+/// `hand_lists`: `Some(([p0_holes], [p1_holes]))` to specify hands
+/// explicitly; `None` to enumerate the full C(deck minus board, 2)
+/// per player (the production path).
+pub fn solve_range_vs_range_postflop_with_hands(
+    config: &HUNLConfig,
+    hand_lists: Option<[Vec<[u8; 2]>; 2]>,
+    iterations: u32,
+    alpha: f64,
+    beta: f64,
+    gamma: f64,
+) -> Result<VectorSolveOutput, String> {
     if config.initial_hole_cards.is_some() {
         return Err(
             "solve_range_vs_range_postflop requires initial_hole_cards = None; \
@@ -682,10 +730,21 @@ pub fn solve_range_vs_range_postflop(
     }
 
     let initial = HUNLState::initial(std::sync::Arc::new(config.clone()));
-    let eval_ctx = EvalContext::from_root(&initial);
-    if eval_ctx.hand_count[0] == 0 {
-        return Err("no valid hole-card pairs at root (board exhausts deck?)".into());
-    }
+    let eval_ctx = match hand_lists {
+        Some([p0, p1]) => {
+            if p0.is_empty() || p1.is_empty() {
+                return Err("hand_lists must be non-empty for both players".into());
+            }
+            EvalContext::from_hand_lists(p0, p1, config.big_blind)
+        }
+        None => {
+            let ctx = EvalContext::from_root(&initial);
+            if ctx.hand_count[0] == 0 {
+                return Err("no valid hole-card pairs at root (board exhausts deck?)".into());
+            }
+            ctx
+        }
+    };
 
     // Build the betting tree from a placeholder hole-card state. The
     // placeholder hole-pair is any valid pair (we pick the first one);

@@ -421,7 +421,10 @@ fn compute_exploitability(
     alpha,
     beta,
     gamma,
+    p0_holes=None,
+    p1_holes=None,
 ))]
+#[allow(clippy::too_many_arguments)]
 fn solve_range_vs_range_rust(
     py: Python<'_>,
     config_json: &str,
@@ -429,15 +432,32 @@ fn solve_range_vs_range_rust(
     alpha: f64,
     beta: f64,
     gamma: f64,
+    p0_holes: Option<Vec<[u8; 2]>>,
+    p1_holes: Option<Vec<[u8; 2]>>,
 ) -> PyResult<PyObject> {
     let config: hunl::HUNLConfig = serde_json::from_str(config_json)
         .map_err(|e| PyValueError::new_err(format!("invalid HUNLConfig JSON: {e}")))?;
+
+    // Differential-test hook: when both per-player hand lists are supplied,
+    // pass them to the explicit-hand-list constructor. Production callers
+    // omit both; the solver enumerates the full deck.
+    let hand_lists: Option<[Vec<[u8; 2]>; 2]> = match (p0_holes, p1_holes) {
+        (Some(p0), Some(p1)) => Some([p0, p1]),
+        (None, None) => None,
+        _ => {
+            return Err(PyValueError::new_err(
+                "p0_holes and p1_holes must both be supplied or both omitted",
+            ));
+        }
+    };
 
     let started = std::time::Instant::now();
     // Release the GIL for the pure-Rust solve. CPU-bound, no Python callbacks.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         py.allow_threads(|| {
-            dcfr_vector::solve_range_vs_range_postflop(&config, iterations, alpha, beta, gamma)
+            dcfr_vector::solve_range_vs_range_postflop_with_hands(
+                &config, hand_lists, iterations, alpha, beta, gamma,
+            )
         })
     }));
     let result = result.map_err(|payload| PyValueError::new_err(panic_message(&payload)))?;
