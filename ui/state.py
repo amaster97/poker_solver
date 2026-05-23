@@ -69,6 +69,7 @@ from typing import TYPE_CHECKING, Any
 from poker_solver.card import RANKS, Card
 from poker_solver.hunl import HUNLConfig, HUNLPoker, Street
 from poker_solver.range import Combo, Range, parse_range
+from poker_solver.range_aggregator import HandClass, RangeVsRangeResult
 from poker_solver.solver import SolveResult
 
 if TYPE_CHECKING:
@@ -355,6 +356,25 @@ class Spot:
     # Which bet sizes are checked (Q4 LOCKED: 33 / 75 / 100 / all-in default).
     # Stored explicitly because user may toggle 150% / 200% on.
     bet_sizes_checked: tuple[float, ...] = (0.33, 0.75, 1.0)
+    # PR 24a: range-vs-range solve mode (v1.3.0 Plan C Stage C1 surface).
+    # When True, ``SolveRunner.start`` routes through
+    # ``poker_solver.range_aggregator.solve_range_vs_range`` instead of
+    # the concrete-vs-concrete ``solve`` path. The point-pair fallback
+    # warning at ``_pick_point_pair_hole_cards`` is suppressed in RvR
+    # mode because hole-card selection is handled per-class by the
+    # aggregator itself.
+    rvr_mode: bool = False
+    # PR 24a: hero seat selector (v1.3.1 ``hero_player`` surface).
+    # 0 = hero at P0 (SB seat / button — aggressor postflop sequencing);
+    # 1 = hero at P1 (BB seat — defender). Mirrors the
+    # ``range_aggregator.solve_range_vs_range`` ``hero_player`` parameter
+    # default. For concrete-vs-concrete solves this swaps the rendered
+    # row tab so hero's strategy lands on the front display tab; it does
+    # not change the engine semantics for ``solve()`` (which is symmetric
+    # in seat). For RvR solves it flips the
+    # ``RangeVsRangeResult.position`` field between ``"aggressor"`` and
+    # ``"defender"``.
+    hero_player: int = 0
 
     @property
     def starting_street(self) -> Street:
@@ -452,6 +472,52 @@ class Spot:
             abstraction=None,
         )
 
+    def to_rvr_call_args(self) -> tuple[HUNLConfig, list[HandClass], list[HandClass]]:
+        """Build the (config, hero_range, villain_range) tuple for RvR solves.
+
+        Returns a ``HUNLConfig`` built like ``to_hunl_config()`` but with
+        ``initial_hole_cards = ()`` (the aggregator overrides per-class)
+        plus two lists of Pio-style hand-class strings extracted from
+        ``self.ranges[0]`` and ``self.ranges[1]``. ``hero_range`` corresponds
+        to ``self.ranges[hero_player]``; ``villain_range`` to the other
+        seat. The aggregator's ``hero_player`` argument controls engine
+        slot placement separately.
+
+        Hand classes are derived from ``RangeWithFreqs.base_range``
+        combos and deduplicated while preserving first-seen order so the
+        13x13 matrix can later overlay the aggregator output deterministically.
+        """
+        config = self.to_hunl_config()
+        # Replace initial_hole_cards with empty tuple so the aggregator
+        # can override per-class. ``dataclasses.replace`` preserves every
+        # other field.
+        from dataclasses import replace as _replace
+
+        config = _replace(config, initial_hole_cards=())
+        hero_range = self._range_hand_classes(self.ranges[self.hero_player])
+        villain_range = self._range_hand_classes(self.ranges[1 - self.hero_player])
+        return config, hero_range, villain_range
+
+    @staticmethod
+    def _range_hand_classes(rw: RangeWithFreqs) -> list[HandClass]:
+        """Extract a deduplicated list of Pio-style hand-class labels from a range.
+
+        Walks the underlying ``base_range`` combos and converts each via
+        ``classify_combo``; only includes combos with frequency > 0 (so
+        a zeroed-out cell does not contribute). Preserves first-seen
+        order so the matrix overlay is deterministic.
+        """
+        seen: set[HandClass] = set()
+        out: list[HandClass] = []
+        for combo in rw.base_range.combos:
+            if rw.frequency_of(combo) <= 0.0:
+                continue
+            cls = classify_combo(*combo)
+            if cls not in seen:
+                seen.add(cls)
+                out.append(cls)
+        return out
+
     def _pick_point_pair_hole_cards(
         self, board: tuple[Card, ...]
     ) -> tuple[tuple[Card, Card], tuple[Card, Card]] | tuple[()]:
@@ -548,6 +614,12 @@ class SolveRunner:
         self.error: BaseException | None = None
         self.started_at: float = 0.0
         self.partial_report: MemoryReport | None = None
+        # PR 24a: range-vs-range result snapshot (None when concrete solve).
+        # Populated by the worker when ``start(...)`` is invoked with
+        # ``rvr_mode=True``; the matrix renderer reads it to overlay
+        # ``per_class_strategy`` onto the 13x13 grid instead of the
+        # point-pair concrete strategy.
+        self.rvr_result: RangeVsRangeResult | None = None
         # ETA-extrapolation fields (smoke 20 / pr10a_spec.md §6 edge #1).
         # Defaults are `None` so `compute_eta()` returns `None` when the
         # runner is idle; the worker sets them once it starts.
@@ -571,6 +643,16 @@ class SolveRunner:
         # never see them.
         mock_latency_ms: int | None = None,
         mock_failure_mode: str | None = None,
+        # PR 24a: range-vs-range mode. When set, ``rvr_hero_range`` and
+        # ``rvr_villain_range`` MUST also be supplied; the worker routes
+        # through ``poker_solver.range_aggregator.solve_range_vs_range``
+        # using ``game.config`` (with ``initial_hole_cards = ()``) as the
+        # template. ``hero_player`` flips the engine seat per
+        # ``range_aggregator.solve_range_vs_range``.
+        rvr_mode: bool = False,
+        rvr_hero_range: list[HandClass] | None = None,
+        rvr_villain_range: list[HandClass] | None = None,
+        rvr_hero_player: int = 0,
     ) -> None:
         """Spawn the worker thread.
 
@@ -581,6 +663,11 @@ class SolveRunner:
             raise RuntimeError(
                 "SolveRunner.start() called while a solve is in flight; "
                 "call stop() and wait until is_alive() is False first."
+            )
+        if rvr_mode and (rvr_hero_range is None or rvr_villain_range is None):
+            raise ValueError(
+                "rvr_mode=True requires rvr_hero_range and rvr_villain_range "
+                "to be non-None lists of hand-class strings."
             )
         # Reset state for the new run.
         self._pause_event.clear()
@@ -593,6 +680,7 @@ class SolveRunner:
             self.error = None
             self.started_at = time.time()
             self.partial_report = None
+            self.rvr_result = None
         config = game.config
         self._thread = threading.Thread(
             target=self._worker,
@@ -607,6 +695,10 @@ class SolveRunner:
                 "seed": seed,
                 "mock_latency_ms": mock_latency_ms,
                 "mock_failure_mode": mock_failure_mode,
+                "rvr_mode": rvr_mode,
+                "rvr_hero_range": rvr_hero_range,
+                "rvr_villain_range": rvr_villain_range,
+                "rvr_hero_player": rvr_hero_player,
             },
             daemon=True,
             name="poker-solver-ui-worker",
@@ -715,6 +807,10 @@ class SolveRunner:
         seed: int | None,
         mock_latency_ms: int | None,
         mock_failure_mode: str | None,
+        rvr_mode: bool = False,
+        rvr_hero_range: list[HandClass] | None = None,
+        rvr_villain_range: list[HandClass] | None = None,
+        rvr_hero_player: int = 0,
     ) -> None:
         """The worker-thread body. Runs on a daemon ``threading.Thread``.
 
@@ -769,6 +865,24 @@ class SolveRunner:
             while self._pause_event.is_set() and not self._stop_event.is_set():
                 time.sleep(0.05)
             return self._stop_event.is_set()
+
+        # ----- Range-vs-range path (PR 24a) -----
+        # When ``rvr_mode`` is set, route through the Pluribus-blueprint
+        # aggregator instead of the concrete-vs-concrete ``solve`` path.
+        # Mock injection takes priority over RvR because smoke tests
+        # exercise the mock path with synthetic configs regardless of
+        # spot.rvr_mode.
+        if rvr_mode and mock_latency_ms is None and mock_failure_mode is None:
+            self._run_rvr_path(
+                config=config,
+                iterations=iterations,
+                backend=backend,
+                hero_range=rvr_hero_range or [],
+                villain_range=rvr_villain_range or [],
+                hero_player=rvr_hero_player,
+                dcfr_kwargs=dcfr_kwargs,
+            )
+            return
 
         # ----- Mock path: smoke-test injection only -----
         use_mock = mock_latency_ms is not None or mock_failure_mode is not None
@@ -984,6 +1098,93 @@ class SolveRunner:
             backend=backend,
             log_every=log_every,
         )
+
+    def _run_rvr_path(
+        self,
+        *,
+        config: HUNLConfig,
+        iterations: int,
+        backend: str,
+        hero_range: list[HandClass],
+        villain_range: list[HandClass],
+        hero_player: int,
+        dcfr_kwargs: dict[str, Any] | None,
+    ) -> None:
+        """Run the range-vs-range aggregator path (PR 24a).
+
+        Dispatches to ``poker_solver.range_aggregator.solve_range_vs_range``.
+        Progress is plumbed via the aggregator's ``on_progress(done, total,
+        hand_class)`` callback so the UI's chart can show class-level
+        completion as a coarse stand-in for exploitability (the aggregator
+        does not expose a per-iter exploitability curve — every per-hand
+        solve runs the underlying concrete solver to convergence).
+
+        Honest framing per ``range_aggregator.py`` module docstring: this
+        is a blueprint approximation, NOT a Nash range-vs-range solve.
+        The chart subtitle in ``run_panel._chart_options`` reflects this
+        (see PR 24a §3.4 "true Nash vs blueprint").
+        """
+        from poker_solver.range_aggregator import solve_range_vs_range
+
+        def _on_rvr_progress(done: int, total: int, hand_class: str) -> None:
+            # Cooperative cancellation. The aggregator runs per-class
+            # solves sequentially and re-enters ``on_progress`` between
+            # each one; we can't interrupt the underlying ``solve()``
+            # mid-call, but we can record cancellation here so the next
+            # class starts the wind-down (we have no direct kill switch
+            # past this point; the daemon thread will exit naturally).
+            now = time.monotonic()
+            with self._lock:
+                self.iteration = done
+                # Use ``done`` as a stand-in iteration axis; the chart
+                # subtitle in ``run_panel._chart_options`` already calls
+                # this out as "blueprint approximation", so we do NOT
+                # claim a true exploitability value here. Push a coarse
+                # signal so the chart shows live progress.
+                self.expl_history.append((done, max(0.0, float(total - done))))
+                self.current_time_monotonic = now
+            # Pause: block here. We can't honor stop mid-class without
+            # tearing down the worker; the user must wait one class.
+            while self._pause_event.is_set() and not self._stop_event.is_set():
+                time.sleep(0.05)
+
+        # Populate timing fields used by ``compute_eta()``.
+        with self._lock:
+            self.target_iterations = len(hero_range)
+            self.start_time_monotonic = time.monotonic()
+            self.current_time_monotonic = self.start_time_monotonic
+
+        try:
+            rvr_result = solve_range_vs_range(
+                config,
+                hero_range,
+                villain_range,
+                iterations=iterations,
+                backend=backend,
+                hero_player=hero_player,
+                on_progress=_on_rvr_progress,
+                dcfr_kwargs=dcfr_kwargs,
+            )
+        except (ValueError, RuntimeError, NotImplementedError) as exc:
+            logger.exception("RvR solve failed with %s", type(exc).__name__)
+            with self._lock:
+                self.error = exc
+                self.status = "error"
+            return
+        except BaseException as exc:  # noqa: BLE001
+            logger.exception("RvR solve worker raised unexpected exception")
+            with self._lock:
+                self.error = exc
+                self.status = "error"
+            return
+
+        with self._lock:
+            self.rvr_result = rvr_result
+            self.iteration = len(hero_range)
+            if self._stop_event.is_set():
+                self.status = "stopped"
+            else:
+                self.status = "done"
 
     def _run_mock_path(
         self,
@@ -1341,6 +1542,8 @@ def load_fixture_config(preset_id: str) -> HUNLConfig | None:
 
 __all__ = [
     "AppState",
+    "HandClass",
+    "RangeVsRangeResult",
     "RangeWithFreqs",
     "SolveRunner",
     "SolveSession",
