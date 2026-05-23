@@ -428,13 +428,19 @@ def _format_action_badge(action: int, freq: float, ev_mbb: float) -> str:
     )
 
 
-def tree_node_to_dict(node: TreeNode) -> dict[str, object]:
+def tree_node_to_dict(
+    node: TreeNode, *, locked_keys: frozenset[str] = frozenset()
+) -> dict[str, object]:
     """Convert a :class:`TreeNode` to NiceGUI's ``ui.tree`` schema.
 
     The label is rendered as inline HTML so action frequencies pick up
     the R/Y/G color triad. Children are NOT recursively materialized;
     callers wire ``ui.tree(on_expand=...)`` and call back into
     ``SolveTree.expand`` to fetch the next level on demand.
+
+    PR 24b §3.5: when ``node.id`` is in ``locked_keys`` (the keys of
+    ``Spot.locked_strategies``), prepend a yellow padlock icon to the
+    label so the user can see which nodes carry a lock.
     """
 
     badges: list[str] = []
@@ -454,7 +460,15 @@ def tree_node_to_dict(node: TreeNode) -> dict[str, object]:
         if not node.truncated
         else ""
     )
+    # PR 24b §3.5: yellow padlock icon when this node is locked.
+    lock_indicator = ""
+    if node.id in locked_keys:
+        lock_indicator = (
+            '<span style="color:#d4a017;margin-right:6px" '
+            'title="Locked strategy applied at this infoset">🔒</span>'
+        )
     label_html = (
+        f"{lock_indicator}"
         f'<span style="color:#f0f0f0;font-weight:500">{node.label}</span>'
         f'<span style="color:#9a9a9a">{summary}</span>'
         f'<span style="margin-left:10px">{"".join(badges)}</span>'
@@ -532,6 +546,57 @@ def on_tree_node_expanded(state: AppState, node_id: str) -> None:
     del children
 
 
+def _open_lock_for_node(
+    state: AppState,
+    tree: SolveTree,
+    ui_mod: Any,
+    *,
+    refresh: Any | None = None,
+) -> None:
+    """Resolve the currently-selected tree node and open the lock editor.
+
+    PR 24b §3.5: the lock affordance is "Lock current node" — it pulls
+    the node id off ``state.current_tree_node_id`` (set by the tree's
+    on-select handler; default "root" before any select). If the
+    resolved node has no legal actions (terminal / chance / truncated),
+    we surface a notify explaining why the lock can't proceed.
+    """
+    from ui.views.node_lock_editor import open_node_lock_dialog
+
+    node_id = getattr(state, "current_tree_node_id", None) or "root"
+    try:
+        node = tree.get_node(str(node_id))
+    except KeyError:
+        ui_mod.notify(
+            f"Tree node '{node_id}' not found. Select a node in the tree first.",
+            type="warning",
+            position="top",
+        )
+        return
+    if node.is_terminal or node.truncated or not node.legal_actions:
+        ui_mod.notify(
+            "Selected node has no legal actions (terminal / chance / truncated). "
+            "Pick a decision node from the tree first.",
+            type="warning",
+            position="top",
+        )
+        return
+    # Build action labels via the existing _ACTION_LABELS table.
+    labels = [
+        _ACTION_LABELS.get(cast(int, a), str(a)) for a in node.legal_actions
+    ]
+    # Pre-populate sliders with the current avg-strategy frequencies
+    # (which is what the live tree row already shows).
+    initial = list(node.action_freqs) if node.action_freqs else None
+    open_node_lock_dialog(
+        state,
+        infoset_key=str(node_id),
+        legal_action_labels=labels,
+        initial_distribution=initial,
+        on_save=refresh,
+    )
+
+
 # -- NiceGUI rendering --------------------------------------------------------
 
 
@@ -550,15 +615,25 @@ class _RenderedTree:
     truncated: int = 0
 
 
-def _walk_for_widget(tree: SolveTree, root_id: str, depth_budget: int) -> _RenderedTree:
+def _walk_for_widget(
+    tree: SolveTree,
+    root_id: str,
+    depth_budget: int,
+    *,
+    locked_keys: frozenset[str] = frozenset(),
+) -> _RenderedTree:
     """Walk the tree breadth-first, emitting ``tree_node_to_dict`` for
     the first ``depth_budget`` levels. Beyond the budget, child slots
     are left empty so NiceGUI shows the expand chevron and the on_expand
-    handler can patch in deeper levels lazily."""
+    handler can patch in deeper levels lazily.
+
+    PR 24b §3.5: ``locked_keys`` is the set of locked infoset keys (from
+    ``Spot.locked_strategies``); ``tree_node_to_dict`` renders the
+    padlock indicator when the node's id appears in the set."""
 
     rendered = _RenderedTree()
     root = tree.get_node(root_id)
-    root_dict = tree_node_to_dict(root)
+    root_dict = tree_node_to_dict(root, locked_keys=locked_keys)
     rendered.nodes.append(root_dict)
     rendered.visible += 1
 
@@ -573,7 +648,7 @@ def _walk_for_widget(tree: SolveTree, root_id: str, depth_budget: int) -> _Rende
         children = tree.expand(parent_node.id)
         child_dicts: list[dict[str, object]] = []
         for child in children:
-            cdict = tree_node_to_dict(child)
+            cdict = tree_node_to_dict(child, locked_keys=locked_keys)
             child_dicts.append(cdict)
             rendered.visible += 1
             if child.truncated:
@@ -633,10 +708,43 @@ def render(state: AppState) -> None:
                 "font-family:Menlo,Consolas,monospace;color:#a8c8e8"
             )
 
+        # PR 24b §3.5: "Lock current node" button. The button affordance
+        # is the primary lock-trigger (NiceGUI 3.x supports a generic
+        # ``contextmenu`` DOM event subscription via ``element.on(...)``,
+        # but right-click on a tree row collides with the browser's
+        # native context menu in some browsers; a dedicated button
+        # avoids the conflict). We additionally subscribe the tree
+        # widget to ``contextmenu`` as a bonus path (see _tree_slot
+        # below). Per the spec §8 Q4 + PR 24b prompt — documented
+        # explicitly in the implementer notes.
+        with ui_mod.row().style("align-items:center;gap:10px;margin-bottom:6px"):
+            lock_btn = ui_mod.button(
+                "Lock current node",
+                icon="lock",
+            ).props("flat dense").mark("tree-lock-current-button")
+            lock_btn.tooltip(
+                "Open the node-lock editor for the currently selected "
+                "tree node (or root if none selected). Sets a fixed "
+                "strategy at the infoset that the solver will hold "
+                "while training (poker_solver.solver.solve(locked_strategies=...))."
+            )
+
+            def _open_lock_for_current() -> None:
+                _open_lock_for_node(state, tree, ui_mod, refresh=_tree_slot.refresh)
+
+            lock_btn.on_click(_open_lock_for_current)
+
+            ui_mod.label(
+                f"{len(state.current_spot.locked_strategies)} lock(s)"
+            ).style("color:#9a9a9a;font-size:11px").mark("tree-lock-count-label")
+
         @ui_mod.refreshable  # type: ignore[untyped-decorator]
         def _tree_slot() -> None:
             tree.set_min_reach(float(slider.value or 0.0))
-            rendered = _walk_for_widget(tree, "root", depth_budget=2)
+            locked_keys = frozenset(state.current_spot.locked_strategies.keys())
+            rendered = _walk_for_widget(
+                tree, "root", depth_budget=2, locked_keys=locked_keys
+            )
             reach_label.text = f"{tree.min_reach:.2f}"
             with ui_mod.row().style("gap:8px;margin-bottom:4px"):
                 ui_mod.label(f"Visible: {rendered.visible} nodes").style(
@@ -666,6 +774,24 @@ def render(state: AppState) -> None:
 
             widget.on_select(_select_handler)
             widget.on_expand(_expand_handler)
+            # PR 24b §3.5: bonus path — subscribe to the contextmenu DOM
+            # event on the tree widget. NiceGUI 3.x exposes ``Element.on``
+            # for any DOM event name; the handler opens the lock dialog
+            # for the currently-selected node. Right-click + button both
+            # work; the button is the primary affordance documented in
+            # the tooltip.
+            try:
+                widget.on(
+                    "contextmenu",
+                    lambda _e: _open_lock_for_node(
+                        state, tree, ui_mod, refresh=_tree_slot.refresh
+                    ),
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "contextmenu event subscription failed; button "
+                    "fallback remains available."
+                )
 
         slider.on(
             "update:model-value",

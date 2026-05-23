@@ -235,6 +235,28 @@ def render(
         tier_slider.on_value_change(_on_tier_change)
 
         ui.separator()
+        # ----- Locked strategies expansion (PR 24b §3.5) -----
+        # Lists every lock from ``state.current_spot.locked_strategies``
+        # with a per-lock unlock button. Empty state shows a helper
+        # label pointing at the tree-browser "Lock current node" button.
+        locks_expansion = (
+            ui.expansion("Locked strategies", icon="lock", value=False)
+            .classes("w-full")
+            .mark("locks-expansion")
+        )
+        handles["locks_expansion"] = locks_expansion
+
+        with locks_expansion:
+            locks_container = ui.element("div").classes("w-full")
+            handles["locks_container"] = locks_container
+
+            def _redraw_locks() -> None:
+                _render_lock_list(state, locks_container)
+
+            handles["redraw_locks"] = _redraw_locks
+            _redraw_locks()
+
+        ui.separator()
         # ----- Backend toggle (Python default) -----
         backend_toggle = ui.toggle(
             ["Python", "Rust"],
@@ -690,6 +712,60 @@ def _compute_eta(history: list[tuple[int, float]], wall: float) -> str:
         return f"ETA: ~{eta_sec / 3600:.1f} h to 0.5 mBB/pot"
     except (ValueError, ZeroDivisionError):
         return ""
+
+
+def _render_lock_list(state: AppState, container: Any) -> None:
+    """Render the per-lock unlock-button list (PR 24b §3.5).
+
+    Clears ``container``'s children and re-emits one row per lock. Each
+    row shows the infoset key + the locked distribution as a compact
+    string + an "Unlock" button. Empty state shows a helper label.
+    """
+    from nicegui import ui
+    from ui.views.node_lock_editor import remove_lock
+
+    container.clear()
+    locks = state.current_spot.locked_strategies
+    with container:
+        if not locks:
+            ui.label(
+                "No locks set. Use 'Lock current node' in the tree browser "
+                "to pin a strategy."
+            ).classes("text-xs text-gray-500 italic").mark("locks-empty-label")
+            return
+        for key, dist in list(locks.items()):
+            with ui.row().classes("items-center gap-2 w-full"):
+                dist_str = " / ".join(f"{p * 100:.0f}%" for p in dist)
+                ui.label(key).classes("font-mono text-xs flex-grow truncate")
+                ui.label(dist_str).classes("font-mono text-xs text-gray-500")
+
+                def _unlock(_e: Any = None, k: str = key) -> None:
+                    if remove_lock(state, k):
+                        ui.notify(
+                            f"Unlocked {k}",
+                            type="info",
+                            position="top",
+                            timeout=2000,
+                        )
+                        _render_lock_list(state, container)
+
+                ui.button(
+                    icon="lock_open",
+                    on_click=_unlock,
+                ).props("flat dense color=warning").mark(
+                    f"unlock-button-{_lock_key_marker(key)}"
+                )
+
+
+def _lock_key_marker(key: str) -> str:
+    """Sanitize an infoset key into an ElementFilter marker suffix.
+
+    Replaces slashes and special chars with hyphens so the marker is
+    selector-safe. Loosely a one-way slug; duplicate keys can collide
+    on the marker but each lock has a unique key by definition.
+    """
+    safe = "".join(c if c.isalnum() or c == "-" else "-" for c in key)
+    return safe[:48]  # cap length to keep marker readable
 
 
 def _show_error(state: AppState, handles: dict[str, Any]) -> None:
