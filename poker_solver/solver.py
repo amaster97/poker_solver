@@ -106,6 +106,48 @@ def solve(
             dcfr_kwargs=remainder or None,
             **direct_kwargs,
         )
+    # PR 9: HUNL preflop Rust dispatch (opt-in). Composes AFTER push/fold
+    # (≤15 BB → chart) and AFTER postflop branches but BEFORE the Python
+    # preflop branch — so users that opt into the Rust backend get the
+    # production tier.
+    if (
+        backend == "rust"
+        and isinstance(game, HUNLPoker)
+        and game.config.starting_street == Street.PREFLOP
+        and game.config.initial_hole_cards
+    ):
+        return _solve_rust(game, iterations, **dcfr_kwargs)
+    # PR 9: HUNL preflop Python dispatch. Composes AFTER push/fold (≤15 BB
+    # routed to the chart above) and AFTER the postflop branch (which only
+    # fires for starting_street >= FLOP). Subgame-only — `initial_hole_cards`
+    # must be set on the config; the preflop solver validates this and
+    # raises if not.
+    if (
+        isinstance(game, HUNLPoker)
+        and game.config.starting_street == Street.PREFLOP
+        and game.config.initial_hole_cards
+    ):
+        from poker_solver.preflop import solve_hunl_preflop
+
+        _DIRECT_KEYS_PREFLOP = {
+            "target_exploitability",
+            "memory_budget_gb",
+            "seed",
+            "allow_pushfold_range",
+        }
+        direct_kwargs_pf: dict[str, Any] = {
+            k: v for k, v in dcfr_kwargs.items() if k in _DIRECT_KEYS_PREFLOP
+        }
+        remainder_pf = {
+            k: v for k, v in dcfr_kwargs.items() if k not in _DIRECT_KEYS_PREFLOP
+        }
+        return solve_hunl_preflop(
+            game.config,
+            iterations=iterations,
+            log_every=log_every,
+            dcfr_kwargs=remainder_pf or None,
+            **direct_kwargs_pf,
+        )
     if backend == "rust":
         return _solve_rust(game, iterations, **dcfr_kwargs)
     if backend != "python":
@@ -337,21 +379,62 @@ def _solve_rust(game: Game, iterations: int, **dcfr_kwargs: Any) -> SolveResult:
     """Run the Rust DCFR production tier and adapt its output to `SolveResult`.
 
     Routes Kuhn → `_rust.solve_kuhn`, Leduc → `_rust.solve_leduc`, HUNL
-    postflop → `_rust.solve_hunl_postflop` (PR 6). HUNL preflop raises
-    `NotImplementedError` pointing at PR 9. Other games raise
+    postflop → `_rust.solve_hunl_postflop` (PR 6), HUNL preflop (subgame
+    mode) → `_rust.solve_hunl_preflop` (PR 9). Other games raise
     `NotImplementedError` so callers fall back to the Python tier.
     """
     alpha = float(dcfr_kwargs.get("alpha", 1.5))
     beta = float(dcfr_kwargs.get("beta", 0.0))
     gamma = float(dcfr_kwargs.get("gamma", 2.0))
 
-    # PR 6: HUNL Rust branch. Composes AFTER the push/fold short-circuit in
-    # `solve()` (which routes ≤15-BB preflop configs to the chart fast path
-    # before reaching this function) — see PR 9 §6 canonical dispatch order.
+    # PR 6/9: HUNL Rust branch. Composes AFTER the push/fold short-circuit
+    # in `solve()` (which routes ≤15-BB preflop configs to the chart fast
+    # path before reaching this function) — see PR 9 §6 canonical dispatch
+    # order.
     if isinstance(game, HUNLPoker):
+        # PR 9: route preflop (subgame mode) to the Rust preflop entry.
+        # Full-tree preflop (unfixed hole cards) raises NotImplementedError
+        # per the PR 9 scope decision (post-v1 follow-up).
         if game.config.starting_street == Street.PREFLOP:
-            raise NotImplementedError(
-                "HUNL preflop port lands in PR 9. Use --hunl-mode postflop."
+            if not game.config.initial_hole_cards:
+                raise NotImplementedError(
+                    "HUNL preflop Rust backend is subgame-only (PR 9): "
+                    "config must have `initial_hole_cards` set. Full-tree "
+                    "preflop (hole cards as 1.6M-combo chance enum) is a "
+                    "post-v1 follow-up."
+                )
+            from poker_solver._rust import (  # type: ignore[import-untyped]
+                solve_hunl_preflop as _rust_solve_preflop,
+            )
+            from poker_solver.hunl import _serialize_hunl_config
+
+            config_json_pf = _serialize_hunl_config(game.config)
+            raw_pf = _rust_solve_preflop(
+                config_json_pf,
+                int(iterations),
+                alpha,
+                beta,
+                gamma,
+                dcfr_kwargs.get("target_exploitability"),
+                dcfr_kwargs.get("seed"),
+            )
+            avg_pf = {k: list(v) for k, v in raw_pf["average_strategy"].items()}
+            # Use the equity-leaf wrapper for exploitability + game_value
+            # recompute. The bare HUNLPoker game would walk the intractable
+            # postflop subtree under each preflop line; the wrapper collapses
+            # those subtrees to equity leaves, matching what the Rust solver
+            # actually computed against.
+            from poker_solver.preflop import PreflopSubgameGame
+
+            wrap_pf_game = PreflopSubgameGame(game.config)
+            expl_pf = exploitability(wrap_pf_game, avg_pf)
+            gv_pf = _game_value(wrap_pf_game, avg_pf)
+            return SolveResult(
+                average_strategy=avg_pf,
+                exploitability_history=[expl_pf],
+                game_value=gv_pf,
+                iterations=int(raw_pf["iterations"]),
+                backend="rust",
             )
         # `poker_solver._rust` is the PyO3 extension and lacks `.pyi`
         # stubs. The `type: ignore[import-untyped]` here silences mypy's
