@@ -52,4 +52,25 @@ pub trait Game: Clone {
     /// Infoset key for `player` — must uniquely identify the player's
     /// information state (their private knowledge + visible history).
     fn infoset_key(&self, player: u8) -> String;
+
+    /// PR 23 — vector-form CFR opt-in.
+    ///
+    /// Returns the number of distinct hand-pairs (or hand buckets) the
+    /// vector-form DCFR solver should vectorize over at each infoset.
+    /// Default is `1` — the scalar code path used by Kuhn, Leduc, and
+    /// HUNL with fixed `initial_hole_cards`. Overrides returning `> 1`
+    /// opt in to the vector-form traversal in `dcfr_vector.rs`, which
+    /// mirrors Brown's `references/code/noambrown_poker_solver/cpp/
+    /// src/trainer.cpp:138-209` (MIT) pattern: a single betting tree
+    /// (no chance enum at the root) with `hand_count × action_count`
+    /// regret / strategy_sum tables per infoset.
+    ///
+    /// This is a default-method addition for backward compatibility:
+    /// existing games (Kuhn / Leduc / HUNL with fixed combo) keep
+    /// returning `1` (the default) and the scalar `dcfr.rs::cfr()` path
+    /// stays bit-identical to v1.4. The vector-form path is opt-in via
+    /// `hand_count() > 1` plus an explicit constructor in `dcfr_vector.rs`.
+    fn hand_count(&self) -> usize {
+        1
+    }
 }
