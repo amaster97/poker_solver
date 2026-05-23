@@ -13,6 +13,22 @@ In-flight on feature branches; not yet merged to `main`.
 - v1.5/v2 follow-ups (Q3 exploitability slider reframe; range-based
   dealing; Rust callbacks; full-tree preflop).
 
+## [1.6.0] - 2026-05-23
+
+### Added — GUI Gate 2 (UI completeness)
+- **Range-vs-range solve panel** (PR 24a) — visual RvR mode with hero_player selector
+- **4-tier exploitability slider** (PR 24a) — Draft/Standard/Tight/Library at measured 200/500/1000/2000 iters
+- **Node-locking editor** (PR 24b) — per-action sliders + lock indicators + tree-browser hook + run-panel locked-strategies expansion
+- **Asymmetric initial_contributions UI** (PR 24b) — facing-bet scenario input via `pot_so_far_bb` + `villain_bet_bb` + `bettor_is_p0`
+- **Range editor polish** (PR 24b) — per-combo frequency dialog (right-click) + chart preset library (4 built-in presets shipped)
+- **"True Nash" vs "blueprint" chart labels** (PR 24a) — honest framing of solve quality
+- **44 new UI smoke tests** total (7 from PR 24a + 9 from PR 24b)
+
+### Notes
+- Engine bundle (PR 33+34+35 for true Brown parity) still deferred to v1.5.2 pending per-action divergence diagnosis
+- GUI is functionally complete for Gate 2; awaiting engine acceptance test PASS before final persona retest sweep
+- Per `feedback_ui_packaging_sync`: this ship triggers PR 11 .dmg rebuild (LEG 19 candidate) + PR 10b UI re-audit downstream
+
 ## [1.5.1] - 2026-05-23
 
 ### Added
