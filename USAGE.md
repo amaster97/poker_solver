@@ -6,9 +6,10 @@ config file; you do not need to read Python or Rust source. The README
 is the developer-facing overview; this is the "what can I do with this
 today" companion.
 
-Document baseline: v1.0.0. Updates through v1.4.3 are layered in §5.3
+Document baseline: v1.0.0. Updates through v1.7.0 are layered in §5.3
 (node-locking), §5.4 (asymmetric contributions), §5.5 (range utilities),
-plus the new §7a (known CLI gaps) and §7b (known perf cliffs) sections.
+§5.6 (aggregator vs. true-Nash range-vs-range, v1.7.0+), plus the §7a
+ergonomic subcommands and §7b known perf cliffs sections.
 
 ---
 
@@ -478,6 +479,106 @@ are not in `other`, with strict set-membership semantics — useful for
 computing range intersections / complements without rebuilding combo
 lists by hand.
 
+### 5.6 Aggregator vs. true-Nash range-vs-range (v1.7.0+)
+
+v1.7.0 ships `solve_range_vs_range_nash` (in
+`poker_solver/range_aggregator.py`) as a true joint-Nash range-vs-range
+entry, alongside the existing `solve_range_vs_range` aggregator. Both
+are now first-class; pick the right one for the question you're asking.
+See `docs/aggregator_vs_true_nash_explainer.md` for the long-form
+distinction.
+
+#### When to use `solve_range_vs_range` (aggregator)
+
+- Population-level frequency reads where a per-combo perfect-info
+  approximation is good enough.
+- Production-scale fixtures (8+ classes × multi-street) under Sarah-grade
+  interactive budgets (≤5 min).
+- Blueprint-style strategy development; fast 13×13 matrix displays.
+- **Caveat:** not true joint Nash. Per-combo perfect-info aggregation can
+  inflate aggressive frequencies on selected baskets (especially tight
+  pot-odds bluff-catch spots and polarized monotone-board decisions —
+  see W1.2 / W3.5 below).
+
+#### When to use `solve_range_vs_range_nash` (true Nash via PR 23 vector-form CFR)
+
+- True joint range-Nash equilibrium needed; bluff-catching frequencies
+  driven by full-range pot odds.
+- Tight pot-odds bluff-catch decisions on the river.
+- Polarization analysis on monotone / draw-heavy boards.
+- River single-shot solves (sub-second on Rust).
+- Brown / commercial-solver parity comparisons.
+- Smaller fixtures (≤6 hero classes, river or shallow flop).
+- **Caveats:** slower than the aggregator on larger fixtures (8-class × flop
+  multi-street × 500 iter has measured >20 min — beyond Sarah's ≤5 min
+  budget). Polarization signal narrows on narrow ranges; use ≥15 hero
+  classes for a tight verdict on monotone-board pure-check questions.
+
+#### Worked examples
+
+- **W1.2-style river bluff-catch** (e.g. JJ facing a pot bet on a draw-heavy
+  river): use Nash. The aggregator path produced a ~7.7% fold artifact
+  that Nash correctly resolves to ~0% on the same inputs.
+- **W3.5-style monotone polarization** (AA on a monotone river, deciding
+  pure-check vs polarized bet): use Nash with ≥15 hero classes. At 6
+  classes the signal is partial (AA check ~0.94 vs target ≥0.99).
+- **W2.1-style production RvR chart** (8+ classes × multi-street, building
+  a population-frequency reference): use the aggregator. Nash is correct
+  but slower than Sarah's interactive budget allows today.
+
+```python
+from poker_solver import (
+    Card, HUNLConfig, Street, solve_range_vs_range_nash,
+)
+
+cfg = HUNLConfig(
+    starting_stack=10_000,
+    starting_street=Street.RIVER,
+    initial_board=tuple(Card.from_str(c) for c in ("As","7c","2d","Kh","5s")),
+    initial_pot=1_000,
+    initial_contributions=(500, 500),
+)
+result = solve_range_vs_range_nash(
+    config_template=cfg,
+    hero_range=["AA","KK","QQ","JJ","TT"],
+    villain_range=["AA","KK","AKs","AKo"],
+    iterations=500,
+    hero_player=1,                    # bluff-catcher / defender
+)
+print(result.range_aggregate)         # combo-weighted root frequencies
+print(result.per_class_strategy)      # per-class root projection
+print(f"exploitability: {result.exploitability:.4f}")
+```
+
+#### Class-label vs combo-level inputs (v1.7.0+)
+
+`solve_range_vs_range_nash` accepts both class labels (e.g., `AA`, `KK`, `AKs`)
+and 4-char specific combo labels (e.g., `AhAd`, `KhKd`). Internally, the
+wrapper expands each class label to its full combo set:
+- Pocket pair (e.g., `AA`): 6 combos (AhAd, AhAc, AhAs, AdAc, AdAs, AcAs)
+- Suited (e.g., `AKs`): 4 combos (AhKh, AdKd, AcKc, AsKs)
+- Offsuit (e.g., `AKo`): 12 combos (AhKd, AhKc, AhKs, ...)
+
+A class-expanded range can have a Nash equilibrium that differs meaningfully
+from a hand-curated combo subset of the same classes. For example, on a
+monotone board, the full class-expansion of {AA, KK, ..., AKo} may not
+produce AA's pure-check that a 15-combo curated subset would — because in
+the wider range, AA dominates more of villain's range AND blocks more of
+villain's bluff candidates.
+
+Both are valid Nash equilibria. If you want the curated-subset Nash, pass
+specific 4-char combo labels. If you want the full class-expanded Nash,
+pass class labels.
+
+```python
+# Hand-curated 15-combo input (selected suit combos per class)
+hero = ["AhAd", "KhKd", "QhQd", ..., "AhKh"]  # 15 combos
+
+# Full class-expansion (~79 combos)
+hero = ["AA", "KK", "QQ", "JJ", "TT", "99", "88", "77", "66", "55", "44",
+        "33", "22", "AKs", "AKo"]
+```
+
 ---
 
 ## 6. Library mode (caching solves)
@@ -536,100 +637,56 @@ description, so the same configuration always resolves to the same row.
 
 ---
 
-## 7a. Ergonomic subcommands (v1.5.2+)
+## 7a. Ergonomic subcommands (v1.7.0+)
 
-PR 39 added three thin CLI wrappers for workflows that previously
-required Python one-liners. Library APIs are unchanged; these are pure
-convenience shortcuts.
+v1.7.0 ships three CLI shortcuts that previously required dropping down
+to one-line Python invocations: `pushfold`, `river`, and `parity`. Each
+is a thin wrapper around an existing library API; zero engine changes.
 
-### `poker-solver pushfold` — short-stack chart lookup
+- **`poker-solver pushfold`** — look up a short-stack push/fold chart
+  cell. Wraps `poker_solver.pushfold.get_pushfold_strategy`.
 
-Look up a single (depth, position, hand) cell or dump the full 169-cell
-chart for one (depth, position) cell.
+  ```bash
+  # Single cell:
+  poker-solver pushfold --stack 10 --position sb_jam --hand AKs
 
-```bash
-# Frequency that SB jams 88 at 9 BB:
-poker-solver pushfold --stack 9 --position sb_jam --hand 88
+  # Full 169-cell chart (JSON):
+  poker-solver pushfold --stack 8 --position bb_call_vs_jam \
+      --full-range --json
+  ```
 
-# BB call frequency vs SB jam, JSON form:
-poker-solver pushfold --stack 8 --position bb_call_vs_jam --hand AKs --json
+  Flags: `--stack` (int 2–15 BB), `--position` (`sb_jam` or
+  `bb_call_vs_jam`), `--hand` (Pio notation; required unless
+  `--full-range`), `--full-range`, `--json`.
 
-# Full 13x13 chart for one cell:
-poker-solver pushfold --stack 10 --position sb_jam --full-range
-```
+- **`poker-solver river`** — solve a river spot with fixed hero hole
+  cards vs. a villain range. Wraps `solve_hunl_postflop` with
+  `initial_hole_cards` pinned to the hero combo and the villain combo
+  enumerated from `--villain-range`; aggregates the hero first-decision
+  frequencies across the villain range by combo weight.
 
-Flags:
+  ```bash
+  poker-solver river --board "As 7c 2d Kh 5s" --hero AhKh \
+      --villain-range "QQ,JJ,AKs" --iters 200
+  ```
 
-- `--stack <BB>` — effective stack in BB (integer, 2-15 inclusive).
-- `--position <sb_jam|bb_call_vs_jam>` — chart side.
-- `--hand <CLASS>` — hand-class string (`AA`, `AKs`, `AKo`). Required
-  unless `--full-range` is set.
-- `--full-range` — emit all 169 cells instead of one lookup.
-- `--json` — JSON output instead of human-readable.
+  Flags: `--board` (5 cards), `--hero` (2-card hole), `--villain-range`
+  (Pio notation), `--iters` (default 200), `--pot-bb` (default 10),
+  `--stack-bb` (default 100). For full joint-Nash range-vs-range
+  semantics, use `solve_range_vs_range_nash` (§5.6).
 
-Out-of-range stack depths (>15 BB) exit with code 2 and a message
-pointing at the tree-builder solver.
+- **`poker-solver parity`** — diff our river solve against Noam Brown's
+  binary on a fixture spot. Wraps the differential-test machinery from
+  `tests/test_river_diff.py` for ad-hoc sanity checks.
 
-### `poker-solver river` — fixed hero vs villain range, river-only
+  ```bash
+  poker-solver parity --fixture dry_K72_rainbow --iters 2000
+  ```
 
-Solve a river spot with a fixed hero combo against a villain range, then
-aggregate hero's first-decision frequencies across the villain combos
-(weighted equally per combo; matches the §5.2 aggregator pattern but
-with hero pinned).
-
-```bash
-poker-solver river \
-    --board "As 7c 2d Kh 5s" \
-    --hero AhKh \
-    --villain-range "QQ,JJ,AKs" \
-    --iters 200
-```
-
-Flags:
-
-- `--board <CARDS>` — exactly 5 river cards.
-- `--hero <HOLE>` — hero's 2-card hole (e.g. `AhKh`).
-- `--villain-range <RANGE>` — PioSolver-notation range (e.g. `QQ,JJ,AKs`).
-  Combos that share a card with `--hero` or `--board` are filtered out
-  automatically.
-- `--iters <N>` — DCFR iterations per per-combo solve (default 200).
-- `--pot-bb <BB>` / `--stack-bb <BB>` — starting pot and per-player
-  effective stack in BB (defaults: pot 10 BB, stack 100 BB).
-
-Output: per-combo solve, then hero's averaged action distribution at
-the first decision (`action_0` is fold, `action_1` is call/check, etc.,
-in the order the engine's action abstraction emits them). The Mean
-game value line is hero's EV in BB averaged over the villain combos.
-
-### `poker-solver parity` — diff against Noam Brown's binary
-
-Surfaces the river-spot parity machinery from
-`tests/test_river_diff.py` (PR 7) as a one-shot CLI for ad-hoc sanity
-checks.
-
-```bash
-# Diff against the bundled dry-board fixture:
-poker-solver parity --fixture dry_K72_rainbow --iters 2000
-
-# Custom fixture path:
-poker-solver parity --fixture my_spot --fixture-path ./my_spots.json
-```
-
-Flags:
-
-- `--fixture <ID>` — fixture id from `tests/data/river_spots.json`.
-  Unknown ids exit code 2 with the available-id list.
-- `--fixture-path <PATH>` — override the fixture JSON location.
-- `--iters <N>` — DCFR iterations on both engines (default 2000, matches
-  PR 7).
-
-Brown's binary must already be built (`scripts/build_noambrown.sh`);
-when it isn't, the command exits 2 with a build hint — same protocol
-as the diff-test harness.
-
-Output: per-side infoset-key counts, the overlap percentage, our
-game-value, and (when Brown's stdout exposes it) the game-value diff.
-Per-action numeric diff stays delegated to `test_river_diff.py`.
+  Flags: `--fixture` (spot id from `tests/data/river_spots.json`),
+  `--fixture-path` (override fixture JSON), `--iters` (default 2000).
+  Requires Brown's binary built via `scripts/build_noambrown.sh`; exits
+  2 with a hint when the binary is missing.
 
 ### Still missing from the CLI
 
@@ -667,12 +724,14 @@ walk. The §5.2 aggregator is the production-safe workaround today.
   aggregate is honest about being a blueprint approximation rather
   than joint Nash.
 
-- **For full Nash range-vs-range, wait for v1.5.0.** PR 23 ships a
-  vector-form CFR in the Rust tier (per Brown's `cpp/trainer.cpp`
-  vector path; see `DEVELOPER.md` §1 for the two-tier honesty note).
-  That closes the ~100x DCFR slowdown observed in v1.4.1 W2b
-  benchmarks on range-on-both-sides flop / turn queries. Until then,
-  the aggregator (§5.2) is the recommended interactive path.
+- **For full Nash range-vs-range, use `solve_range_vs_range_nash`
+  (v1.7.0+).** v1.7.0 ships the vector-form CFR entry built on PR 23's
+  Rust binding (per Brown's `cpp/trainer.cpp` vector path; see
+  `DEVELOPER.md` §1 for the two-tier honesty note). This is the
+  recommended path for tight bluff-catching / polarization decisions
+  (§5.6). The aggregator (§5.2) remains the recommended path for
+  production-scale charts and population-frequency reads under
+  interactive budgets.
 
 ---
 
