@@ -1130,7 +1130,15 @@ pub fn enumerate_legal_actions(ctx: &ActionContext) -> Vec<u8> {
         }
     }
 
-    if ctx.include_all_in {
+    // Facing-all-in + cap guards: when opponent has shoved and our remaining
+    // stack <= to_call, the only chip action is CALL. Emitting ALL_IN here
+    // creates a degenerate action semantically identical to CALL but with
+    // its own regret bucket, redistributing probability mass and diverging
+    // from Brown's reference (see cpp/src/river_game.cpp:76 + 98). Brown
+    // returns `[c, f]` at the cap (line 76) without enumerating raises OR
+    // an all-in, so we mirror that by gating ALL_IN on `!cap_reached`.
+    let can_actually_raise = stack > ctx.to_call;
+    if ctx.include_all_in && !cap_reached && can_actually_raise {
         actions.push(ACTION_ALL_IN);
     }
 
