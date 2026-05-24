@@ -52,6 +52,7 @@ from typing import Any, Literal
 
 import numpy as np
 
+from poker_solver.card import SUITS as _OUR_SUIT_CHARS
 from poker_solver.card import Card, parse_card
 from poker_solver.solver import SolveResult
 
@@ -189,11 +190,26 @@ _BROWN_SUIT_CHARS: str = "cdhs"
 _BROWN_RANK_INDEX: dict[str, int] = {r: i for i, r in enumerate(_BROWN_RANK_CHARS)}
 _BROWN_SUIT_INDEX: dict[str, int] = {s: i for i, s in enumerate(_BROWN_SUIT_CHARS)}
 
+# Our internal Card.suit is an *index* into poker_solver.card.SUITS = "shdc"
+# (s=0, h=1, d=2, c=3). Brown's _BROWN_SUIT_CHARS is "cdhs" — same letter set,
+# different positional indices (c=0, d=1, h=2, s=3). The two are NOT
+# interchangeable as integer indices: passing our suit-index directly into
+# _BROWN_SUIT_CHARS produces paired suit-swaps (our 's' → Brown 'c', our 'h' →
+# Brown 'd', etc.), silently corrupting every Brown card string and card id we
+# emit. To bridge the two encodings, we go through the suit *character* — both
+# sides agree on the letter, only the index differs.
+_OUR_SUIT_INDEX_TO_CHAR: tuple[str, ...] = tuple(_OUR_SUIT_CHARS)  # ("s","h","d","c")
+
 
 def _card_to_brown_str(card: Card) -> str:
-    """Emit a card in Brown's two-char form (e.g. ``Ah``)."""
+    """Emit a card in Brown's two-char form (e.g. ``Ah``).
+
+    Bridges our suit encoding (``"shdc"``) to Brown's (``"cdhs"``) via the
+    shared suit letter, not the positional index — the two share the same
+    four letters but assign them different indices.
+    """
     rank_char = _BROWN_RANK_CHARS[card.rank - 2]
-    suit_char = _BROWN_SUIT_CHARS[card.suit]
+    suit_char = _OUR_SUIT_INDEX_TO_CHAR[card.suit]
     return rank_char + suit_char
 
 
@@ -203,9 +219,15 @@ def _brown_card_id(card: Card) -> int:
     Brown encodes a card as ``suit * 13 + rank`` where rank is 0..12
     (2..A) and suit is 0..3 (c d h s). We need this only to sort hand
     strings the same way Brown does (lowest id first).
+
+    Bridges via the suit character: our ``card.suit`` index resolves to a
+    suit letter in our encoding, which we then look up in Brown's suit
+    index. Skipping this bridge (i.e. using ``card.suit`` directly as
+    Brown's suit index) reverses the suit ordering and produces wrong
+    sort keys.
     """
     rank_char = _BROWN_RANK_CHARS[card.rank - 2]
-    suit_char = _BROWN_SUIT_CHARS[card.suit]
+    suit_char = _OUR_SUIT_INDEX_TO_CHAR[card.suit]
     return _BROWN_SUIT_INDEX[suit_char] * 13 + _BROWN_RANK_INDEX[rank_char]
 
 
