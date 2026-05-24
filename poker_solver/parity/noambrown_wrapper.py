@@ -138,8 +138,8 @@ class BrownPlayerProfile:
 class BrownStrategyDump:
     """Parsed output from Brown's ``--dump-strategy`` JSON.
 
-    Player-index convention (post-PR 55)
-    ------------------------------------
+    Player-index convention (post-PR 55 + PR 55 extension)
+    ------------------------------------------------------
     ``players`` is exposed in OUR engine's P0/P1 convention so callers
     can index it side-by-side with our solver outputs without remapping.
 
@@ -149,18 +149,25 @@ class BrownStrategyDump:
     - **Our convention** (``poker_solver/hunl.py:425-429`` and
       ``hunl.py:789``): our P0 = ``cur_player=0`` on river open =
       **second-to-act on river** (our P1 = ``cur_player=1`` acts first).
-    - **This wrapper swaps players at the boundary** (in
-      ``_parse_brown_dump``) so that ``players[0]`` on the returned dump
-      is Brown's player-1 profile (= second-to-act = our P0) and
-      ``players[1]`` is Brown's player-0 profile (= first-to-act = our
-      P1). Downstream diff harnesses can then iterate
-      ``for player in (0, 1): brown_dump.players[player] vs our[player]``
-      without any per-call remap.
+    - **This wrapper swaps players at the boundary on BOTH sides**:
+      ``write_brown_config`` swaps the INPUT slots so Brown's player 0
+      receives our P1's range (the first-actor's range), and
+      ``_parse_brown_dump`` swaps the OUTPUT so ``players[0]`` on the
+      returned dump is Brown's player-1 profile (= second-to-act = our
+      P0) and ``players[1]`` is Brown's player-0 profile (= first-to-
+      act = our P1). The PAIRED swap means Brown's two solves run on
+      the same {role, range} assignment as our two solves, so callers
+      can iterate ``for player in (0, 1): brown_dump.players[player]
+      vs our[player]`` and get a same-role, same-range comparison.
 
     Prior to PR 55, this dataclass exposed Brown's raw indexing; the
     diff harness was silently comparing Brown's first-actor strategy
-    against our P0 (second-actor) strategy. See
-    ``docs/p0_p1_convention_investigation.md``.
+    against our P0 (second-actor) strategy. PR 55 (output-side only)
+    re-aligned roles but left the input-side range assignment
+    inverted, producing large per-cell divergence on asymmetric
+    ranges. The PR 55 extension adds the paired input swap. See
+    ``docs/p0_p1_convention_investigation.md`` and
+    ``docs/v1_6_1_dryrun_6.md``.
 
     ``game_value_p0`` and ``game_value_p1`` are populated only if Brown's
     stdout exposed them. The current binary (``cpp/src/main.cpp:440-471``)
@@ -544,7 +551,37 @@ def write_brown_config(spot: RiverSpot, path: Path) -> None:
 
     Card-to-string convention matches Brown's ``cpp/src/cards.cpp``:
     rank in ``"23456789TJQKA"`` and suit in ``"cdhs"`` (lowercase).
+
+    Player-index convention (post-PR 55 extension)
+    ----------------------------------------------
+    ``spot.ranges`` is authored in OUR engine's convention
+    (``spot.ranges[0]`` = our P0 = second-to-act on river;
+    ``spot.ranges[1]`` = our P1 = first-to-act on river — see
+    ``poker_solver/hunl.py:425-429`` and ``hunl.py:789``). Brown's input
+    JSON uses ITS own convention (``players[0]`` = first-to-act on
+    river — see ``cpp/src/main.cpp:669-675`` and
+    ``cpp/src/river_game.cpp:10``).
+
+    PR 55's wrapper-boundary policy puts the convention swap ENTIRELY
+    inside this module: the parsed output is swapped in
+    ``_parse_brown_dump`` so callers receive our-convention indexed
+    profiles. To keep that policy consistent, we ALSO swap on the input
+    side here — Brown's ``players[0]`` (= first-actor slot) receives
+    ``spot.ranges[1]`` (= our P1 = our first-actor's range), and
+    ``players[1]`` (= second-actor slot) receives ``spot.ranges[0]``
+    (= our P0 = our second-actor's range).
+
+    Without this input-side swap, Brown's first-actor would train on
+    our second-actor's range and vice-versa; the PR 55 output swap then
+    re-aligns roles but the underlying solves were run on different
+    games, producing large per-cell divergence on asymmetric ranges
+    (see ``docs/v1_6_1_dryrun_6.md`` for the diagnosis).
     """
+    # PR 55 extension: swap range slots at the wrapper boundary so
+    # Brown's player 0 (first-actor) receives our first-actor's range.
+    # See docstring above and `_parse_brown_dump` for the paired output
+    # swap.
+    brown_player_ranges = (spot.ranges[1], spot.ranges[0])
     config: dict[str, Any] = {
         "board": [_card_to_brown_str(c) for c in spot.board],
         "pot": int(spot.pot),
@@ -557,7 +594,7 @@ def write_brown_config(spot: RiverSpot, path: Path) -> None:
                 "hands": [_combo_to_brown_hand_str(combo) for combo, _ in player_range],
                 "weights": [float(weight) for _, weight in player_range],
             }
-            for player_range in spot.ranges
+            for player_range in brown_player_ranges
         ],
     }
     path.write_text(json.dumps(config, indent=2))
@@ -758,7 +795,7 @@ def _parse_brown_dump(
             )
         )
 
-    # PR 55: swap players[0] / players[1] at the wrapper boundary.
+    # PR 55: swap players[0] / players[1] at the wrapper OUTPUT boundary.
     #
     # Brown's JSON puts the first-to-act-on-river profile at
     # ``players[0]`` (cpp/src/river_game.cpp:10, struct State{int player=0}
@@ -774,6 +811,13 @@ def _parse_brown_dump(
     # via test plumbing) can iterate ``for player in (0, 1):
     # brown_dump.players[player] vs our[player]`` and end up comparing
     # same-role strategies. See docs/p0_p1_convention_investigation.md.
+    #
+    # PR 55 EXTENSION (this file): the paired INPUT-side swap lives in
+    # ``write_brown_config`` so Brown's player 0 (first-actor slot)
+    # also TRAINS on our first-actor's range. Without the paired
+    # input swap, roles would match here but the underlying solves
+    # would be apples-to-oranges. See docs/v1_6_1_dryrun_6.md for the
+    # diagnosis of the half-applied state.
     return BrownStrategyDump(
         players=(parsed_players[1], parsed_players[0]),
         game_value_p0=game_value_p0,
