@@ -338,10 +338,12 @@ impl VectorDCFR {
             FlatNode::Decision { player, actions, children, .. } => {
                 let player = *player as usize;
                 let action_count = actions.len();
-                let opp_player = 1 - player;
-                let opp_hands = eval_ctx.hand_count[opp_player];
-
                 // Compute the per-hand current strategy from regret-matching.
+                // Note: we deliberately do NOT pre-bind `opp_hands` here —
+                // the opponent-branch needs `player_hands` (acting player's
+                // axis) for `next_reach` sizing, and the own-node branch
+                // already uses `update_hands`. Keeping just `player_hands`
+                // makes the asymmetric-range invariant explicit.
                 let player_hands = eval_ctx.hand_count[player];
                 let mut strategy = vec![0.0_f64; player_hands * action_count];
                 {
@@ -352,14 +354,26 @@ impl VectorDCFR {
                 }
 
                 if player != update_player {
-                    // Opponent node — propagate their reach via current
-                    // strategy and accumulate update_player values.
+                    // Opponent node — propagate THEIR reach (the acting
+                    // player's reach, which is `reach_opp` from the
+                    // update_player's perspective) via current strategy
+                    // and accumulate update_player values.
                     // Mirrors `trainer.cpp:166-181` (MIT).
+                    //
+                    // Sizing: `reach_opp` has length `hand_count[player]`
+                    // (= `player_hands`), and `strategy` is laid out as
+                    // `player_hands × action_count`. With asymmetric
+                    // ranges (`player_hands != opp_hands`, e.g. A83 where
+                    // board-blocker counts differ between seats), sizing
+                    // `next_reach` with `opp_hands` here panics the
+                    // `reach_opp[h]` index at h ≥ player_hands. Use
+                    // `player_hands` to stay aligned with the acting
+                    // player's hand axis.
                     let mut values = vec![0.0_f64; update_hands];
-                    let mut next_reach = vec![0.0_f64; opp_hands];
+                    let mut next_reach = vec![0.0_f64; player_hands];
                     for (a, &child_idx) in children.iter().enumerate() {
                         // next_reach[h] = reach_opp[h] * strategy[h, a]
-                        for h in 0..opp_hands {
+                        for h in 0..player_hands {
                             next_reach[h] = reach_opp[h] * strategy[h * action_count + a];
                         }
                         let child_values = self.traverse(
