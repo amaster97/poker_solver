@@ -205,8 +205,9 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the PR-flow contract.
   will block by default), `arm64`-only despite the `universal2` label
   (Intel Macs can't run it at all), and the `Info.plist` version stamp
   reads `0.6.0` on a v1.4.0 tag. A packaging-fix PR is queued. **Use
-  the source install above** until that lands. Full smoke-verification
-  report: [`docs/dmg_v1_4_0_smoke_verification.md`](docs/dmg_v1_4_0_smoke_verification.md).
+  the source install above** until that lands. See
+  [`docs/dmg_install_guide.md`](docs/dmg_install_guide.md) for the
+  public-facing install guide.
 - **v1.5.0 Brown acceptance test currently FAILS — v1.6.1 ship HELD
   pending investigation.** Three code reviews verified the Rust
   vector-form CFR is structurally faithful to Brown's
@@ -225,8 +226,7 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the PR-flow contract.
   matches Brown's algorithm; they did not verify the algorithm
   produces Brown's empirical OUTPUT at this scenario — a
   label-vs-semantics gap. Investigation in flight: best-response
-  cross-check + iteration sweep + facing-raise path re-read. Full
-  report: [`docs/v1_6_1_dryrun_verification.md`](docs/v1_6_1_dryrun_verification.md).
+  cross-check + iteration sweep + facing-raise path re-read.
 - **`Range` fractional frequencies** (e.g. `AKo:0.25` syntax) not yet
   supported — `Range` has no `weight` field. Set-membership operations
   (`Range.diff`) work today; mixed-frequency operations require a
