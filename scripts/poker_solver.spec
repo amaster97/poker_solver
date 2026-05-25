@@ -18,7 +18,10 @@
 # works inside the bundle BEFORE codesign/notarize/DMG run.
 # noqa: this is a PyInstaller spec, not a Python module to be imported.
 
+import re
 from pathlib import Path
+
+from PyInstaller.utils.hooks import collect_all
 
 # pyright: reportUndefinedVariable=false
 # (Analysis, EXE, COLLECT, BUNDLE are injected by PyInstaller's exec'd context.)
@@ -32,6 +35,29 @@ CHARTS_DIR = str(REPO_ROOT / "poker_solver" / "charts")
 UI_DIR = str(REPO_ROOT / "ui")
 ICON_PATH = str(REPO_ROOT / "assets" / "poker_solver.icns")
 
+# PR 44 fix: read __version__ dynamically from poker_solver/__init__.py
+# so Info.plist's CFBundleShortVersionString matches the actual package
+# version (previously hardcoded to "0.6.0" — stale since v0.7.0).
+_version_match = re.search(
+    r'__version__\s*=\s*[\'"]([^\'"]+)[\'"]',
+    (REPO_ROOT / "poker_solver" / "__init__.py").read_text(),
+)
+APP_VERSION = _version_match.group(1) if _version_match else "0.0.0"
+
+# PR 44 fix: widen `datas` / `binaries` / `hiddenimports` to capture
+# NiceGUI 3.x's static/templates dirs and the runtime submodule tree
+# for fastapi/uvicorn/starlette/socketio/engineio.  The hand-listed
+# `hiddenimports` block below is insufficient on its own: NiceGUI loads
+# `nicegui/static/` (JS/CSS bundles) and `nicegui/templates/` (Jinja) by
+# path at runtime, which PyInstaller's static analysis cannot discover.
+# `collect_all` pulls in datas + binaries + hiddenimports for each pkg.
+datas, binaries, hiddenimports = [], [], []
+for pkg in ('nicegui', 'fastapi', 'uvicorn', 'starlette', 'socketio', 'engineio'):
+    pkg_datas, pkg_binaries, pkg_hiddenimports = collect_all(pkg)
+    datas += pkg_datas
+    binaries += pkg_binaries
+    hiddenimports += pkg_hiddenimports
+
 
 a = Analysis(  # noqa: F821
     [ENTRY],
@@ -40,16 +66,17 @@ a = Analysis(  # noqa: F821
         # Top-risk mitigation (spec §12.1): force-include the Rust .so.
         # Tuple is (source_path, destination_subdir_inside_bundle).
         (RUST_SO, "poker_solver"),
-    ],
+    ] + binaries,
     datas=[
         (CHARTS_DIR, "poker_solver/charts"),
         (UI_DIR, "ui"),
-    ],
-    hiddenimports=[
+    ] + datas,
+    hiddenimports=hiddenimports + [
         # NiceGUI does a lot of dynamic imports under nicegui.elements
         # and nicegui.functions that PyInstaller's static analysis misses.
-        # Add empirically as `ModuleNotFoundError` smoke-test failures
-        # surface them; see assets/README.md.
+        # The `collect_all` calls above should make most of these
+        # redundant, but we keep them as a belt-and-suspenders safety net
+        # in case `collect_all` misses something.  See assets/README.md.
         "nicegui",
         "nicegui.elements",
         "nicegui.functions",
@@ -122,10 +149,10 @@ app = BUNDLE(  # noqa: F821
     name="Poker Solver.app",
     icon=ICON_PATH,
     bundle_identifier="com.poker_solver.app",
-    version="0.6.0",
+    version=APP_VERSION,
     info_plist={
-        "CFBundleShortVersionString": "0.6.0",
-        "CFBundleVersion": "0.6.0",
+        "CFBundleShortVersionString": APP_VERSION,
+        "CFBundleVersion": APP_VERSION,
         "NSHighResolutionCapable": True,
         # Don't show "Poker Solver" in the Dock when launched from CLI
         # for headless smoke tests; uncomment if you want a true
