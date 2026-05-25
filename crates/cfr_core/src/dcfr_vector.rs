@@ -338,8 +338,6 @@ impl VectorDCFR {
             FlatNode::Decision { player, actions, children, .. } => {
                 let player = *player as usize;
                 let action_count = actions.len();
-                let opp_player = 1 - player;
-                let opp_hands = eval_ctx.hand_count[opp_player];
 
                 // Compute the per-hand current strategy from regret-matching.
                 let player_hands = eval_ctx.hand_count[player];
@@ -355,11 +353,22 @@ impl VectorDCFR {
                     // Opponent node — propagate their reach via current
                     // strategy and accumulate update_player values.
                     // Mirrors `trainer.cpp:166-181` (MIT).
+                    //
+                    // Sizing note: at this branch the current-node player
+                    // is the opponent of `update_player`, so `reach_opp`
+                    // (the opponent's reach) and `strategy` are indexed by
+                    // `player_hands`, NOT `opp_hands` (which equals
+                    // hand_count[update_player]). Conflating the two
+                    // panics with an index-out-of-bounds at line 363
+                    // whenever the two players have asymmetric combo
+                    // counts (e.g. hero {AA,KK}=12 vs villain
+                    // {72o,83o}=24). Same family as PR 51's terminal-leaf
+                    // wrong-player-count fix at line 651.
                     let mut values = vec![0.0_f64; update_hands];
-                    let mut next_reach = vec![0.0_f64; opp_hands];
+                    let mut next_reach = vec![0.0_f64; player_hands];
                     for (a, &child_idx) in children.iter().enumerate() {
                         // next_reach[h] = reach_opp[h] * strategy[h, a]
-                        for h in 0..opp_hands {
+                        for h in 0..player_hands {
                             next_reach[h] = reach_opp[h] * strategy[h * action_count + a];
                         }
                         let child_values = self.traverse(
@@ -980,5 +989,94 @@ mod tests {
         cfg.initial_board = vec![];
         let err = solve_range_vs_range_postflop(&cfg, 5, 1.5, 0.0, 2.0);
         assert!(err.is_err(), "must reject preflop config in v1.5.0");
+    }
+
+    /// Regression test for the line-363 panic: when hero (P0) and villain
+    /// (P1) have DIFFERENT combo counts (e.g. AA+KK = 12 combos vs
+    /// 72o+83o = 24 combos), the opponent-node branch in `traverse` used
+    /// `opp_hands` (= hand_count[update_player]) to size `next_reach` and
+    /// bound the strategy-fold loop. The correct size is `player_hands`
+    /// (= hand_count of the current node's player, who is the opponent
+    /// of `update_player`). Same family as PR 51's line-651 fix.
+    ///
+    /// Pre-fix: this panics with `index out of bounds: the len is 12 but
+    /// the index is 12` (or similar) inside `traverse` at line 363.
+    /// Post-fix: solve completes and emits a per-hand strategy table.
+    #[test]
+    fn vector_solver_handles_asymmetric_combo_counts() {
+        // Dry rainbow river board where AA, KK, 72o, 83o all avoid
+        // collisions: Tc 9d 4h Jc 6s (matches the Python sanity-gate
+        // fixture in `tests/test_asymmetric_range_sanity.py`).
+        let cfg = HUNLConfig {
+            starting_stack: 1000,
+            small_blind: 50,
+            big_blind: 100,
+            ante: 0,
+            starting_street: Street::River,
+            initial_board: vec![
+                card_to_int(10, 3), // Tc
+                card_to_int(9, 1),  // 9d
+                card_to_int(4, 2),  // 4h
+                card_to_int(11, 3), // Jc
+                card_to_int(6, 0),  // 6s
+            ],
+            initial_pot: 1000,
+            initial_contributions: [500, 500],
+            initial_hole_cards: None,
+            preflop_raise_cap: 4,
+            postflop_raise_cap: 1,
+            bet_size_fractions: vec![1.0],
+            include_all_in: false,
+            force_allin_threshold: 1,
+            min_bet_bb: 1,
+            rake_rate: 0.0,
+            rake_cap: 0,
+            abstraction_path: None,
+            abstraction_version: None,
+            use_pcs: false,
+        };
+
+        // Hero (P0): AA + KK = 12 combos (6 each).
+        let mut p0_holes: Vec<[u8; 2]> = Vec::new();
+        for (s0, s1) in [(0u8, 1u8), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)] {
+            p0_holes.push([card_to_int(14, s0), card_to_int(14, s1)]);
+            p0_holes.push([card_to_int(13, s0), card_to_int(13, s1)]);
+        }
+        assert_eq!(p0_holes.len(), 12);
+
+        // Villain (P1): 72o + 83o = 24 combos (12 each off-suit).
+        let mut p1_holes: Vec<[u8; 2]> = Vec::new();
+        for sa in 0u8..4 {
+            for sb in 0u8..4 {
+                if sa == sb {
+                    continue;
+                }
+                let lo = card_to_int(2, sa);
+                let hi = card_to_int(7, sb);
+                p1_holes.push([lo.min(hi), lo.max(hi)]);
+                let lo = card_to_int(3, sa);
+                let hi = card_to_int(8, sb);
+                p1_holes.push([lo.min(hi), lo.max(hi)]);
+            }
+        }
+        assert_eq!(p1_holes.len(), 24);
+        assert_ne!(
+            p0_holes.len(),
+            p1_holes.len(),
+            "this regression test only exercises the bug if combo counts differ"
+        );
+
+        let out = solve_range_vs_range_postflop_with_hands(
+            &cfg,
+            Some([p0_holes, p1_holes]),
+            3,
+            1.5,
+            0.0,
+            2.0,
+        )
+        .expect("asymmetric range solve must not panic post-fix");
+        assert_eq!(out.hand_count_per_player, [12, 24]);
+        assert!(out.decision_node_count > 0, "no decision nodes");
+        assert!(out.strategy_entry_count > 0, "no strategy entries");
     }
 }
