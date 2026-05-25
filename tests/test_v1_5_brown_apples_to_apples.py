@@ -100,6 +100,7 @@ fresh clone or pre-PR-23 checkout still collects cleanly.
 from __future__ import annotations
 
 import importlib
+import os
 from pathlib import Path
 from typing import Any
 
@@ -107,6 +108,25 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SPOTS_JSON = REPO_ROOT / "tests" / "data" / "river_spots.json"
+
+# When set to a truthy value (typically by the ship-preflight script), any
+# unmet precondition HARD-FAILS this acceptance test instead of skipping.
+# Rationale: the v1.7.1 ship-preflight smoke matrix observed
+# "2 SKIPPED in 0.03s" because the worktree did not inherit Brown's
+# gitignored binary; the silent skip masked an absent acceptance gate.
+# Ship scripts set this env var so missing prereqs surface as failures.
+_REQUIRE_BROWN_PARITY = bool(
+    int(os.environ.get("POKER_SOLVER_REQUIRE_BROWN_PARITY", "0") or "0")
+)
+
+
+def _skip_or_fail(reason: str) -> None:
+    """Skip cleanly by default; HARD-FAIL when the ship script demands it."""
+    if _REQUIRE_BROWN_PARITY:
+        pytest.fail(
+            f"POKER_SOLVER_REQUIRE_BROWN_PARITY=1: acceptance precondition unmet — {reason}"
+        )
+    pytest.skip(reason)
 
 # Spots covered by this acceptance test. The first MUST be `dry_K72_rainbow`
 # (the load-bearing spot from the apples-to-apples experiment); the second
@@ -189,28 +209,30 @@ except Exception:  # noqa: BLE001
 
 
 def _require_preconditions() -> None:
-    """Skip cleanly if any precondition is unmet."""
+    """Skip cleanly if any precondition is unmet (or HARD-FAIL under
+    ``POKER_SOLVER_REQUIRE_BROWN_PARITY=1``)."""
     if not _WRAPPER_OK:
-        pytest.skip(
+        _skip_or_fail(
             f"poker_solver.parity.noambrown_wrapper unavailable: {_WRAPPER_ERR}"
         )
     if not _CORE_OK:
-        pytest.skip("poker_solver core surface failed to import")
+        _skip_or_fail("poker_solver core surface failed to import")
     if _rust_solve_rvr is None:
-        pytest.skip(
+        _skip_or_fail(
             "_rust.solve_range_vs_range_rust missing — PR 23 not merged / not built. "
             "After PR 23 lands, run `maturin develop --release` to enable."
         )
     if not SPOTS_JSON.exists():
-        pytest.skip(f"river fixture missing: {SPOTS_JSON}")
+        _skip_or_fail(f"river fixture missing: {SPOTS_JSON}")
 
 
 def _require_brown_binary() -> Path:
-    """Skip if Brown's binary is not built. Returns the binary path on success."""
+    """Skip (or HARD-FAIL under ``POKER_SOLVER_REQUIRE_BROWN_PARITY=1``)
+    if Brown's binary is not built. Returns the binary path on success."""
     assert find_brown_binary is not None  # narrowed by _require_preconditions
     binary = find_brown_binary()
     if binary is None or not Path(binary).exists():
-        pytest.skip(
+        _skip_or_fail(
             "Brown's river_solver_optimized not built; "
             "run `bash scripts/build_noambrown.sh` to enable parity tests."
         )
