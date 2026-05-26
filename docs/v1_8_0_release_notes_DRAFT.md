@@ -31,12 +31,17 @@ Two things land together in this release:
    entry point). v1.6.0 `.dmg` has been pulled from its GitHub Release;
    v1.8.0 ships the repackaged build.
 
-Expected per-iter speedup vs. v1.7.0 scalar baseline:
-
-- **Apple Silicon (M-series)**: ~4-8x
-- **x86_64 with AVX2** (~2013+ Intel/AMD): ~2-4x
-- **x86_64 SSE2-only** (pre-Haswell): ~1.5-2x
-- **Other architectures**: scalar path, no regression
+**SIMD vector kernels (cross-platform):** Explicit NEON/AVX2/SSE2
+intrinsics replace the previous scalar inner loops in `dcfr_vector.rs`.
+Bit-identical output; **measured wall-clock impact on Apple Silicon
+(M4 Pro, aarch64) is within noise (~1.0×)** because LLVM's
+autovectorizer at `-O3` already covers the small-slice case
+(action_count = 2-5 per decision row). Primary value is portability
+(x86_64 with explicit AVX2 dispatch, runtime-detected) and a stable
+hand-written floor that doesn't depend on the compiler's heuristics.
+x86_64 wall-clock measurement is pending (no AVX2 hardware in the
+bench fleet at time of write). Full benchmark report:
+`docs/v1_8_simd_perf_benchmark_2026-05-26.md`.
 
 ---
 
