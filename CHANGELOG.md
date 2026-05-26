@@ -42,7 +42,33 @@ will be tagged; v1.8.0 is the next clean release boundary. See
   the v1.8.0 build. A user-facing warning was also added to the
   release notes for v1.6.0.
 
+#### Fixed — Silent no-op on `solve --hunl-mode postflop --backend rust` (PR #69, `98fb503`)
+
+- **Silent no-op hardening**: PR #69 (`98fb503`) hard-fails the
+  `solve --hunl-mode postflop --backend rust` CLI when
+  `--initial-hole-cards` is missing; previously this path silently
+  returned empty strategies. Root cause: `chance_outcomes()` returned
+  `Vec::new()` defensively when `hole_cards = None`, so the scalar CFR
+  loop iterated over zero outcomes and `strategy_sum` stayed empty
+  across all iterations; the exploitability recompute then walked a
+  near-empty tree with uniform-fallback strategy cache and reported
+  bogus numbers. Two surgical additive validation checks (Rust
+  `validate_config` + Python `_build_postflop_config`) close the
+  asymmetry with the vector-form path which already rejected the
+  inverse case at `dcfr_vector.rs:806-811`. No behavior change for
+  callers already supplying `initial_hole_cards`. See
+  [`docs/chance_outcomes_empty_rca_2026-05-26.md`](docs/chance_outcomes_empty_rca_2026-05-26.md).
+
 ### Known issues / Installation notes
+
+- **Apple Silicon arch hazard.** pyenv's x86_64 Python can't load the
+  arm64 `_rust.so`; use `.venv/bin/python` to avoid silent SKIPs in
+  parity / diff test runs. Symptoms: silent SKIPs in `pytest` output,
+  `ModuleNotFoundError` on `poker_solver._rust`, or `dlopen`
+  "missing symbol" errors when the underlying issue is actually an
+  arch mismatch. See
+  [`CONTRIBUTING.md`](CONTRIBUTING.md) +
+  [`docs/poker_solver_shim_fix_2026-05-26.md`](docs/poker_solver_shim_fix_2026-05-26.md).
 
 - **`poker-solver` shim may resolve to a broken Python env on first-time install.**
   If a stale editable-install `.pth` from a prior worktree lingers in another

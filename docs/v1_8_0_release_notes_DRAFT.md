@@ -258,27 +258,36 @@ in §3 and §4 above):
 This cleanup wave does not change any runtime behavior; it lifts the
 release boundary to a clean lint / docs / packaging baseline.
 
-### 8. Persona test status (post-v1.8 SIMD + W3.2 + W3.4 retests)
+### 8. Persona test status (post-v1.8 SIMD + W3.2 + W3.3 + W3.4 retests)
 
 The persona-test framework's counts as of 2026-05-26 (post the W3.2 +
-W3.4 retests; W2.3 turn-fixture retest IN PROGRESS):
+W3.3 + W3.4 retests; W2.3 turn-fixture retest IN PROGRESS):
 
 | Verdict | Count | Workflows |
 |---|---|---|
-| **PASS** | **9** | W1.1, W1.2, W1.3, W1.4, W2.5, W3.1, **W3.2** (new), **W3.4** (caveated), W4.1, W4.3 *(W4.3 via aggregator path)* |
-| **PARTIAL** | 5 | W1.5, W2.1, W2.2, W2.4, W3.3, W4.2 |
+| **PASS** | **10** | W1.1, W1.2, W1.3, W1.4, W2.5, W3.1, **W3.2** (new), **W3.3** (new; P2 closing test), **W3.4** (caveated), W4.1, W4.3 *(W4.3 via aggregator path)* |
+| **PARTIAL** | 4 | W1.5, W2.1, W2.2, W2.4, W4.2 |
 | **BLOCKED** | 2 | W2.3 *(pending retest)*, others closed by v1.8 + PR #38 |
 | **FAIL** | 1 | W3.5 *(Type B-DOC; docs-only follow-up, no code patch needed per `v1_7_1_wrapper_fix_spec.md`)* |
 
-**Net delta vs the 2026-05-25 snapshot (7 / 5 / 4 / 2):** +2 PASS, -2
-BLOCKED, -1 FAIL→PARTIAL (W3.5 reclassified to PARTIAL-Type-B-DOC
-after the v1.8 retest confirmed bit-identical-to-v1.7.0 behavior).
+**Net delta vs the 2026-05-25 snapshot (7 / 5 / 4 / 2):** +3 PASS, -2
+BLOCKED, -1 FAIL→PARTIAL, +1 PARTIAL→PASS (W3.3 PARTIAL → PASS via
+PR #66 P2 closing test for node-locking-at-scale; W3.5 reclassified to
+PARTIAL-Type-B-DOC after the v1.8 retest confirmed bit-identical-to-v1.7.0
+behavior).
 
 - **W3.2: BLOCKED → PASS.** PR 76 (PR #38, commit `feee974`) shipped
   `solve_best_response(game, opponent_strategy, *, hero_player)` plus
   a `poker-solver best-response` CLI subcommand; the Kuhn smoke shows
   `exploit_gap_bb > 0` on both seats. Type A (correctness; cleared the
   named API blocker). Source: `docs/persona_w3_2_smoke_2026-05-26.md`.
+- **W3.3: PARTIAL → PASS.** PR #66 (P2 closing test for
+  node-locking-at-scale) — all 4 acceptance criteria PASS (lock
+  passthrough bit-exact <1e-9; villain L1 = 0.3070 at facing-raise
+  node; EV invariant 5.0/5.0 BB on indifference manifold; 5 downstream
+  infosets diverge >1%); 3.00 s Python wall-clock (well under Daniel's
+  15 min budget). Type A (correctness; node-locking primitive verified
+  at scale). Source: `docs/persona_w3_3_retest_2026-05-26.md`.
 - **W3.4: BLOCKED → PASS (caveated).** PASS on the **repurposed**
   monotone-river 3-bet-pot polarization fixture (80.71 s wall-clock,
   27% of the Sarah 300 s gate); all 7 acceptance thresholds met.
@@ -293,8 +302,8 @@ after the v1.8 retest confirmed bit-identical-to-v1.7.0 behavior).
   code patch needed). Source:
   `docs/persona_w3_5_retest_2026-05-26.md`.
 - **W2.3: PENDING.** Post-v1.8 retest agent in flight (`a99ec2e`) on
-  the pre-staged turn fixture. Final tally will be 9 or 10 PASS / 1 or
-  2 BLOCKED depending on the wall-clock measurement.
+  the pre-staged turn fixture. Final tally will be 10 or 11 PASS / 1
+  or 2 BLOCKED depending on the wall-clock measurement.
 
 Full per-workflow status: `docs/persona_test_status_2026-05-26.md`
 (supersedes the 2026-05-25 baseline). The post-v1.8 audit framing is
@@ -379,6 +388,28 @@ work:
   v1.8.0 release boundary: the v1.5 Brown apples-to-apples
   acceptance test (Dry-run #10) is the canonical pass; Gate 4 was
   a secondary high-iter sanity check.
+- **Silent no-op hardening (resolved, PR #69 / `98fb503`).** PR #69
+  hard-fails the `solve --hunl-mode postflop --backend rust` CLI when
+  `--initial-hole-cards` is missing; previously this path silently
+  returned empty strategies (root cause: `chance_outcomes()` returned
+  `Vec::new()` defensively when `hole_cards = None`, so the scalar
+  CFR loop iterated over zero outcomes and `strategy_sum` stayed empty
+  across all iterations — the exploitability recompute then walked a
+  near-empty tree with uniform-fallback strategy cache and reported
+  bogus numbers). Two surgical additive validation checks (~5 LOC each)
+  close the asymmetry with the vector-form path (which already rejected
+  the inverse case at `dcfr_vector.rs:806-811`); no behavior change for
+  callers already supplying `initial_hole_cards`. This caused at least
+  one false-positive multi-hour investigation (Track A nohup, ~2 hours
+  of agent time on a zero-output experiment) before the RCA landed.
+  See `docs/chance_outcomes_empty_rca_2026-05-26.md`.
+- **Apple Silicon arch hazard (dev-environment, pre-existing).**
+  pyenv's x86_64 Python can't load the arm64 `_rust.so`; use
+  `.venv/bin/python` to avoid silent SKIPs. Symptoms: silent SKIPs
+  in `pytest` output for parity / diff tests, `ModuleNotFoundError`
+  on `poker_solver._rust`, or `dlopen` "missing symbol" errors when
+  the underlying issue is actually an arch mismatch. See `CONTRIBUTING.md`
+  + `docs/poker_solver_shim_fix_2026-05-26.md`.
 - **`poker-solver` PATH shim quirk (dev-environment, pre-existing).**
   If `poker-solver` on PATH fails with `ModuleNotFoundError: No module
   named 'poker_solver'`, the shim is likely resolving against a stale
