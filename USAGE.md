@@ -1,4 +1,4 @@
-# Using poker_solver — End-User Guide (v1.4.x)
+# Using poker_solver — End-User Guide (v1.7.x)
 
 For people who want to **use** the solver to improve their poker game,
 not develop it. You should be comfortable in a terminal and editing a

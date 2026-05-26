@@ -13,6 +13,26 @@ In-flight on feature branches; not yet merged to `main`.
 - v1.5/v2 follow-ups (Q3 exploitability slider reframe; range-based
   dealing; Rust callbacks; full-tree preflop).
 
+## [1.7.2] - 2026-05-26
+
+### Fixed — Critical .dmg fork-bomb on Finder launch (PR #42, 728206e)
+
+- The v1.6.0 `.dmg` (and any PyInstaller-built `.dmg` predating PR #42)
+  had a critical fork-bomb on Finder launch: double-clicking
+  `Poker Solver.app` on macOS spawned the app's `multiprocessing`
+  workers recursively because `multiprocessing.freeze_support()` was
+  missing from the PyInstaller entry point. The bug froze the user's
+  Mac (each spawned child re-launched the parent, exponentially).
+- **v1.6.0 `.dmg` asset has been retroactively pulled from the
+  GitHub Release.** The release page now carries a critical warning
+  pointing users at the v1.7.2 repackaged build (or the from-source
+  install) instead. See `docs/dmg_spawn_loop_rca_2026-05-26.md` for
+  the full RCA.
+- PR #42 (commit `728206e`) adds `multiprocessing.freeze_support()`
+  guard to the PyInstaller entry point, eliminating the fork-bomb on
+  the v1.7.2 build. A user-facing warning was also added to the
+  release notes for v1.6.0.
+
 ## [1.7.0] - 2026-05-23
 
 ### Added
@@ -34,6 +54,14 @@ In-flight on feature branches; not yet merged to `main`.
 - PR 44 .dmg packaging fix: VERIFIED on disk; ready for Gate 5 attachment
 
 ## [1.6.0] - 2026-05-23
+
+### Retroactive amendment (2026-05-26)
+
+The v1.6.0 `.dmg` has a critical fork-bomb on Finder launch — fixed
+in v1.7.2 (PR #42, commit `728206e`). The v1.6.0 `.dmg` asset has
+been retroactively pulled from the GitHub Release. See the v1.7.2
+entry above and `docs/dmg_spawn_loop_rca_2026-05-26.md` for the
+full RCA. Use the v1.7.2 repackaged build instead.
 
 ### Added — GUI Gate 2 (UI completeness)
 - **Range-vs-range solve panel** (PR 24a) — visual RvR mode with hero_player selector
