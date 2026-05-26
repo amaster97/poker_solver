@@ -10,8 +10,64 @@ and this project adheres to [semantic versioning](https://semver.org/spec/v2.0.0
 In-flight on feature branches; not yet merged to `main`.
 
 ### In progress
+- **v1.7.1** — placeholder (entry will be filled in when the ship lands).
 - v1.5/v2 follow-ups (Q3 exploitability slider reframe; range-based
   dealing; Rust callbacks; full-tree preflop).
+
+## [1.7.2] - unreleased, planned
+
+### Added — Release pipeline rigor
+
+- **CI-driven release workflow.** Replaces the hand-rolled bash ship
+  script with a CI-driven flow that survives long smoke matrices
+  end-to-end (previous bash flow timed out on Marcus-tier matrices).
+- **Pre-flight ship-bundle dry-run guard.** Catches packaging /
+  bundling drift before tag-push by running the full bundle assembly
+  in dry-run mode against the candidate tag.
+- **Silent-skip ban on acceptance tests.** Acceptance tests that
+  previously skipped silently when external binaries (e.g. Brown's
+  reference solver) were unbuilt now fail loudly with remediation
+  text, preventing accidental green CI on a skipped suite.
+
+### Honest scope
+
+- Release-pipeline hardening only; no engine behavior change, no
+  public API surface change. Patch bump.
+
+## [1.8.0] - unreleased, planned
+
+### Added — Cross-platform SIMD
+
+- **NEON + SSE/AVX + scalar fallback** for the DCFR hot kernels in
+  `crates/cfr_core/src/simd.rs`. The v1.0.1 NEON kernels are now
+  joined by x86_64 SSE/AVX kernels and a scalar fallback path, so
+  the solver runs at native-SIMD speed on every supported host and
+  degrades gracefully (not silently slower) on hosts without
+  vectorized intrinsics.
+- **Measured speedups (planned acceptance targets):**
+  - **4-8x faster on Apple Silicon** (NEON, M-series).
+  - **2-4x faster on x86 hosts** (SSE/AVX, Intel Mac + Linux x86_64
+    + Windows x86_64).
+- **Unblocks Sarah's turn workflow.** Turn-spot solve time drops
+  into Sarah's interactive budget on the Nash path; previously
+  turn spots were minutes (see USAGE.md §7b perf cliffs). Flop-spot
+  Nash remains long-running — aggregator (§5.2) stays the
+  recommended path for interactive flop queries.
+
+### Supported platforms (post-v1.8)
+
+- Apple Silicon (NEON)
+- Intel Macs (SSE/AVX)
+- Linux x86_64 (SSE/AVX)
+- Linux ARM64 (NEON)
+- Windows x86_64 (SSE/AVX)
+- Scalar fallback for anything else
+
+### Honest scope
+
+- SIMD-only ship. No engine semantics change, no public API surface
+  change; existing diff tests continue to gate bit-identical scalar
+  fallback parity against the Rust scalar path.
 
 ## [1.7.0] - 2026-05-23
 
@@ -364,10 +420,9 @@ In-flight on feature branches; not yet merged to `main`.
   exploitability decay may be slightly softer. Caveat documented in
   `SolveResult.exploitability_history` semantics (represents the unlocked
   side's regret only).
-- This is the v1.4.0 ship per the stagger-fallback path in
-  `docs/leg9_v1_4_0_ship_plan.md`. PR 22 (asymmetric initial-contributions,
-  unblocks W3.4 MDF queries) is queued for v1.4.1; it would compound MDF
-  use cases.
+- This is the v1.4.0 ship per the stagger-fallback path. PR 22
+  (asymmetric initial-contributions, unblocks W3.4 MDF queries) is
+  queued for v1.4.1; it would compound MDF use cases.
 
 ### Performance
 

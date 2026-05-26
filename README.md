@@ -11,14 +11,19 @@ locking. Goalpost: PioSolver-class HU local solving on a MacBook.
 
 ## Status
 
-- **Latest tagged release:** v1.6.0 (GUI Gate 2 surfaces — PR 24a + PR 24b). The
-  v1.0 → v1.6.0 trajectory is documented in [`CHANGELOG.md`](CHANGELOG.md).
-  v1.7.0 (aggregator→vector wiring + CLI subcommands) is in flight;
-  v1.6.1 (engine bundle, deep-cap investigation) is held pending the
-  A83 acceptance test resolution.
+- **Latest tagged release:** v1.7.0 (joint range-Nash API
+  `solve_range_vs_range_nash` + CLI subcommands `pushfold` / `river` /
+  `parity`). The v1.0 → v1.7.0 trajectory is documented in
+  [`CHANGELOG.md`](CHANGELOG.md). **v1.7.1 is in flight; v1.7.2 (CI
+  release workflow + pre-flight ship-bundle dry-run + silent-skip ban)
+  and v1.8.0 (cross-platform SIMD) are planned.**
 - **License:** MIT.
-- **Platforms:** macOS (Apple Silicon primary), Linux. Intel Mac is
-  source-build only.
+- **Supported platforms (current):** macOS Apple Silicon (primary),
+  macOS Intel (source-build), Linux x86_64, Linux ARM64. NEON SIMD
+  kernels are active on Apple Silicon today (v1.0.1).
+- **Supported platforms (post-v1.8):** Apple Silicon (NEON), Intel
+  Macs (SSE/AVX), Linux x86_64 (SSE/AVX), Linux ARM64 (NEON), Windows
+  x86_64 (SSE/AVX). Scalar fallback for anything else.
 - **Python:** 3.9+. Rust toolchain required (stable channel).
 - **Working install path:** source build (`pip install -e .`).
 - **`.dmg` installer:** experimental — see "macOS install (.dmg,
