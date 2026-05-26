@@ -939,6 +939,7 @@ mod tests {
             abstraction_path: None,
             abstraction_version: None,
             use_pcs: false,
+        terminal_utility_convention: "rust".to_string(),
         }
     }
 
@@ -1039,6 +1040,7 @@ mod tests {
             abstraction_path: None,
             abstraction_version: None,
             use_pcs: false,
+        terminal_utility_convention: "rust".to_string(),
         };
 
         // Hero (P0): AA + KK = 12 combos (6 each).

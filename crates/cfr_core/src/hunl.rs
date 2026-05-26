@@ -232,6 +232,78 @@ pub struct HUNLConfig {
     /// `use_pcs` to the Python tier is deferred to a follow-up PR; this
     /// avoids landing a half-wired Python surface for v1.0.1.
     pub use_pcs: bool,
+    /// Terminal-utility convention selector (PR 93 — ablation experiment).
+    ///
+    /// `"rust"` (default): zero-sum subgame, winner gets `c_loser/bb`,
+    /// loser pays `-c_self/bb`. Sum = 0. Carry-forward dead money in
+    /// `initial_pot` is NOT awarded to the winner inside the subgame.
+    /// This is the historical convention used by all v1.0.0 - v1.8.0
+    /// Python + Rust paths.
+    ///
+    /// `"brown"`: constant-sum, winner gets `(base_pot + c_loser)/bb`,
+    /// loser pays `-c_self/bb`. Sum = `base_pot/bb` (constant offset).
+    /// Mirrors Noam Brown's `vector_eval.cpp:90-162` + `trainer.cpp:147-159`
+    /// terminal payoff. Here `base_pot` is the dead money carried into the
+    /// subgame: `cfg.initial_pot - sum(cfg.initial_contributions)` when
+    /// `initial_contributions != (0, 0)`; otherwise `cfg.initial_pot`
+    /// (the `(0, 0)`-with-`initial_pot` form of subgame entry).
+    ///
+    /// Any unknown string is rejected during deserialization. The flag
+    /// is purely additive — default behavior is unchanged.
+    #[serde(default = "default_terminal_utility_convention")]
+    pub terminal_utility_convention: String,
+}
+
+fn default_terminal_utility_convention() -> String {
+    "rust".to_string()
+}
+
+/// Two-valued enum for terminal-utility convention (PR 93). Parsed once
+/// from `HUNLConfig::terminal_utility_convention` at the leaf-payoff call
+/// site; not stored to keep the public config shape JSON-friendly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalUtilityConvention {
+    /// Zero-sum subgame; winner gets only the opponent's contribution.
+    Rust,
+    /// Constant-sum; winner gets the dead-money `base_pot` plus the
+    /// opponent's contribution. Matches Noam Brown's reference solver.
+    Brown,
+}
+
+impl TerminalUtilityConvention {
+    /// Parse the config string. Returns `Err` on unknown values so the
+    /// solver fails LOUDLY rather than silently falling back to a default
+    /// (per `feedback_silent_skip_hazard.md`).
+    ///
+    /// Named `parse` instead of `from_str` to avoid Clippy's
+    /// `should_implement_trait` lint; we want fallible parsing without
+    /// pulling in the `std::str::FromStr` trait surface.
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "rust" => Ok(Self::Rust),
+            "brown" => Ok(Self::Brown),
+            other => Err(format!(
+                "unknown terminal_utility_convention {other:?} (expected \"rust\" or \"brown\")"
+            )),
+        }
+    }
+}
+
+/// Compute Brown's full "dead-money" pot for the subgame.
+///
+/// Brown's `RiverGame::initial_state` (`river_holdem.py:195`) starts
+/// `state.contrib = (0, 0)` and stashes the carry-forward pot in
+/// `self.base_pot = config.pot`. His `pot_total(state) = base_pot +
+/// state.contrib[0] + state.contrib[1]` therefore counts dead money
+/// PLUS the in-subgame contributions. In our representation we fold the
+/// prior-street contributions into `state.contributions` (so they
+/// start at `cfg.initial_contributions`, not `(0, 0)`). To convert
+/// between conventions cleanly we treat `cfg.initial_pot` as the
+/// **full Brown base_pot** and subtract `cfg.initial_contributions[i]`
+/// from each `state.contributions[i]` when computing the subgame
+/// contribution. See `docs/terminal_utility_audit_2026-05-26.md` §1.4.
+pub fn brown_base_pot(config: &HUNLConfig) -> i32 {
+    config.initial_pot
 }
 
 impl Default for HUNLConfig {
@@ -257,6 +329,7 @@ impl Default for HUNLConfig {
             abstraction_path: None,
             abstraction_version: None,
             use_pcs: false,
+            terminal_utility_convention: "rust".to_string(),
         }
     }
 }
@@ -483,40 +556,99 @@ impl HUNLState {
     /// Per-player utility in big-blind units. Mirrors Python's
     /// `HUNLPoker.utility`. Only valid when `is_terminal()`.
     pub fn utility(&self) -> [f64; 2] {
+        // PR 93: branch on terminal_utility_convention. "rust" preserves
+        // the zero-sum payoff used since v1.0.0; "brown" reproduces Noam
+        // Brown's constant-sum payoff per `vector_eval.py:120` (and
+        // `vector_eval.cpp:90-162`).
+        //
+        // Brown's accounting:
+        //   pot_total = base_pot + state.contrib_subgame[0] + state.contrib_subgame[1]
+        //   winner     = pot_total - contrib_subgame_winner
+        //   loser      = -contrib_subgame_loser
+        //   tie (each) = pot_total/2 - contrib_subgame_player
+        //
+        // Map to our representation: contrib_subgame[i] =
+        // state.contributions[i] - cfg.initial_contributions[i],
+        // base_pot = cfg.initial_pot. See `brown_base_pot` doc above.
+        let convention = TerminalUtilityConvention::parse(
+            &self.config.terminal_utility_convention,
+        )
+        .expect("validated at config-deserialize boundary");
         let bb = self.config.big_blind as f64;
         let c0 = self.contributions[0] as f64;
         let c1 = self.contributions[1] as f64;
-        if self.folded[0] {
-            return [-c0 / bb, c0 / bb];
-        }
-        if self.folded[1] {
-            return [c1 / bb, -c1 / bb];
-        }
-        let hole = self.hole_cards.expect("showdown requires dealt hole cards");
-        // Build 7-card hand: hole + board.
-        let board = &self.board;
-        debug_assert!(
-            board.len() == 5,
-            "showdown requires a 5-card board, got {} cards",
-            board.len()
-        );
-        let mut seven0 = [0u8; 7];
-        let mut seven1 = [0u8; 7];
-        seven0[0] = hole[0][0];
-        seven0[1] = hole[0][1];
-        seven1[0] = hole[1][0];
-        seven1[1] = hole[1][1];
-        seven0[2..7].copy_from_slice(&board[..5]);
-        seven1[2..7].copy_from_slice(&board[..5]);
-        let s0 = crate::hunl_eval::Strength::evaluate_7(&seven0);
-        let s1 = crate::hunl_eval::Strength::evaluate_7(&seven1);
-        if s0 > s1 {
-            [c1 / bb, -c1 / bb]
-        } else if s1 > s0 {
-            [-c0 / bb, c0 / bb]
-        } else {
-            // Tie — Python returns (0.0, 0.0), matching here.
-            [0.0, 0.0]
+        match convention {
+            TerminalUtilityConvention::Rust => {
+                if self.folded[0] {
+                    return [-c0 / bb, c0 / bb];
+                }
+                if self.folded[1] {
+                    return [c1 / bb, -c1 / bb];
+                }
+                let hole = self.hole_cards.expect("showdown requires dealt hole cards");
+                let board = &self.board;
+                debug_assert!(
+                    board.len() == 5,
+                    "showdown requires a 5-card board, got {} cards",
+                    board.len()
+                );
+                let mut seven0 = [0u8; 7];
+                let mut seven1 = [0u8; 7];
+                seven0[0] = hole[0][0];
+                seven0[1] = hole[0][1];
+                seven1[0] = hole[1][0];
+                seven1[1] = hole[1][1];
+                seven0[2..7].copy_from_slice(&board[..5]);
+                seven1[2..7].copy_from_slice(&board[..5]);
+                let s0 = crate::hunl_eval::Strength::evaluate_7(&seven0);
+                let s1 = crate::hunl_eval::Strength::evaluate_7(&seven1);
+                if s0 > s1 {
+                    [c1 / bb, -c1 / bb]
+                } else if s1 > s0 {
+                    [-c0 / bb, c0 / bb]
+                } else {
+                    [0.0, 0.0]
+                }
+            }
+            TerminalUtilityConvention::Brown => {
+                let init_c0 = self.config.initial_contributions[0] as f64;
+                let init_c1 = self.config.initial_contributions[1] as f64;
+                let base_pot = brown_base_pot(&self.config) as f64;
+                // contrib_subgame[i] = total contribution minus prior-street init.
+                let cs0 = c0 - init_c0;
+                let cs1 = c1 - init_c1;
+                let pot_total = base_pot + cs0 + cs1;
+                if self.folded[0] {
+                    return [-cs0 / bb, (pot_total - cs1) / bb];
+                }
+                if self.folded[1] {
+                    return [(pot_total - cs0) / bb, -cs1 / bb];
+                }
+                let hole = self.hole_cards.expect("showdown requires dealt hole cards");
+                let board = &self.board;
+                debug_assert!(
+                    board.len() == 5,
+                    "showdown requires a 5-card board, got {} cards",
+                    board.len()
+                );
+                let mut seven0 = [0u8; 7];
+                let mut seven1 = [0u8; 7];
+                seven0[0] = hole[0][0];
+                seven0[1] = hole[0][1];
+                seven1[0] = hole[1][0];
+                seven1[1] = hole[1][1];
+                seven0[2..7].copy_from_slice(&board[..5]);
+                seven1[2..7].copy_from_slice(&board[..5]);
+                let s0 = crate::hunl_eval::Strength::evaluate_7(&seven0);
+                let s1 = crate::hunl_eval::Strength::evaluate_7(&seven1);
+                if s0 > s1 {
+                    [(pot_total - cs0) / bb, -cs1 / bb]
+                } else if s1 > s0 {
+                    [-cs0 / bb, (pot_total - cs1) / bb]
+                } else {
+                    [(pot_total / 2.0 - cs0) / bb, (pot_total / 2.0 - cs1) / bb]
+                }
+            }
         }
     }
 
@@ -1244,6 +1376,100 @@ mod tests {
         // P0 wins → P0 = c1/BB = 500/100 = 5.0, P1 = -c0/BB = -5.0
         assert!((u[0] - 5.0).abs() < 1e-9, "P0 utility = {}", u[0]);
         assert!((u[1] - (-5.0)).abs() < 1e-9, "P1 utility = {}", u[1]);
+    }
+
+    /// PR 93 canonical-leaf semantics: the standard acceptance fixture
+    /// (`initial_pot=1000`, `initial_contributions=(500,500)`, `bb=100`,
+    /// P0 folds after P1 checks at the river root). The Rust convention
+    /// returns `(-5, +5)` BB (zero-sum loss/win), the Brown convention
+    /// returns `(0, +10)` BB (winner collects the full $1000 pot in chip
+    /// terms = 10 BB).
+    ///
+    /// Why: under Brown's notation `state.contrib_subgame=(0,0)` (neither
+    /// player added chips in this subgame), `base_pot=1000` (full prior
+    /// pot is dead money). `pot_total = 1000 + 0 + 0 = 1000`. Winner gets
+    /// `pot_total - contrib_self = 1000 - 0 = 1000` chips = 10 BB; loser
+    /// gets `-contrib_self = 0`. Our `state.contributions=(500,500)`
+    /// reflects the prior-street contributions credited to each player;
+    /// subtracting `initial_contributions=(500,500)` recovers Brown's
+    /// `contrib_subgame=(0,0)` invariant.
+    #[test]
+    fn pr93_canonical_leaf_matches_spec() {
+        let board = vec![
+            card_to_int(14, 0),
+            card_to_int(7, 3),
+            card_to_int(2, 2),
+            card_to_int(13, 1),
+            card_to_int(5, 0),
+        ];
+        let hole = [
+            [card_to_int(14, 1), card_to_int(13, 3)],
+            [card_to_int(12, 2), card_to_int(12, 1)],
+        ];
+        let base = HUNLConfig {
+            starting_stack: 1000,
+            starting_street: Street::River,
+            initial_board: board,
+            initial_pot: 1000,
+            initial_contributions: [500, 500],
+            initial_hole_cards: Some(hole),
+            ..Default::default()
+        };
+
+        // rust convention: P0 folds → (-c0/bb, c0/bb) = (-5, +5)
+        let s_rust = HUNLState::initial(Arc::new(base.clone()));
+        let term_rust = s_rust.apply(ACTION_CHECK).apply(ACTION_FOLD);
+        let u_rust = term_rust.utility();
+        assert_eq!(u_rust, [-5.0, 5.0], "rust convention canonical leaf");
+
+        // brown convention: P0 folds → (0, +10).
+        let cfg_brown = HUNLConfig {
+            terminal_utility_convention: "brown".to_string(),
+            ..base.clone()
+        };
+        let s_brown = HUNLState::initial(Arc::new(cfg_brown));
+        let term_brown = s_brown.apply(ACTION_CHECK).apply(ACTION_FOLD);
+        let u_brown = term_brown.utility();
+        assert_eq!(u_brown, [0.0, 10.0], "brown convention canonical leaf");
+    }
+
+    /// PR 93: sanity-check Brown's tie + showdown branches reduce to the
+    /// expected formulae on the acceptance fixture. Drive P0 and P1
+    /// checks (no chips moved), so contrib_subgame = (0, 0), pot_total =
+    /// initial_pot = 1000, and the leaf is a showdown evaluation.
+    #[test]
+    fn pr93_brown_showdown_check_check_leaf() {
+        let board = vec![
+            card_to_int(14, 0),
+            card_to_int(7, 3),
+            card_to_int(2, 2),
+            card_to_int(13, 1),
+            card_to_int(5, 0),
+        ];
+        // P0 holds Ah Kc → top two pair on this board; P1 holds Qd Qh → QQ underpair.
+        let hole = [
+            [card_to_int(14, 1), card_to_int(13, 3)],
+            [card_to_int(12, 2), card_to_int(12, 1)],
+        ];
+        let base = HUNLConfig {
+            starting_stack: 1000,
+            starting_street: Street::River,
+            initial_board: board,
+            initial_pot: 1000,
+            initial_contributions: [500, 500],
+            initial_hole_cards: Some(hole),
+            ..Default::default()
+        };
+
+        let cfg_brown = HUNLConfig {
+            terminal_utility_convention: "brown".to_string(),
+            ..base.clone()
+        };
+        let s_brown = HUNLState::initial(Arc::new(cfg_brown));
+        let term_brown = s_brown.apply(ACTION_CHECK).apply(ACTION_CHECK);
+        let u_brown = term_brown.utility();
+        // P0 wins → P0 = (pot_total - cs0)/bb = (1000 - 0)/100 = 10; P1 = -cs1/bb = 0.
+        assert_eq!(u_brown, [10.0, 0.0], "brown showdown winner leaf");
     }
 
     #[test]

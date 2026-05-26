@@ -120,6 +120,18 @@ class HUNLConfig:
     # compare equal as game configurations (the abstraction is a runtime
     # adjunct, not a game-rule field). Per consistency review v2 NEW-1.
     abstraction: AbstractionRef | None = field(default=None, compare=False, hash=False)
+    # PR 93 (terminal-utility ablation): ``"rust"`` (default) preserves the
+    # historical zero-sum payoff where the winner is credited only with the
+    # opponent's contribution (``c_loser/bb``). ``"brown"`` selects Noam
+    # Brown's constant-sum convention where the winner additionally collects
+    # the dead-money ``base_pot`` carried into the subgame, matching
+    # ``vector_eval.cpp`` in
+    # ``references/code/noambrown_poker_solver/cpp/``. Purely additive; no
+    # default behavior changes. See
+    # ``docs/terminal_utility_audit_2026-05-26.md`` for the formula
+    # derivation and ``scripts/a83_terminal_utility_ablation.py`` for the
+    # empirical comparison.
+    terminal_utility_convention: str = "rust"
 
     def __post_init__(self) -> None:
         # PR 31 (task #185): type validation at the dataclass boundary so
@@ -135,6 +147,13 @@ class HUNLConfig:
         self._validate_initial_board()
         self._validate_initial_hole_cards()
         self._validate_bet_size_fractions()
+        # PR 93: hard-fail on unknown convention strings; silent fallback
+        # would mask experiment misconfiguration.
+        if self.terminal_utility_convention not in ("rust", "brown"):
+            raise ValueError(
+                f"HUNLConfig.terminal_utility_convention must be "
+                f'"rust" or "brown"; got {self.terminal_utility_convention!r}'
+            )
 
         if self.rake_rate != 0.0:
             raise ValueError("rake_rate must be 0.0 in PR 3 (rake lands in PR 9)")
@@ -329,6 +348,26 @@ class HUNLState:
     pending_board_deals: int = 0
 
 
+def _brown_base_pot(config: HUNLConfig) -> int:
+    """Return Brown's full subgame ``base_pot`` for the Brown convention.
+
+    In ``references/code/noambrown_poker_solver/python/src/games/river_holdem.py:150``
+    Brown sets ``self.base_pot = int(config.pot)`` and starts
+    ``state.contrib = (0, 0)``. His ``pot_total(state) = base_pot +
+    contrib[0] + contrib[1]`` therefore accumulates dead money PLUS any
+    in-subgame chips moved.
+
+    Our representation pre-credits ``cfg.initial_contributions`` into
+    ``state.contributions``, so to recover Brown's ``contrib_subgame[i]``
+    we subtract ``cfg.initial_contributions[i]`` from
+    ``state.contributions[i]``. ``base_pot`` is just ``cfg.initial_pot``
+    (the full prior pot).
+
+    Mirrors ``brown_base_pot`` in ``crates/cfr_core/src/hunl.rs``.
+    """
+    return int(config.initial_pot)
+
+
 def default_tiny_subgame() -> HUNLConfig:
     """River-only AhKc vs QdQh subgame on As7c2dKh5s, pot 1000, stacks 1000.
 
@@ -458,9 +497,41 @@ class HUNLPoker:
         return state.street == Street.SHOWDOWN
 
     def utility(self, state: HUNLState) -> tuple[float, float]:
+        # PR 93: select terminal-utility convention. ``"rust"`` (default)
+        # preserves zero-sum payoff; ``"brown"`` reproduces Noam Brown's
+        # constant-sum payoff per ``vector_eval.py:120``.
+        #
+        # Brown's accounting:
+        #   pot_total = base_pot + contrib_subgame[0] + contrib_subgame[1]
+        #   winner    = pot_total - contrib_subgame_winner
+        #   loser     = -contrib_subgame_loser
+        # We map ``contrib_subgame[i] = state.contributions[i] -
+        # cfg.initial_contributions[i]`` and ``base_pot = cfg.initial_pot``.
         cfg = state.config
         bb = cfg.big_blind
         c0, c1 = state.contributions
+        if cfg.terminal_utility_convention == "brown":
+            init_c0, init_c1 = cfg.initial_contributions
+            cs0 = c0 - init_c0
+            cs1 = c1 - init_c1
+            base_pot = _brown_base_pot(cfg)
+            pot_total = base_pot + cs0 + cs1
+            if state.folded[0]:
+                return (-cs0 / bb, (pot_total - cs1) / bb)
+            if state.folded[1]:
+                return ((pot_total - cs0) / bb, -cs1 / bb)
+            # Showdown
+            hole = state.hole_cards
+            assert len(hole) == 2, "showdown reached with no hole cards dealt"
+            rank0 = evaluate(list(hole[0]) + list(state.board))
+            rank1 = evaluate(list(hole[1]) + list(state.board))
+            if rank0 > rank1:
+                return ((pot_total - cs0) / bb, -cs1 / bb)
+            if rank1 > rank0:
+                return (-cs0 / bb, (pot_total - cs1) / bb)
+            return ((pot_total / 2.0 - cs0) / bb, (pot_total / 2.0 - cs1) / bb)
+
+        # Default ("rust") convention — historical zero-sum payoff.
         if state.folded[0]:
             return (-c0 / bb, c0 / bb)
         if state.folded[1]:
@@ -924,6 +995,10 @@ def _serialize_hunl_config(config: HUNLConfig) -> str:
         # threading through the dataclass + validation + tests). See
         # docs/pr8_prep/audit_report.md should-fix #2 for the rationale.
         "use_pcs": False,
+        # PR 93: terminal-utility convention selector. Default "rust"
+        # preserves historical behavior; "brown" matches Noam Brown's
+        # constant-sum payoff. Reads validated at construction time.
+        "terminal_utility_convention": str(config.terminal_utility_convention),
     }
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
