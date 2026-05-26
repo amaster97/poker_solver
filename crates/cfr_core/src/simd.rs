@@ -193,6 +193,43 @@ pub fn normalize_scalar(out: &mut [f64], total: f64) {
     }
 }
 
+/// Scalar version of [`compute_strategy_row`] — fused regret-matching for a
+/// single hand row of length `A` (the action count).
+///
+/// For each lane `a`:
+///   - `regrets[a] > 0 ⇒ contributes `regrets[a]` to `normalizing` total`
+///   - `regrets[a] ≤ 0 ⇒ contributes 0 to total, output is 0.0`
+///
+/// If `normalizing > 0`: output is `r / normalizing` (positives only;
+/// non-positives stay 0.0). If `normalizing == 0`: output is uniform
+/// `1.0 / A` on every lane.
+///
+/// Mirrors `dcfr_vector::compute_strategy` (`trainer.cpp:72-98` shape) row
+/// for a single hand. Kept as a standalone helper so the SIMD path can
+/// produce bit-identical output and the parity test can compare lane-by-lane.
+#[inline]
+pub fn compute_strategy_row_scalar(regrets: &[f64], out: &mut [f64]) {
+    debug_assert_eq!(regrets.len(), out.len());
+    let mut normalizing = 0.0_f64;
+    for a in 0..regrets.len() {
+        let r = regrets[a];
+        if r > 0.0 {
+            normalizing += r;
+        }
+    }
+    if normalizing > 0.0 {
+        for a in 0..regrets.len() {
+            let r = regrets[a];
+            out[a] = if r > 0.0 { r / normalizing } else { 0.0 };
+        }
+    } else {
+        let prob = 1.0 / (regrets.len() as f64);
+        for a in 0..regrets.len() {
+            out[a] = prob;
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // aarch64 NEON kernels (active on Apple Silicon). Scalar fallbacks are used
 // for trailing lanes when `len % 2 != 0`.
@@ -482,22 +519,107 @@ mod neon {
             }
         }
     }
+
+    /// Fused regret-matching for one hand row (PR 67, v1.8 Phase 4).
+    ///
+    /// Computes `compute_strategy` semantics for a single row of length `A`:
+    /// clamp regrets to positives, sum sequentially (for bit-parity), then
+    /// either divide each positive by the sum (writing 0.0 for non-positive
+    /// lanes) or fill uniform `1/A` when sum is zero.
+    ///
+    /// Why a fused kernel rather than `positive_regrets_and_total` +
+    /// `normalize`: avoids the second pass over the row and the intermediate
+    /// "positive-only" buffer write. Single-pass clamp + sequential sum,
+    /// then single-pass divide. Bit-identical to `compute_strategy_row_scalar`.
+    ///
+    /// Sequential accumulation matches the scalar `+=` order exactly — same
+    /// discipline as `positive_regrets_and_total_neon` (see comments there).
+    ///
+    /// # Safety
+    /// `regrets` and `out` must have equal length. NEON loads/stores via
+    /// `vld1q_f64` / `vst1q_f64` are unaligned-safe on aarch64.
+    #[target_feature(enable = "neon")]
+    #[inline]
+    pub unsafe fn compute_strategy_row_neon(regrets: &[f64], out: &mut [f64]) {
+        debug_assert_eq!(regrets.len(), out.len());
+        let n = regrets.len();
+        let zero = vdupq_n_f64(0.0);
+        // Pass 1: clamp regrets into `out` so we can both (a) accumulate
+        // the row sum sequentially in scalar order and (b) reuse the
+        // clamped values for the divide in pass 2. This matches the scalar
+        // shape where `out[a] = if r > 0.0 { r / norm } else { 0.0 }` —
+        // the non-positive lanes are already 0.0 after clamp, and
+        // `0.0 / norm == 0.0`.
+        let mut i = 0usize;
+        while i + 2 <= n {
+            let v = vld1q_f64(regrets.as_ptr().add(i));
+            let clamped = vmaxq_f64(v, zero); // NaN-preserving
+            vst1q_f64(out.as_mut_ptr().add(i), clamped);
+            i += 2;
+        }
+        while i < n {
+            let r = regrets[i];
+            out[i] = if r.is_nan() {
+                f64::NAN
+            } else if r >= 0.0 {
+                r
+            } else {
+                0.0
+            };
+            i += 1;
+        }
+        // Sequential accumulation for bit-parity with scalar `compute_strategy`.
+        let mut normalizing = 0.0_f64;
+        for v in out.iter() {
+            normalizing += *v;
+        }
+        // Pass 2: divide-by-total or uniform fallback.
+        if normalizing > 0.0 {
+            let vtot = vdupq_n_f64(normalizing);
+            let mut i = 0usize;
+            while i + 2 <= n {
+                let v = vld1q_f64(out.as_ptr().add(i));
+                let scaled = vdivq_f64(v, vtot);
+                vst1q_f64(out.as_mut_ptr().add(i), scaled);
+                i += 2;
+            }
+            while i < n {
+                out[i] /= normalizing;
+                i += 1;
+            }
+        } else {
+            let uniform = 1.0 / (n as f64);
+            let vuni = vdupq_n_f64(uniform);
+            let mut i = 0usize;
+            while i + 2 <= n {
+                vst1q_f64(out.as_mut_ptr().add(i), vuni);
+                i += 2;
+            }
+            while i < n {
+                out[i] = uniform;
+                i += 1;
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
 // x86_64 SSE2 kernels (PR 61 — v1.8 Phase 1; extended by PR 63 Phase 2 for
-// `update_regret_sum_vector`, then by PR 70 Phase 3 for `update_strategy_sum`).
+// `update_regret_sum_vector`, by PR 70 Phase 3 for `update_strategy_sum`,
+// and by PR 71 Phase 4 for `compute_strategy_row`).
 // SSE2 is baseline on every x86_64 target (it's part of the x86_64 ABI), so
 // no runtime detection is needed — `target_arch = "x86_64"` implies SSE2
 // availability. The 4-lane AVX2 path (PR 68 — v1.8 Phase 2; extended by PR 70
-// for `update_strategy_sum`) is layered on top of this with runtime detection
-// via `is_x86_feature_detected!("avx2")`.
+// for `update_strategy_sum`, and by PR 71 for `compute_strategy_row`) is
+// layered on top of this with runtime detection via
+// `is_x86_feature_detected!("avx2")`.
 //
 // Scope: the discount kernel (PR 61/68), `update_regret_sum_vector`
-// (PR 63), and `update_strategy_sum` (PR 70) are SIMD-vectorized here.
-// The remaining kernels (positive_regrets_and_total, update_regret_sum
-// scalar variant, normalize) still keep scalar fallback on x86_64 for now;
-// extending them follows the same template.
+// (PR 63), `update_strategy_sum` (PR 70), and `compute_strategy_row`
+// (PR 71) are SIMD-vectorized here. The remaining kernels
+// (positive_regrets_and_total, update_regret_sum scalar variant,
+// normalize) still keep scalar fallback on x86_64 for now; extending
+// them follows the same template.
 // ---------------------------------------------------------------------------
 
 #[cfg(target_arch = "x86_64")]
@@ -653,11 +775,85 @@ mod sse2 {
             i += 1;
         }
     }
+
+    /// Fused regret-matching for one hand row (PR 71, v1.8 Phase 4) via SSE2.
+    ///
+    /// Same semantics as `compute_strategy_row_scalar`: clamp regrets to
+    /// positives via `_mm_max_pd` (NaN-preserving on x86 by spec — matches
+    /// NEON `vmaxq_f64`), sum sequentially for bit-parity with scalar, then
+    /// divide each lane (positives) by the total, or fall back to uniform
+    /// `1/A` when the total is zero.
+    ///
+    /// 2-lane main loop via `__m128d`; scalar tail for `n % 2 == 1`.
+    ///
+    /// # Safety
+    /// `regrets` and `out` must have equal length. SSE2 loads/stores via
+    /// `_mm_loadu_pd` / `_mm_storeu_pd` are unaligned-safe.
+    #[target_feature(enable = "sse2")]
+    #[inline]
+    pub unsafe fn compute_strategy_row_sse2(regrets: &[f64], out: &mut [f64]) {
+        debug_assert_eq!(regrets.len(), out.len());
+        let n = regrets.len();
+        let zero = _mm_setzero_pd();
+        // Pass 1: clamp regrets into `out`. Non-positives become 0.0 so
+        // the divide in pass 2 gives 0.0 / norm == 0.0 (matching scalar).
+        let mut i = 0usize;
+        while i + 2 <= n {
+            let v = _mm_loadu_pd(regrets.as_ptr().add(i));
+            let clamped = _mm_max_pd(v, zero); // NaN-preserving on x86 by spec
+            _mm_storeu_pd(out.as_mut_ptr().add(i), clamped);
+            i += 2;
+        }
+        while i < n {
+            let r = regrets[i];
+            out[i] = if r.is_nan() {
+                f64::NAN
+            } else if r >= 0.0 {
+                r
+            } else {
+                0.0
+            };
+            i += 1;
+        }
+        // Sequential accumulation for bit-parity with scalar.
+        let mut normalizing = 0.0_f64;
+        for v in out.iter() {
+            normalizing += *v;
+        }
+        // Pass 2: divide-by-total or uniform fallback.
+        if normalizing > 0.0 {
+            let vtot = _mm_set1_pd(normalizing);
+            let mut i = 0usize;
+            while i + 2 <= n {
+                let v = _mm_loadu_pd(out.as_ptr().add(i));
+                let scaled = _mm_div_pd(v, vtot);
+                _mm_storeu_pd(out.as_mut_ptr().add(i), scaled);
+                i += 2;
+            }
+            while i < n {
+                out[i] /= normalizing;
+                i += 1;
+            }
+        } else {
+            let uniform = 1.0 / (n as f64);
+            let vuni = _mm_set1_pd(uniform);
+            let mut i = 0usize;
+            while i + 2 <= n {
+                _mm_storeu_pd(out.as_mut_ptr().add(i), vuni);
+                i += 2;
+            }
+            while i < n {
+                out[i] = uniform;
+                i += 1;
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
 // x86_64 AVX2 kernels (PR 68 — v1.8 Phase 2; extended by PR 70 Phase 3
-// for `update_strategy_sum`). AVX2 is NOT baseline on x86_64 (introduced
+// for `update_strategy_sum`, and by PR 71 Phase 4 for
+// `compute_strategy_row`). AVX2 is NOT baseline on x86_64 (introduced
 // with Haswell, 2013); presence varies across deployed hardware (older
 // Sandy/Ivy Bridge Intel Macs lack it). We compile the AVX2 functions
 // unconditionally on `target_arch = "x86_64"` and gate the call site with
@@ -819,6 +1015,96 @@ mod avx2 {
         while i < n {
             strategy_sum[i] += own_reach * strategy[i];
             i += 1;
+        }
+    }
+
+    /// Fused regret-matching for one hand row (PR 71, v1.8 Phase 4) via AVX2.
+    ///
+    /// Same semantics as `compute_strategy_row_scalar` / `_sse2`. 4-lane
+    /// main loop via `_mm256_max_pd` + `_mm256_div_pd`; 2-lane SSE2
+    /// epilogue + scalar tail for `n % 4`. Sequential sum for bit-parity.
+    ///
+    /// # Safety
+    /// `regrets` and `out` must have equal length. Caller MUST have verified
+    /// `is_x86_feature_detected!("avx2")` (the `#[target_feature(enable =
+    /// "avx2")]` attribute makes the compiler emit AVX2 instructions; calling
+    /// on a non-AVX2 host is UB).
+    #[target_feature(enable = "avx2")]
+    #[inline]
+    pub unsafe fn compute_strategy_row_avx2(regrets: &[f64], out: &mut [f64]) {
+        debug_assert_eq!(regrets.len(), out.len());
+        let n = regrets.len();
+        let zero256 = _mm256_setzero_pd();
+        // Pass 1a: 4-lane AVX2 clamp.
+        let mut i = 0usize;
+        while i + 4 <= n {
+            let v = _mm256_loadu_pd(regrets.as_ptr().add(i));
+            let clamped = _mm256_max_pd(v, zero256); // NaN-preserving on x86
+            _mm256_storeu_pd(out.as_mut_ptr().add(i), clamped);
+            i += 4;
+        }
+        // Pass 1b: 2-lane SSE2 clamp epilogue.
+        let zero128 = _mm_setzero_pd();
+        while i + 2 <= n {
+            let v = _mm_loadu_pd(regrets.as_ptr().add(i));
+            let clamped = _mm_max_pd(v, zero128);
+            _mm_storeu_pd(out.as_mut_ptr().add(i), clamped);
+            i += 2;
+        }
+        while i < n {
+            let r = regrets[i];
+            out[i] = if r.is_nan() {
+                f64::NAN
+            } else if r >= 0.0 {
+                r
+            } else {
+                0.0
+            };
+            i += 1;
+        }
+        // Sequential accumulation for bit-parity with scalar.
+        let mut normalizing = 0.0_f64;
+        for v in out.iter() {
+            normalizing += *v;
+        }
+        // Pass 2: divide-by-total or uniform fallback.
+        if normalizing > 0.0 {
+            let vtot256 = _mm256_set1_pd(normalizing);
+            let mut i = 0usize;
+            while i + 4 <= n {
+                let v = _mm256_loadu_pd(out.as_ptr().add(i));
+                let scaled = _mm256_div_pd(v, vtot256);
+                _mm256_storeu_pd(out.as_mut_ptr().add(i), scaled);
+                i += 4;
+            }
+            let vtot128 = _mm_set1_pd(normalizing);
+            while i + 2 <= n {
+                let v = _mm_loadu_pd(out.as_ptr().add(i));
+                let scaled = _mm_div_pd(v, vtot128);
+                _mm_storeu_pd(out.as_mut_ptr().add(i), scaled);
+                i += 2;
+            }
+            while i < n {
+                out[i] /= normalizing;
+                i += 1;
+            }
+        } else {
+            let uniform = 1.0 / (n as f64);
+            let vuni256 = _mm256_set1_pd(uniform);
+            let mut i = 0usize;
+            while i + 4 <= n {
+                _mm256_storeu_pd(out.as_mut_ptr().add(i), vuni256);
+                i += 4;
+            }
+            let vuni128 = _mm_set1_pd(uniform);
+            while i + 2 <= n {
+                _mm_storeu_pd(out.as_mut_ptr().add(i), vuni128);
+                i += 2;
+            }
+            while i < n {
+                out[i] = uniform;
+                i += 1;
+            }
         }
     }
 }
@@ -1055,6 +1341,47 @@ pub fn update_strategy_sum(strategy_sum: &mut [f64], strategy: &[f64], own_reach
         not(any(target_arch = "aarch64", target_arch = "x86_64"))
     ))]
     update_strategy_sum_scalar(strategy_sum, strategy, own_reach)
+}
+
+/// Fused regret-matching for one hand row (PR 71 — v1.8 Phase 4) —
+/// public dispatch.
+///
+/// Equivalent to the per-hand body of `VectorDCFR::compute_strategy`:
+/// clamp regrets to positives, sum sequentially, divide each positive
+/// by the total, or fill with uniform `1/A` when total is zero.
+///
+/// Dispatch order:
+///   - `aarch64` + not `force_scalar` → NEON (compile-time, always present)
+///   - `x86_64` + not `force_scalar` → AVX2 if `is_x86_feature_detected!`
+///     at runtime, else SSE2 (baseline on x86_64), else scalar.
+///   - else → scalar fallback
+#[inline]
+pub fn compute_strategy_row(regrets: &[f64], out: &mut [f64]) {
+    #[cfg(all(target_arch = "aarch64", not(feature = "force_scalar")))]
+    // SAFETY: NEON is unconditionally available on AArch64; equal-length
+    // slices bounds-checked; loads/stores are unaligned-safe.
+    unsafe {
+        neon::compute_strategy_row_neon(regrets, out)
+    }
+    #[cfg(all(
+        target_arch = "x86_64",
+        not(target_arch = "aarch64"),
+        not(feature = "force_scalar")
+    ))]
+    {
+        // SAFETY: AVX2 (when detected) / SSE2 (always baseline on x86_64).
+        // Slice bounds checked; loads/stores unaligned-safe.
+        if std::is_x86_feature_detected!("avx2") {
+            unsafe { avx2::compute_strategy_row_avx2(regrets, out) }
+        } else {
+            unsafe { sse2::compute_strategy_row_sse2(regrets, out) }
+        }
+    }
+    #[cfg(any(
+        feature = "force_scalar",
+        not(any(target_arch = "aarch64", target_arch = "x86_64"))
+    ))]
+    compute_strategy_row_scalar(regrets, out)
 }
 
 // ---------------------------------------------------------------------------

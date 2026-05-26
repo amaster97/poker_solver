@@ -205,30 +205,21 @@ impl VectorDCFR {
     /// Mirrors Brown's `Trainer::compute_strategy`
     /// (`trainer.cpp:72-98`, MIT): for each hand, sum positive regrets;
     /// if positive, normalize them as the strategy; else uniform.
+    ///
+    /// PR 71 (v1.8 Phase 4) routes the per-hand body through
+    /// `simd::compute_strategy_row` which dispatches NEON / AVX2 / SSE2 /
+    /// scalar based on the current target. The scalar implementation here
+    /// is preserved as the parity reference (and used unchanged on
+    /// non-vectorized targets via the scalar fallback inside the dispatch).
     fn compute_strategy(info: &VectorInfosetData, out: &mut [f64]) {
         let hand_count = info.hand_count;
         let action_count = info.action_count;
         debug_assert_eq!(out.len(), hand_count * action_count);
         for h in 0..hand_count {
             let offset = h * action_count;
-            let mut normalizing = 0.0_f64;
-            for a in 0..action_count {
-                let r = info.regret[offset + a];
-                if r > 0.0 {
-                    normalizing += r;
-                }
-            }
-            if normalizing > 0.0 {
-                for a in 0..action_count {
-                    let r = info.regret[offset + a];
-                    out[offset + a] = if r > 0.0 { r / normalizing } else { 0.0 };
-                }
-            } else {
-                let prob = 1.0 / action_count as f64;
-                for a in 0..action_count {
-                    out[offset + a] = prob;
-                }
-            }
+            let regrets_row = &info.regret[offset..offset + action_count];
+            let out_row = &mut out[offset..offset + action_count];
+            crate::simd::compute_strategy_row(regrets_row, out_row);
         }
     }
 
