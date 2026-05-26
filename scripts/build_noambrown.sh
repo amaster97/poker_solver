@@ -27,9 +27,29 @@ BUILD="$SRC/build"
 BIN="$BUILD/river_solver_optimized"
 
 if [[ ! -d "$SRC/src" ]]; then
-    echo "scripts/build_noambrown.sh: Brown source tree not found at $SRC/src" >&2
-    echo "  Run scripts/setup_references.sh to repopulate references/code/." >&2
-    exit 0
+    # Auto-bootstrap on fresh checkouts (CI, new clones): the references tree
+    # is gitignored, so `actions/checkout` won't bring it in. Try to clone it
+    # via the canonical setup script before giving up. If git is unavailable
+    # or the clone fails, fall through to the soft-fail (preserves the
+    # original semantics for hosts that explicitly opt out of references).
+    SETUP="$SCRIPT_DIR/setup_references.sh"
+    if [[ -x "$SETUP" ]] || [[ -f "$SETUP" ]]; then
+        if command -v git >/dev/null 2>&1; then
+            echo "scripts/build_noambrown.sh: Brown source tree missing at $SRC/src; bootstrapping via setup_references.sh"
+            if ! sh "$SETUP"; then
+                echo "scripts/build_noambrown.sh: setup_references.sh failed; skipping Brown build." >&2
+                exit 0
+            fi
+        else
+            echo "scripts/build_noambrown.sh: git not on PATH; cannot bootstrap references. Skipping." >&2
+            exit 0
+        fi
+    fi
+    if [[ ! -d "$SRC/src" ]]; then
+        echo "scripts/build_noambrown.sh: Brown source tree still not found at $SRC/src" >&2
+        echo "  Run scripts/setup_references.sh to repopulate references/code/." >&2
+        exit 0
+    fi
 fi
 
 # Idempotency probe: if binary exists and no source file is newer, we're done.
