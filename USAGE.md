@@ -66,7 +66,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --defaul
 source "$HOME/.cargo/env"
 
 pip install -e .            # Build and install Python + Rust
-pip install -e .[ui]        # Optional UI extra
+pip install -e ".[ui]"      # Optional UI extra (quote for zsh)
 ```
 
 Gives you the `poker-solver` CLI and the `poker_solver` Python package.
@@ -620,10 +620,13 @@ description, so the same configuration always resolves to the same row.
 ## 7. Known limitations (v1.0.0)
 
 - **UI is mock mode.** Clicking **Solve** returns fixture data, not
-  real strategies. Wait for PR 10b (expected v1.1) or use the CLI.
-- **No HUNL solving above 15 BB yet.** `--hunl-mode full` raises
-  `NotImplementedError`; full preflop is shipping in v1.1.0. Working
-  paths today: the river subgame solver (`--hunl-mode tiny_subgame`) and
+  real strategies. The real-solver swap is tracked as PR 10b (not yet
+  shipped as of v1.7.x); use the CLI for real strategies today.
+- **No full-tree HUNL solving above 15 BB yet.** `--hunl-mode full`
+  raises `NotImplementedError`. Fixed-hole-card preflop shipped in
+  v1.1.0 (`solve_hunl_preflop`); full-tree preflop with the chance node
+  over hole cards is still pending. Working paths today: the river
+  subgame solver (`--hunl-mode tiny_subgame`) and
   ad-hoc postflop subgames (`--hunl-mode postflop`). Short stacks: use
   the charts in §3a. Note: `--hunl-mode postflop` enumerates the full
   hole-card chance node, so tree construction dominates wall-time —
@@ -642,6 +645,20 @@ description, so the same configuration always resolves to the same row.
 - **`--backend rust` is opt-in on postflop.** Python is the default
   because the reference implementation drives behavior; pass
   `--backend rust` explicitly for the performance tier.
+- **`pyenv` arch hazard on Apple Silicon (dev-env quirk).** A pyenv
+  Python built x86_64-only (notably `3.13-dev`) silently SKIPs Rust
+  diff-tests instead of running them — the arm64 `.so` won't load.
+  Check with `python -c "import platform; print(platform.machine())"`
+  (must be `arm64`); see [`CONTRIBUTING.md`](CONTRIBUTING.md)
+  §"Known development environment hazard" for the full fix.
+- **`poker-solver` shim may resolve to a broken Python env.** After
+  `pip install -e .` in temporary build dirs, the PATH shim
+  (`~/.pyenv/shims/poker-solver` on pyenv systems) can resolve to a
+  Python where `poker_solver` is no longer installed. Workarounds: use
+  `./.venv/bin/poker-solver ...` from the project root, or run
+  `python -m poker_solver.cli ...` with `.venv` activated. Full
+  diagnostic:
+  [`docs/poker_solver_shim_fix_2026-05-26.md`](docs/poker_solver_shim_fix_2026-05-26.md).
 
 ---
 
@@ -759,12 +776,14 @@ Regime guidance at a glance:
 
 The three items most likely to matter:
 
-- **PR 9 — full HUNL preflop solve.** Replaces the `NotImplementedError`
-  above 15 BB. Shipping in v1.1.0.
+- **PR 9 — HUNL preflop solve.** Shipped in v1.1.0 for fixed hole
+  cards (`solve_hunl_preflop` is exported from the top-level package).
+  Full-tree preflop with the chance node over hole cards is still
+  pending — `--hunl-mode full` continues to raise `NotImplementedError`.
 - **PR 10b — real solver bindings in the UI.** Mechanical swap of
   `ui/mock_solver.py` for the real `solve_hunl_postflop` (and PR 9's
-  preflop solver). ~1 week, lands after PR 9. Makes the UI produce real
-  strategies.
+  preflop solver). Not yet shipped as of v1.7.x; the UI remains in mock
+  mode until then. Use the CLI for real strategies today.
 - **PR 8 — NEON SIMD and public chance sampling.** Rust tier perf work;
   brings standard-flop solve time well below the 10-hour projection.
 

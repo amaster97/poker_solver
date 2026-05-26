@@ -123,7 +123,7 @@ chart = get_full_range(stack_bb=8, position="bb_call_vs_jam")
 ```
 
 A full HUNL config under 15 BB effective auto-routes to the chart
-through `solve()` — `result.backend == "pushfold"`.
+through `solve()` — `result.backend == "pushfold_chart"`.
 
 ## Python API
 
@@ -177,11 +177,13 @@ The two range-vs-range entry points solve **different objects**:
 - **`solve_range_vs_range_rust`** (vector form, v1.5.0;
   `crates/cfr_core/src/dcfr_vector.rs` via PyO3) — joint range Nash via
   Brown's vector-form CFR. Structurally a port of `noambrown/poker_solver`'s
-  `cpp/src/trainer.cpp:138-240` per three independent code reviews,
-  but empirical acceptance against Brown's binary still diverges on
-  deep-cap facing-raise spots (33-pp on bottom-pair-Ace cells in the
-  A83 spot at `b1000r3000`); shallow-cap behavior matches — see Known
-  issues.
+  `cpp/src/trainer.cpp:138-240` per three independent code reviews.
+  The 33-pp Brown apples-to-apples divergence on the A83 deep-cap
+  `b1000r3000` spot is now empirically explained as Nash multiplicity
+  on the indifference manifold (both solvers within Brown's 0.06-chip
+  exploitability margin); shallow-cap behavior matches strictly. See
+  Known issues and
+  [`docs/a83_nash_multiplicity_confirmed_2026-05-26.md`](docs/a83_nash_multiplicity_confirmed_2026-05-26.md).
 
 See [`docs/aggregator_vs_true_nash_explainer.md`](docs/aggregator_vs_true_nash_explainer.md)
 for when to use which, and [`USAGE.md`](USAGE.md) for custom subgames,
@@ -195,9 +197,12 @@ poker-solver ui
 ```
 
 Launches NiceGUI on `http://127.0.0.1:8080` with a 13x13 range matrix,
-board picker, solver controls, and a decision-tree browser. As of
-v1.2.0 the UI drives the real solver. The packaged `.dmg` GUI does not
-currently work — see Known issues. **Use the CLI / Python API for now.**
+board picker, solver controls, and a decision-tree browser. The UI is
+currently in mock mode — clicking **Solve** returns hand-crafted
+fixture data, not real solver output (PR 10a scaffold; real solver
+bindings land in PR 10b). A yellow banner across the top makes this
+explicit. The packaged `.dmg` GUI does not currently work — see Known
+issues. **Use the CLI / Python API for real strategies today.**
 
 ## Architecture (brief)
 
@@ -287,6 +292,22 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the PR-flow contract.
   cells must be CSV-quoted (`"0.5,1.0"`), and the CSV schema has no
   hole-cards columns — use `solve_hunl_postflop` directly for
   fixed-hole-card spots.
+- **`pyenv` arch hazard on Apple Silicon (dev-env quirk).** A pyenv
+  Python built x86_64-only (notably `3.13-dev`) silently SKIPs Rust
+  diff-tests instead of running them — the arm64 `.so` won't load.
+  Verify with `python -c "import platform; print(platform.machine())"`
+  (must be `arm64`) and `python -c "import poker_solver._rust"` (must
+  succeed) before running the test suite. Full guidance:
+  [`CONTRIBUTING.md`](CONTRIBUTING.md) §"Known development environment
+  hazard".
+- **`poker-solver` shim may resolve to a broken Python env.** After
+  `pip install -e .` in temporary build dirs, the PATH shim
+  (`~/.pyenv/shims/poker-solver` on pyenv systems) can resolve to a
+  Python where `poker_solver` is no longer installed. Workarounds: use
+  `./.venv/bin/poker-solver ...` from the project root, or run
+  `python -m poker_solver.cli ...` with `.venv` activated. Full
+  diagnostic:
+  [`docs/poker_solver_shim_fix_2026-05-26.md`](docs/poker_solver_shim_fix_2026-05-26.md).
 
 ## References
 
