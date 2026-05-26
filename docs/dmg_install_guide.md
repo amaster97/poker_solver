@@ -1,5 +1,10 @@
 # macOS .dmg Install Guide (v1.6.0)
 
+> ⚠️ As of 2026-05-26, the v1.6.0 `.dmg` has been retroactively pulled from
+> the GitHub Release due to a fork-bomb bug — see
+> `docs/dmg_spawn_loop_rca_2026-05-26.md`. This guide is preserved for use
+> with the upcoming v1.7.2 repackaged build, NOT v1.6.0.
+
 Step-by-step instructions for installing and first-launching the v1.6.0
 `.dmg` build of Poker Solver on macOS. The .dmg is **adhoc-signed**
 (no Apple Developer enrollment), so Gatekeeper will block the first
