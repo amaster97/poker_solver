@@ -272,6 +272,64 @@ def _combo_to_brown_hand_str(combo: Combo) -> str:
     return _card_to_brown_str(c2) + _card_to_brown_str(c1)
 
 
+def _canonicalize_hand_pair(brown_str: str) -> str:
+    """Re-sort a Brown-encoded 4-char hand string into our sort order.
+
+    Brown's ``parse_hand`` (``cpp/src/cards.cpp:39-52``) sorts the two
+    cards by ``card_id = suit * 13 + rank`` with suit indices drawn from
+    ``"cdhs"`` (c=0, d=1, h=2, s=3). Rust's ``hole_string``
+    (``crates/cfr_core/src/exploit.rs:490-498``) sorts by ``card =
+    rank * 4 + suit`` with suit indices drawn from ``"shdc"`` (s=0,
+    h=1, d=2, c=3). The same two cards therefore appear in opposite
+    order between the two encodings whenever both are *not* the same
+    suit (same-suit pairs are sorted purely by rank in both schemes,
+    so they accidentally agree — which is why earlier dry-runs that
+    only inspected same-suit hands missed this bug).
+
+    Brown emits the lower-``card_id`` card first; we emit the
+    lower-``rank * 4 + suit`` card first. This helper parses Brown's
+    string into a ``(Card, Card)`` pair via our ``parse_card``
+    (which is encoding-agnostic at the letter level), then re-sorts
+    and re-renders using our convention. The suit *letter* is
+    preserved end-to-end — only the position changes.
+
+    Worked examples (Brown → ours):
+
+      * ``"KcKd"`` → ``"KdKc"``   (pocket kings, two suits)
+      * ``"AsKs"`` → ``"AsKs"``   (same suit; both schemes sort
+        identically by rank, ``A > K``)
+      * ``"AsKh"`` → ``"AsKh"``   (offsuit; ``A`` outranks ``K``
+        regardless of suit order in both schemes)
+      * ``"4c4d"`` → ``"4d4c"``   (pocket four-of-clubs-and-diamonds;
+        Brown sorts ``4c < 4d``, ours sorts ``4d < 4c`` since
+        ``d`` (idx 2) < ``c`` (idx 3))
+
+    Raises:
+        ValueError on a malformed input (wrong length / unparseable
+        card chars / duplicate cards), with the original string in
+        the message for debugging.
+    """
+    if len(brown_str) != 4:
+        raise ValueError(
+            f"hand string must be 4 chars (e.g. 'AhKd'); got {brown_str!r}"
+        )
+    try:
+        c1 = parse_card(brown_str[0:2])
+        c2 = parse_card(brown_str[2:4])
+    except ValueError as exc:
+        raise ValueError(
+            f"hand string {brown_str!r} contains invalid card: {exc}"
+        ) from exc
+    if c1 == c2:
+        raise ValueError(f"hand string {brown_str!r} has duplicate cards")
+    # Our sort order matches Rust's ``hole_string``:
+    # sort by ``card_to_int = rank * 4 + suit`` ascending. This is
+    # equivalent to ``(rank, suit)`` ascending under our suit order
+    # (s=0, h=1, d=2, c=3) since rank dominates the linear combination.
+    lo, hi = (c1, c2) if (c1.rank, c1.suit) <= (c2.rank, c2.suit) else (c2, c1)
+    return f"{lo}{hi}"
+
+
 # ============================================================================
 # Fixture loading
 # ============================================================================
@@ -742,7 +800,14 @@ def _parse_brown_dump(
         if not isinstance(profile_raw, dict):
             raise ValueError(f"Brown dump: players[{idx}].profile must be an object")
 
-        hands_tuple: tuple[str, ...] = tuple(str(h) for h in hands_raw)
+        # Canonicalize Brown's hand strings to our sort order at this
+        # boundary so every downstream consumer (acceptance tests, diff
+        # harnesses) can look up Rust strategy rows by hand_str directly.
+        # See ``_canonicalize_hand_pair`` docstring for the encoding
+        # mismatch this bridges (PR 56).
+        hands_tuple: tuple[str, ...] = tuple(
+            _canonicalize_hand_pair(str(h)) for h in hands_raw
+        )
         weights_tuple: tuple[float, ...] = tuple(float(w) for w in weights_raw)
 
         profile_entries: dict[str, BrownInfosetEntry] = {}
