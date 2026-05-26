@@ -30,7 +30,7 @@ In-flight on feature branches; not yet merged to `main`.
 
 - v1.6.1 engine bundle: HELD pending acceptance gate redefinition
   (deep-cap Brown apples-to-apples reveals architectural divergence
-  in payoff convention; see docs/v1_6_1_no_go_synthesis*)
+  in payoff convention; see internal mirror v1.6.1 no-go synthesis)
 - PR 44 .dmg packaging fix: VERIFIED on disk; ready for Gate 5 attachment
 
 ## [1.6.0] - 2026-05-23
@@ -45,7 +45,7 @@ In-flight on feature branches; not yet merged to `main`.
 - **44 new UI smoke tests** total (7 from PR 24a + 9 from PR 24b)
 
 ### Notes
-- Engine bundle (PR 33+34+35 for true Brown parity) still deferred to v1.5.2 pending per-action divergence diagnosis
+- Engine bundle (PR 33+34+35 for true Brown parity) still deferred to v1.6.1 pending per-action divergence diagnosis
 - GUI is functionally complete for Gate 2; awaiting engine acceptance test PASS before final persona retest sweep
 - Per `feedback_ui_packaging_sync`: this ship triggers PR 11 .dmg rebuild (LEG 19 candidate) + PR 10b UI re-audit downstream
 
@@ -278,7 +278,7 @@ In-flight on feature branches; not yet merged to `main`.
 - `HUNLConfig.__post_init__` now raises `ValueError` on negative
   contributions and on a contribution exceeding `starting_stack`,
   rather than letting the Rust backend reach a segfault path (the
-  segfault was first observed in `docs/pr13_prep/v1_3_1_s4_retest.md`).
+  segfault was first observed in the v1.3.1 S4 retest, internal mirror).
 - Engine fix in `_apply_player`: when an over-shove all-in is "called"
   by an opponent who is already all-in for less, the excess (uncalled)
   chips are now refunded to the over-shover and the street closes
@@ -364,8 +364,8 @@ In-flight on feature branches; not yet merged to `main`.
   exploitability decay may be slightly softer. Caveat documented in
   `SolveResult.exploitability_history` semantics (represents the unlocked
   side's regret only).
-- This is the v1.4.0 ship per the stagger-fallback path in
-  `docs/leg9_v1_4_0_ship_plan.md`. PR 22 (asymmetric initial-contributions,
+- This is the v1.4.0 ship per the stagger-fallback path in the
+  v1.4.0 ship plan (internal mirror). PR 22 (asymmetric initial-contributions,
   unblocks W3.4 MDF queries) is queued for v1.4.1; it would compound MDF
   use cases.
 
@@ -432,7 +432,7 @@ for any v1.3.0 caller that did not opt into the new parameter; no
 engine changes; no Rust changes.
 
 Caught by the Option B pre-ship stress test
-(`docs/pr16_prep/stress_test_results.md`): S4 MDF query returned 100%
+(internal mirror): S4 MDF query returned 100%
 check on a half-pot bluff-catcher spot; S1 K-high turn showed AA and
 KK both checking 99.99% — heuristic FAIL traced to position
 misclassification (the aggregator hardcoded `hero_player=0` and the
@@ -494,8 +494,8 @@ grabbing P0's frequencies on no-history defending spots).
   pre-ship stress test); turn-start is the currently-recommended
   path until the Rust exploitability port (Option A) lands. Stress
   test findings cited as the discovery point.
-- **`docs/pr16_prep/stress_test_results.md`** — already in the repo
-  from the v1.3.0 ship audit; cited from the CHANGELOG and USAGE.
+- **Pre-ship stress test results** (internal mirror) — from the v1.3.0
+  ship audit; cited from the CHANGELOG and USAGE.
 
 ### Stress-test reproduction after fix
 
@@ -619,7 +619,7 @@ new artifact `Poker-Solver-1.2.1-universal2.dmg` superseding
   filename changes from `Poker-Solver-${VERSION}-arm64.dmg` to
   `Poker-Solver-${VERSION}-universal2.dmg` to reflect the broadened
   arch coverage.
-- **`docs/pr11_prep/leg4_repackage_now.md`** repackage runbook
+- **PR 11 repackage runbook** (internal mirror)
   documents the universal2 build step + a Step 1.5 verification that
   the resulting .so reports both `arm64` and `x86_64` slices via
   `file(1)`. Prerequisites add `rustup target add x86_64-apple-darwin
@@ -1091,7 +1091,7 @@ API surface and zero behavior change to PRs 1-9 (NiceGUI gated under the
 new optional `[ui]` extra). Three-agent fan-out (A: app shell + state +
 spot input + run panel; B: range matrix + tree browser; C: mock_solver +
 library stub + 20 smoke tests + CLI + pyproject) plus a post-implementation
-audit pass per `docs/pr10_prep/launch_kickoff_10a.md`.
+audit pass per the PR 10a launch kickoff (internal mirror).
 
 ### Added
 
@@ -1187,12 +1187,11 @@ audit pass per `docs/pr10_prep/launch_kickoff_10a.md`.
 ### Spec amendments
 
 - **Layout: 4-pane → 2-pane** (resolves anti-pattern §3.1 from
-  `docs/pr10_prep/ui_design_principles.md`; cross-confirmed by
-  `competitor_ui_deep_dive.md` + Shark README's clutter-reduction
-  commitment).
-- **Seven UX Q-locks** (§0.1 synthesis from
-  `competitor_ui_deep_dive.md` + `ui_design_principles.md` +
-  `ui_mockups_and_debates.md`): Q1 two-pane; Q2 hand-class labels
+  the PR 10 UI design principles (internal mirror); cross-confirmed by
+  competitor UI deep-dive (internal mirror) + Shark README's
+  clutter-reduction commitment).
+- **Seven UX Q-locks** (§0.1 synthesis from internal-mirror PR 10
+  prep docs): Q1 two-pane; Q2 hand-class labels
   in cells; Q3 default 1000 iterations (target-exploitability
   opt-in); Q4 4-of-6 bet sizes (33/75/100/all-in); Q5 combo
   inspector BELOW matrix; Q6 reach filter default 0.01; Q7 yellow
@@ -1210,7 +1209,7 @@ audit pass per `docs/pr10_prep/launch_kickoff_10a.md`.
 - NiceGUI `native=True` (pywebview) explicitly NOT used; browser-served
   only. `.dmg` packaging deferred to PR 11.
 - Three-agent fan-out with non-overlapping file ownership; post-
-  implementation audit pass per `docs/pr10_prep/audit_prompt_final_10a.md`.
+  implementation audit pass per the PR 10a audit prompt (internal mirror).
 - Import-discipline asserted by
   `test_ui_never_imports_mock_specific_symbols`: `ui/` outside
   `ui/state.py` contains zero `mock_solver` references.
@@ -1399,7 +1398,7 @@ PR 4 revisit.
   built-in. Public API: `AbstractionTables`, `AbstractionRef`,
   `build_abstraction`, `load_abstraction`, `save_abstraction`,
   `lookup_bucket`, `resolve_abstraction_ref`,
-  `canonicalize_for_suit_iso`. Methodology notes under `docs/pr4_prep/`.
+  `canonicalize_for_suit_iso`. Methodology notes under PR 4 prep (internal mirror).
 - **HUNL postflop solve orchestrator** (`poker_solver/hunl_solver.py`,
   PR 5; commit `a9d02ca`). `solve_hunl_postflop(...)` + `HUNLSolveResult`
   dataclass wire the abstraction tables, DCFR core, and HUNL tree into
@@ -1425,7 +1424,7 @@ PR 4 revisit.
 ### Fixed
 
 - Per-PR audit must-fix patches applied and verified for PR 4 and PR 5
-  (audits in `docs/pr4_prep/audit_report.md` and PR 5 equivalent).
+  (audit reports in internal mirror).
 - PR 5 audit must-fix #1 — `hunl_solver.py` exploitability guard
   against zero-iteration solves.
 
@@ -1580,8 +1579,8 @@ and a hybrid exact / Monte Carlo equity calculator.
 - `docs/pushfold_v1_generation_notes.md`: generator methodology, runtime
   breakdown, landmark frequencies, Sklansky-Chubukov cross-check,
   convergence diagnostics, known limitations.
-- `docs/pr3_prep/audit_report.md`: PR 3 mandatory audit
-  (READY, 0 must-fix, 7 should-fix, 7 nice-to-fix).
+- PR 3 mandatory audit report (internal mirror):
+  READY, 0 must-fix, 7 should-fix, 7 nice-to-fix.
 - `docs/release_notes_v0.3.md`: user-facing release notes for this
   release.
 

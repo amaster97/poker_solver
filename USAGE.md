@@ -352,7 +352,7 @@ walker silently passed through P1's modal action before grabbing P0's
 frequencies. On no-history defending spots (river bluff-catchers, MDF
 queries) P1 modally checked, so P0 had no bet to face and the API
 returned ~100% check no matter what hero was. Caught by the Option B
-pre-ship stress test S4 (see `docs/pr16_prep/stress_test_results.md`).
+pre-ship stress test S4 (internal mirror).
 
 #### Honest perf caveat — 100 BB flop-start is minutes, not seconds
 
