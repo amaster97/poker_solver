@@ -152,6 +152,16 @@ cargo test --all --manifest-path crates/cfr_core/Cargo.toml          # Rust suit
 
 Both should be green. If they are not, that is a bug; file an issue.
 
+**Apple Silicon arch hazard.** If `pytest` shows silent SKIPs on parity /
+diff tests, or you hit `ModuleNotFoundError: No module named
+'poker_solver._rust'`, your `python` may be a pyenv x86_64 build (e.g.
+`3.13-dev`) trying to load an arm64-only `.so`. Always invoke
+`./.venv/bin/python` and `./.venv/bin/pytest` on M-series hosts; verify
+with `python -c "import platform; print(platform.machine())"` (expect
+`arm64`). See [`CONTRIBUTING.md`](CONTRIBUTING.md#known-development-environment-hazard--pyenv-x86_64-python-vs-arm64-so)
+and [`docs/poker_solver_shim_fix_2026-05-26.md`](docs/poker_solver_shim_fix_2026-05-26.md)
+for the full RCA.
+
 ## 4. DCFR at a glance
 
 The algorithm is tabular Discounted CFR (Brown & Sandholm, AAAI 2019),
