@@ -110,16 +110,27 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Derive version from poker_solver/__init__.py if not supplied.
+# Derive version from pyproject.toml if not supplied.  PR 86 hardening:
+# pyproject.toml `[project] version` is the authoritative source; the
+# spec file performs an additional drift check against
+# poker_solver/__init__.py `__version__`.  Keeping the build script
+# aligned to the same source-of-truth prevents the DMG filename from
+# diverging from the Info.plist stamp.
 if [[ -z "$APP_VERSION" ]]; then
     APP_VERSION="$(python -c \
-        'import re,pathlib;t=pathlib.Path("poker_solver/__init__.py").read_text();m=re.search(r"__version__\s*=\s*[\x27\"]([^\x27\"]+)[\x27\"]",t);print(m.group(1) if m else "0.0.0")')"
+        'import re,pathlib;t=pathlib.Path("pyproject.toml").read_text();m=re.search(r"(?m)^version\s*=\s*[\x27\"]([^\x27\"]+)[\x27\"]",t);print(m.group(1) if m else "0.0.0")')"
+    if [[ "$APP_VERSION" == "0.0.0" ]]; then
+        err "Could not read [project] version from pyproject.toml; refusing to build a 0.0.0 .dmg.  Pass --version <X.Y.Z> or fix pyproject.toml."
+    fi
 fi
 APP_NAME="Poker Solver"
 BUNDLE_ID="com.poker_solver.app"
 # PR 44 fix: DMG filename matches the actual binary arch.  The .app's
-# PyInstaller-bundled Python is arm64-only (scripts/poker_solver.spec line
-# 104: target_arch="arm64"), so labeling the DMG `universal2` was incorrect.
+# PyInstaller-bundled Python is arm64-only (scripts/poker_solver.spec
+# `target_arch="arm64"`), so labeling the DMG `universal2` was incorrect.
+# PR 86 reinforcement: the post-build `lipo -info` check (step 8.5 below)
+# enforces this — a build that silently produces a non-arm64 Mach-O for
+# the main executable will FAIL the build before the .dmg is created.
 DMG_NAME="Poker-Solver-${APP_VERSION}-arm64.dmg"
 ENTITLEMENTS="scripts/entitlements.plist"
 RUST_SO="poker_solver/_rust.cpython-313-darwin.so"
@@ -281,6 +292,65 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Step 5.5: PR 86 hardening — post-sign arch + Info.plist + codesign verify.
+# Catches three classes of packaging defect at build time, before the
+# .dmg is wrapped and shipped:
+#   (a) Main executable Mach-O is not the arm64 we claim in the filename.
+#   (b) Info.plist version stamp drifts from pyproject.toml [project] version.
+#   (c) The signature on disk (ad-hoc or Developer ID) fails codesign --verify
+#       --deep — e.g., a stale inner-binary signature from a prior incremental
+#       build.
+# ---------------------------------------------------------------------------
+banner "5.5/11" "PR 86 hardening: post-sign arch + version + codesign verify"
+
+# (a) Main executable arch.  PyInstaller's `target_arch="arm64"` should
+# produce a thin arm64 Mach-O for Contents/MacOS/<APP_NAME>.  If the
+# build environment somehow produced universal2 or x86_64, fail loudly
+# rather than silently shipping a .dmg whose -arm64 filename is a lie.
+APP_EXE="$APP_PATH/Contents/MacOS/$APP_NAME"
+if [[ ! -x "$APP_EXE" ]]; then
+    err "main executable missing or not executable: $APP_EXE"
+fi
+LIPO_OUT="$(lipo -info "$APP_EXE")"
+echo "[verify] main exe arch: $LIPO_OUT"
+if ! echo "$LIPO_OUT" | grep -q "architecture: arm64\|architectures: .*arm64"; then
+    err "main executable is not arm64:\n  $LIPO_OUT\nDMG filename claims -arm64.dmg but the binary disagrees.  Check scripts/poker_solver.spec target_arch."
+fi
+
+# (b) Info.plist version stamp matches APP_VERSION (which itself comes
+# from pyproject.toml via the step-1 derivation).  PR 44 made the spec
+# read __version__ dynamically; PR 86 enforces that what we read is what
+# we shipped.
+PLIST_SHORT="$(defaults read "$APP_PATH/Contents/Info.plist" CFBundleShortVersionString 2>/dev/null || echo MISSING)"
+PLIST_FULL="$(defaults read "$APP_PATH/Contents/Info.plist" CFBundleVersion 2>/dev/null || echo MISSING)"
+echo "[verify] Info.plist CFBundleShortVersionString: $PLIST_SHORT"
+echo "[verify] Info.plist CFBundleVersion:            $PLIST_FULL"
+if [[ "$PLIST_SHORT" != "$APP_VERSION" ]]; then
+    err "Info.plist CFBundleShortVersionString ($PLIST_SHORT) does not match APP_VERSION ($APP_VERSION).  Spec/__init__/pyproject drift?"
+fi
+if [[ "$PLIST_FULL" != "$APP_VERSION" ]]; then
+    err "Info.plist CFBundleVersion ($PLIST_FULL) does not match APP_VERSION ($APP_VERSION).  Spec/__init__/pyproject drift?"
+fi
+
+# (c) codesign --verify --deep on the .app.  Skipped only when the
+# entire signing step was skipped via --skip-signing (in which case the
+# .app is truly unsigned and codesign would fail by design).
+if [[ $SKIP_SIGNING -eq 0 ]]; then
+    set +e
+    codesign --verify --deep --strict "$APP_PATH" 2>&1
+    CSV_RC=$?
+    set -e
+    if [[ $CSV_RC -ne 0 ]]; then
+        err "codesign --verify --deep FAILED on $APP_PATH (rc=$CSV_RC).  Likely a stale inner-binary signature from a prior incremental build; run a clean build (the script's step 2 should have done this) and re-run."
+    fi
+    echo "[verify] codesign --verify --deep --strict: PASS"
+    # Capture the signature type (adhoc vs Developer ID) for the final report.
+    SIG_LINE="$(codesign -dvv "$APP_PATH" 2>&1 | grep -E '^(Signature|Authority|TeamIdentifier)' | head -3)"
+    echo "[verify] signature summary:"
+    echo "$SIG_LINE" | sed 's/^/    /'
+fi
+
+# ---------------------------------------------------------------------------
 # Step 6: Notarize the .app (via .zip wrapper)
 # ---------------------------------------------------------------------------
 banner "6/11" "notarize .app"
@@ -358,6 +428,21 @@ banner "11/11" "report"
 APP_SIZE="$(du -sh "$APP_PATH" | awk '{print $1}')"
 DMG_SIZE="$(du -sh "$DMG_PATH" | awk '{print $1}')"
 
+# PR 86 hardening: surface the actual signature type so the operator can
+# confirm at a glance whether the build came out ad-hoc (no Apple Dev
+# enrollment) or Developer ID + notarized.  Gatekeeper bypass docs apply
+# only to the ad-hoc case.
+SIG_KIND="unsigned"
+if [[ $SKIP_SIGNING -eq 0 ]]; then
+    if codesign -dvv "$APP_PATH" 2>&1 | grep -q "Signature=adhoc"; then
+        SIG_KIND="ad-hoc"
+    elif codesign -dvv "$APP_PATH" 2>&1 | grep -q "Authority=Developer ID"; then
+        SIG_KIND="Developer ID"
+    else
+        SIG_KIND="signed (unknown authority — inspect with codesign -dvv)"
+    fi
+fi
+
 cat <<REPORT
 
 ================================================================
@@ -367,16 +452,23 @@ Build complete.
   .dmg:        $DMG_PATH ($DMG_SIZE)
   Version:     $APP_VERSION
   Bundle ID:   $BUNDLE_ID
-  Signed:      $([ $SKIP_SIGNING -eq 1 ]      && echo NO  || echo yes)
+  Architecture: arm64 (Apple Silicon only — Intel Macs use source install)
+  Signature:   $SIG_KIND
   Notarized:   $([ $SKIP_NOTARIZATION -eq 1 ] && echo NO  || echo yes)
 
 REPORT
 
-if [[ $SKIP_SIGNING -eq 1 ]]; then
+if [[ $SKIP_SIGNING -eq 1 || "$SIG_KIND" == "ad-hoc" ]]; then
     cat <<'BYPASS'
-Unsigned bypass instructions (for Gatekeeper):
-  1. Right-click "Poker Solver.app" in Finder → "Open"   (one-time)
-  2. xattr -d com.apple.quarantine "dist/Poker Solver.app"   (permanent)
+Gatekeeper bypass (for unsigned or ad-hoc-signed .app — first launch only):
+  1. Right-click "Poker Solver.app" in Finder → "Open"   (one-time prompt)
+  2. Click "Open" in the "unidentified developer" dialog
+  3. macOS remembers the decision for subsequent launches
+  Alternative (permanent on this machine):
+     xattr -d com.apple.quarantine "/Applications/Poker Solver.app"
+
+Notarized distribution requires Apple Developer Program enrollment
+($99/yr).  See docs/dmg_install_guide.md for the full operator runbook.
 
 BYPASS
 fi

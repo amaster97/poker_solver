@@ -50,9 +50,12 @@ mock mode (see §4).
 The historical `.dmg` build script (`sh scripts/build_macos_dmg.sh`)
 remains in the repo; once the packaging fix lands and a re-signed v1.7.2
 build is verified, this section will be restored with a working install
-flow. The current artifact is ad-hoc signed (not notarized) and
-arm64-only despite the `universal2` label. When the `.dmg` is safe to
-use again, see
+flow. The current shipped artifact (`Poker-Solver-1.6.0-arm64.dmg`) is
+ad-hoc signed (not notarized) and arm64-only. The "universal2" claim
+that appeared in earlier release labeling was retired in PR 44 (DMG
+filename now matches the actual arch) and reinforced in PR 86 (build
+script enforces `lipo -info architecture: arm64` post-build). When the
+`.dmg` is safe to use again, see
 [`docs/dmg_install_guide.md`](docs/dmg_install_guide.md).
 
 ### Path B: pip + cargo (power users)

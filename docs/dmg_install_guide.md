@@ -39,14 +39,38 @@ with a message like *"App can't be opened because Apple cannot check it
 for malicious software"*. You only need to bypass once — macOS remembers
 the decision for subsequent launches.
 
+**Signature is verified intact.** PR 86 added a post-sign
+`codesign --verify --deep --strict` gate to the build pipeline, so the
+ad-hoc signature on `Poker Solver.app` is internally consistent — every
+inner binary (Python framework, NiceGUI/FastAPI/uvicorn C extensions,
+the maturin-built `_rust.so`) carries a valid ad-hoc seal. What
+Gatekeeper objects to is the **absence of a Developer ID identity**, not
+the signature itself. The bypass options below remain the supported
+install path until Apple Developer Program enrollment lands (see §"Future:
+notarized .dmg" below).
+
+To inspect locally:
+```bash
+codesign --verify --deep --strict --verbose=2 \
+    "/Applications/Poker Solver.app"
+# Expected tail: ":app: valid on disk"
+#                ":app: satisfies its Designated Requirement"
+codesign -dvv "/Applications/Poker Solver.app" | grep -E '^Signature|^TeamIdentifier'
+# Expected:    Signature=adhoc
+#              TeamIdentifier=not set
+```
+
 ### Option A — right-click → Open (recommended)
 
 1. Open Finder and navigate to `Applications`.
 2. **Right-click** (or Control-click) `Poker Solver.app`.
-3. Choose **Open** from the context menu.
+3. Choose **Open** from the context menu — the menu item appears in the
+   first dozen entries; if it is greyed out, the .app has not finished
+   copying yet, wait 5–10 s and try again.
 4. A dialog appears warning that Apple can't verify the developer.
-   Click **Open**.
-5. The app launches and the bypass is remembered.
+   Click **Open** (not "Move to Trash").
+5. The app launches and the bypass is remembered. Subsequent
+   double-clicks from Finder open the app without re-prompting.
 
 ### Option B — System Settings → Privacy & Security
 
@@ -58,6 +82,17 @@ the decision for subsequent launches.
    identified developer."*
 4. Click **Open Anyway** next to that message.
 5. Re-launch `Poker Solver.app`; confirm the prompt once more.
+
+### Option C — `xattr` (permanent, terminal-based)
+
+For users who prefer the terminal or want to bake the bypass into a
+provisioning script:
+```bash
+xattr -d com.apple.quarantine "/Applications/Poker Solver.app"
+```
+This strips the macOS quarantine attribute permanently on this machine;
+future launches from Finder, Dock, or `open` will skip Gatekeeper
+entirely. The same arm64-only and feature-set caveats below still apply.
 
 ## What it does
 
