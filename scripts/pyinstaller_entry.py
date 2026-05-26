@@ -18,7 +18,13 @@ Run paths:
 
 from __future__ import annotations
 
+import multiprocessing as mp
 import sys
+
+# Required: macOS multiprocessing.spawn() re-execs the frozen .app entry
+# point; without this, NiceGUI worker spawns trigger an infinite fork-bomb.
+# See docs/dmg_spawn_loop_rca_2026-05-26.md.
+mp.freeze_support()
 
 
 def _smoke_test() -> int:

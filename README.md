@@ -21,15 +21,22 @@ locking. Goalpost: PioSolver-class HU local solving on a MacBook.
   source-build only.
 - **Python:** 3.9+. Rust toolchain required (stable channel).
 - **Working install path:** source build (`pip install -e .`).
-- **`.dmg` installer:** experimental — see "macOS install (.dmg,
-  experimental)" below and Known issues. The CLI from source is the
-  recommended path today.
+- **`.dmg` installer:** **v1.6.0 `.dmg` has a critical fork-bomb bug on
+  Finder launch — DO NOT use until the v1.7.2+ packaging fix lands.**
+  See Known issues. Use the CLI source install (below) instead.
 
-### macOS install (.dmg, experimental)
+### macOS install (.dmg — NOT RECOMMENDED until v1.7.2)
 
-Apple silicon (arm64) only. See [`docs/dmg_install_guide.md`](docs/dmg_install_guide.md)
-for download, SHA256 verification, and first-launch Gatekeeper bypass
-instructions (adhoc-signed; not notarized).
+> ⚠️ **CRITICAL:** the v1.6.0 `.dmg` currently spawns processes
+> uncontrollably on Finder launch and can freeze your Mac. Root cause
+> identified (missing `multiprocessing.freeze_support()` in the
+> PyInstaller entry point); fix queued for v1.7.2. Until then, use the
+> source install below. Full RCA:
+> [`docs/dmg_spawn_loop_rca_2026-05-26.md`](docs/dmg_spawn_loop_rca_2026-05-26.md).
+
+Apple silicon (arm64) only. See
+[`docs/dmg_install_guide.md`](docs/dmg_install_guide.md) (relevant once
+the .dmg is safe to launch again).
 
 ## Install (from source)
 
@@ -197,17 +204,20 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the PR-flow contract.
 
 ## Known issues
 
-- **`.dmg` installer does not currently work.** The v1.4.0 universal2
-  `.dmg` ships on the GitHub Release, but on a clean Mac the launched
-  app exits at `ui/app.py:362` with `ModuleNotFoundError: No module
-  named 'nicegui'` — the GUI dependency is missing from the PyInstaller
-  bundle. Additional defects: adhoc-signed (not notarized; Gatekeeper
-  will block by default), `arm64`-only despite the `universal2` label
-  (Intel Macs can't run it at all), and the `Info.plist` version stamp
-  reads `0.6.0` on a v1.4.0 tag. A packaging-fix PR is queued. **Use
-  the source install above** until that lands. See
-  [`docs/dmg_install_guide.md`](docs/dmg_install_guide.md) for the
-  public-facing install guide.
+- **`.dmg` installer crashes Mac on Finder launch (CRITICAL).** The
+  v1.6.0 `.dmg` ships on the GitHub Release, but launching the `.app`
+  from Finder causes uncontrolled process spawning (PyInstaller +
+  macOS-multiprocessing fork-bomb) and can freeze the machine. Root
+  cause: `scripts/pyinstaller_entry.py` did not call
+  `multiprocessing.freeze_support()` at module level, so each NiceGUI
+  worker spawned by uvicorn re-execs the entire frozen app, recursively.
+  The fix is patched on `pr-78-dmg-freeze-support-fix` (this PR);
+  re-packaged `.dmg` will ship in v1.7.2. **Use the source install
+  above** until then. Full RCA:
+  [`docs/dmg_spawn_loop_rca_2026-05-26.md`](docs/dmg_spawn_loop_rca_2026-05-26.md).
+  Earlier v1.4.0 `.dmg` had a different defect (nicegui missing from
+  bundle), fixed in PR 44; the current v1.6.0 fork-bomb issue is
+  separate.
 - **v1.5.0 Brown acceptance test currently FAILS — v1.6.1 ship HELD
   pending investigation.** Three code reviews verified the Rust
   vector-form CFR is structurally faithful to Brown's
