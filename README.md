@@ -120,21 +120,34 @@ what the CLI exposes:
 
 ```python
 from poker_solver import (
-    HUNLConfig, HUNLPoker, Range, solve, solve_range_vs_range,
+    Card, HUNLConfig, Street, parse_range,
+    solve_hunl_postflop, solve_range_vs_range,
 )
 
-# Node locking — pin a strategy at one or more infosets:
-locked = {"<infoset_key>": [0.6, 0.4]}
-r = solve(HUNLPoker(HUNLConfig(starting_stack=10000)),
-          iterations=2000, locked_strategies=locked)
+# Node locking — pin a strategy at one or more infosets. Requires a
+# postflop config (preflop full-tree is still NotImplementedError above
+# 15 BB; see Known issues). Replace "<infoset_key>" with a real key
+# discovered via `result.strategy.keys()`; unmatched keys are silently
+# ignored. See USAGE.md §5.3 and tests/test_node_locking.py for the
+# canonical key format.
+board = tuple(Card.from_str(c) for c in ("As", "7c", "2d", "Kh", "5s"))
+cfg = HUNLConfig(
+    starting_stack=10_000, starting_street=Street.RIVER,
+    initial_board=board, initial_pot=1_000,
+    initial_contributions=(500, 500),
+)
+locked = {"<infoset_key>": [1.0, 0.0, 0.0, 0.0]}  # 100% fold at that node
+r = solve_hunl_postflop(cfg, iterations=500, locked_strategies=locked)
 
-# Range-vs-range (aggregator — fast per-combo blueprint pooling):
-hero, villain = Range("AA, KK, AKs"), Range("QQ-99, AKo")
+# Range-vs-range (aggregator — fast per-combo blueprint pooling).
+# `parse_range` turns Pio-style strings into a Range; passing a list of
+# combo strings (e.g. ["AA","KK","AKs"]) also works.
+hero, villain = parse_range("AA, KK, AKs"), parse_range("QQ-99, AKo")
 agg = solve_range_vs_range(template_config, hero, villain, iterations=200)
 
 # Range-vs-range (vector form — joint range Nash via the Rust tier):
 from poker_solver._rust import solve_range_vs_range_rust
-vec = solve_range_vs_range_rust(template_json, iters=200,
+vec = solve_range_vs_range_rust(template_json, iterations=200,
                                 alpha=1.5, beta=0.0, gamma=2.0,
                                 p0_holes=p0_combos, p1_holes=p1_combos)
 ```
@@ -241,10 +254,13 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the PR-flow contract.
   supported — `Range` has no `weight` field. Set-membership operations
   (`Range.diff`) work today; mixed-frequency operations require a
   refactor scoped for v1.8+ (was previously tracked as W2.2).
-- **CLI ergonomic gaps.** Push/fold has no dedicated `poker-solver
-  pushfold` subcommand — use the library API in Quick start. River
-  hero-vs-range and parity-check CLI subcommands are also not wired;
-  drop to the Python API in the meantime.
+- **CLI subcommand caveats (v1.7.0).** `poker-solver pushfold`,
+  `poker-solver river`, and `poker-solver parity` all ship in v1.7.0
+  (see USAGE §7a for flags and examples). Caveats: `parity` requires
+  Brown's binary built via `scripts/build_noambrown.sh` and exits 2
+  with a hint if it is missing; `river` and `parity` are slow at high
+  `--iters` (the documented `parity --iters 2000` runs several
+  minutes — start with smaller values to smoke-test).
 - **CLI batch-solve on chance-enum-at-root is slow.** The chance-node
   enumeration at the betting-tree root dominates for full flop/turn
   range-on-both-sides queries (W2.4). Mitigations: use the aggregator
