@@ -1,7 +1,14 @@
-//! ARM NEON 128-bit SIMD kernels for the DCFR inner loop (PR 8).
+//! Cross-platform 128-bit SIMD kernels for the DCFR inner loop.
+//!
+//! PR 8 introduced ARM NEON paths for Apple Silicon (`vmulq_f64`, `vfmaq_f64`,
+//! etc.). PR 61 (v1.8 Phase 1) extends the dispatch with a parallel SSE2
+//! path so x86_64 hosts (Intel Macs, x86 Linux, Windows) also get 2-lane
+//! f64 SIMD on the discount kernel. Wider-vector AVX2 (4-lane) is deferred
+//! to v1.8 Phase 2+.
 //!
 //! Apple M-series CPUs expose 128-bit NEON: two `f64` lanes per vector
-//! (`float64x2_t`). The DCFR hot kernels here are:
+//! (`float64x2_t`). x86_64 SSE2 exposes the same 2-lane f64 width via
+//! `__m128d`. The DCFR hot kernels here are:
 //!
 //!  1. **Discount** — multiply `regret_sum[i]` by either `pos_scale` or
 //!     `neg_scale` depending on the sign of the existing regret; multiply
@@ -381,9 +388,94 @@ mod neon {
 }
 
 // ---------------------------------------------------------------------------
-// Public dispatch: prefer NEON on aarch64, scalar otherwise. The `discount`
-// helpers and the regret/strategy updaters expose one public entrypoint each
-// so callers (`dcfr.rs`, `hunl_solver.rs`) don't sprinkle `#[cfg(...)]`.
+// x86_64 SSE2 kernels (PR 61 — v1.8 Phase 1). SSE2 is baseline on every
+// x86_64 target (it's part of the x86_64 ABI), so no runtime detection is
+// needed — `target_arch = "x86_64"` implies SSE2 availability. Wider AVX2
+// (4-lane f64) is deferred to v1.8 Phase 2; the SSE2 path is the safe
+// universal baseline.
+//
+// Scope: only the discount kernel is SSE2-vectorized in PR 61. The other
+// kernels (positive_regrets_and_total, update_regret_sum,
+// update_strategy_sum, normalize) keep scalar fallback on x86_64 for now;
+// extending them follows the same template and is the v1.8 Phase 2 task.
+// ---------------------------------------------------------------------------
+
+#[cfg(target_arch = "x86_64")]
+mod sse2 {
+    use core::arch::x86_64::*;
+
+    /// Sign-conditional discount on x86_64 via SSE2. Same semantics as
+    /// `discount_regrets_neon`: `r > 0 ⇒ r * pos_scale`, `r < 0 ⇒ r *
+    /// neg_scale`, `r == 0 ⇒ 0`.
+    ///
+    /// Implementation: compute both scaled vectors, then blend via a mask
+    /// derived from `_mm_cmpgt_pd(v, 0)` using bitwise AND/ANDNOT/OR (SSE2
+    /// has no native `blendv`; that's SSE4.1, which we don't gate on).
+    ///
+    /// # Safety
+    /// `regrets` must be a valid mutable slice. SSE2 loads/stores via
+    /// `_mm_loadu_pd` / `_mm_storeu_pd` are unaligned-safe.
+    #[target_feature(enable = "sse2")]
+    #[inline]
+    pub unsafe fn discount_regrets_sse2(regrets: &mut [f64], pos_scale: f64, neg_scale: f64) {
+        let n = regrets.len();
+        let pos = _mm_set1_pd(pos_scale);
+        let neg = _mm_set1_pd(neg_scale);
+        let zero = _mm_setzero_pd();
+        let mut i = 0usize;
+        while i + 2 <= n {
+            let v = _mm_loadu_pd(regrets.as_ptr().add(i));
+            // mask_pos has all-1 bits in lanes where v > 0, all-0 otherwise.
+            let mask_pos = _mm_cmpgt_pd(v, zero);
+            let scaled_pos = _mm_mul_pd(v, pos);
+            let scaled_neg = _mm_mul_pd(v, neg);
+            // Manual SSE2 blend: (mask & scaled_pos) | (~mask & scaled_neg).
+            // For v == 0, both scaled values are 0 so the choice is moot.
+            let pos_part = _mm_and_pd(mask_pos, scaled_pos);
+            let neg_part = _mm_andnot_pd(mask_pos, scaled_neg);
+            let blended = _mm_or_pd(pos_part, neg_part);
+            _mm_storeu_pd(regrets.as_mut_ptr().add(i), blended);
+            i += 2;
+        }
+        // Trailing scalar tail — matches scalar semantics exactly.
+        while i < n {
+            if regrets[i] > 0.0 {
+                regrets[i] *= pos_scale;
+            } else if regrets[i] < 0.0 {
+                regrets[i] *= neg_scale;
+            }
+            i += 1;
+        }
+    }
+
+    /// `strategy_sum[i] *= strat_scale` vectorized on SSE2 via `_mm_mul_pd`.
+    ///
+    /// # Safety
+    /// `strategy` must be a valid mutable slice.
+    #[target_feature(enable = "sse2")]
+    #[inline]
+    pub unsafe fn discount_strategy_sum_sse2(strategy: &mut [f64], strat_scale: f64) {
+        let n = strategy.len();
+        let scale = _mm_set1_pd(strat_scale);
+        let mut i = 0usize;
+        while i + 2 <= n {
+            let v = _mm_loadu_pd(strategy.as_ptr().add(i));
+            let scaled = _mm_mul_pd(v, scale);
+            _mm_storeu_pd(strategy.as_mut_ptr().add(i), scaled);
+            i += 2;
+        }
+        while i < n {
+            strategy[i] *= strat_scale;
+            i += 1;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public dispatch: prefer NEON on aarch64, SSE2 on x86_64, scalar otherwise.
+// The `discount` helpers and the regret/strategy updaters expose one public
+// entrypoint each so callers (`dcfr.rs`, `dcfr_vector.rs`, `hunl_solver.rs`)
+// don't sprinkle `#[cfg(...)]`.
 // ---------------------------------------------------------------------------
 
 // Dispatch macro: prefer NEON on aarch64 unless the `force_scalar` feature
@@ -391,6 +483,11 @@ mod neon {
 // wall-clock against the NEON-on default path).
 
 /// Sign-conditional regret discount — public dispatch.
+///
+/// Dispatch order (compile-time):
+///   - `aarch64` + not `force_scalar` → NEON (`vmulq_f64` + `vbslq_f64`)
+///   - `x86_64` + not `force_scalar` → SSE2 (`_mm_mul_pd` + manual blend)
+///   - else → scalar fallback
 #[inline]
 pub fn discount_regrets(regrets: &mut [f64], pos_scale: f64, neg_scale: f64) {
     #[cfg(all(target_arch = "aarch64", not(feature = "force_scalar")))]
@@ -400,11 +497,26 @@ pub fn discount_regrets(regrets: &mut [f64], pos_scale: f64, neg_scale: f64) {
     unsafe {
         neon::discount_regrets_neon(regrets, pos_scale, neg_scale)
     }
-    #[cfg(not(all(target_arch = "aarch64", not(feature = "force_scalar"))))]
+    #[cfg(all(
+        target_arch = "x86_64",
+        not(target_arch = "aarch64"),
+        not(feature = "force_scalar")
+    ))]
+    // SAFETY: SSE2 is baseline on every x86_64 target (part of the x86_64
+    // ABI); slice bounds are checked above; loads/stores are unaligned-safe.
+    unsafe {
+        sse2::discount_regrets_sse2(regrets, pos_scale, neg_scale)
+    }
+    #[cfg(any(
+        feature = "force_scalar",
+        not(any(target_arch = "aarch64", target_arch = "x86_64"))
+    ))]
     discount_regrets_scalar(regrets, pos_scale, neg_scale)
 }
 
 /// Strategy-sum discount — public dispatch.
+///
+/// Dispatch order matches [`discount_regrets`]: NEON > SSE2 > scalar.
 #[inline]
 pub fn discount_strategy_sum(strategy: &mut [f64], strat_scale: f64) {
     #[cfg(all(target_arch = "aarch64", not(feature = "force_scalar")))]
@@ -412,7 +524,19 @@ pub fn discount_strategy_sum(strategy: &mut [f64], strat_scale: f64) {
     unsafe {
         neon::discount_strategy_sum_neon(strategy, strat_scale)
     }
-    #[cfg(not(all(target_arch = "aarch64", not(feature = "force_scalar"))))]
+    #[cfg(all(
+        target_arch = "x86_64",
+        not(target_arch = "aarch64"),
+        not(feature = "force_scalar")
+    ))]
+    // SAFETY: see discount_regrets — SSE2 baseline on x86_64.
+    unsafe {
+        sse2::discount_strategy_sum_sse2(strategy, strat_scale)
+    }
+    #[cfg(any(
+        feature = "force_scalar",
+        not(any(target_arch = "aarch64", target_arch = "x86_64"))
+    ))]
     discount_strategy_sum_scalar(strategy, strat_scale)
 }
 
@@ -556,6 +680,37 @@ mod tests {
         let mut b = a.clone();
         update_strategy_sum(&mut a, &st, 0.5);
         update_strategy_sum_scalar(&mut b, &st, 0.5);
+        for i in 0..a.len() {
+            assert_eq!(a[i].to_bits(), b[i].to_bits(), "lane {} differs", i);
+        }
+    }
+
+    /// PR 61 — SSE2 path parity check. Only runs on x86_64; on aarch64 we
+    /// rely on the dispatcher tests above (which select NEON) plus the
+    /// CI x86_64 job exercising this path.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn discount_regrets_sse2_matches_scalar() {
+        let inputs: Vec<f64> = vec![-2.0, -1.0, 0.0, 1.0, 2.5, -0.3, 0.7, 0.0, 1e-10, -1e-10];
+        let mut a = inputs.clone();
+        let mut b = inputs.clone();
+        // SAFETY: SSE2 baseline on x86_64; slice valid.
+        unsafe { super::sse2::discount_regrets_sse2(&mut a, 0.7, 0.3) };
+        discount_regrets_scalar(&mut b, 0.7, 0.3);
+        for i in 0..a.len() {
+            assert_eq!(a[i].to_bits(), b[i].to_bits(), "lane {} differs", i);
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn discount_strategy_sum_sse2_matches_scalar() {
+        let inputs: Vec<f64> = (0..11).map(|i| (i as f64) * 0.1 - 0.5).collect();
+        let mut a = inputs.clone();
+        let mut b = inputs.clone();
+        // SAFETY: SSE2 baseline on x86_64; slice valid.
+        unsafe { super::sse2::discount_strategy_sum_sse2(&mut a, 0.5) };
+        discount_strategy_sum_scalar(&mut b, 0.5);
         for i in 0..a.len() {
             assert_eq!(a[i].to_bits(), b[i].to_bits(), "lane {} differs", i);
         }
