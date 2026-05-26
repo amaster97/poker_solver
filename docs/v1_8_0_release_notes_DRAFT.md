@@ -9,8 +9,11 @@ hardening) are folded into v1.8.0 per
 final ship sequence executes (tag + GitHub release).**
 
 **Release date:** 2026-05-XX (TBD at ship time)
-**Tag:** `v1.8.0` (TBD)
-**Commit SHA:** TBD at tag time (post-PR-32 baseline is `77e751c`).
+**Tag:** `v1.8.0` (to be created at ship time)
+**Baseline commit on `origin/main`:** `eb74fb3` (PR #60, 2026-05-26).
+Final tag SHA will be set at `git tag` time; the polish PRs landing
+after this draft are documentation-only and do not change the SIMD /
+`.dmg` ship surface.
 
 ---
 
@@ -77,11 +80,14 @@ Per-backend coverage:
 Why this matters: the previous v1.7.x line was already NEON-optimized
 for Apple Silicon, but x86_64 users (Intel Macs, Windows PCs, Linux
 desktops, CI runners) got the scalar fallback. That's a ~3-month gap
-between Apple Silicon and x86_64 performance, now closed. The
-cross-platform spec
+between Apple Silicon and x86_64 performance, now closed (at the
+architecture level — the empirical x86_64 wall-clock measurement
+remains pending). The cross-platform spec
 (`docs/pr_proposals/v1_8_cross_platform_simd_spec.md`) drives the
-architecture; Sarah persona W2.3 (turn Nash under a 5-min budget) is
-now unblocked on M-series.
+architecture. Sarah persona W2.3 remains pending the post-v1.8 retest
+(turn-fixture, agent in flight 2026-05-26); the original "unblocked
+on M-series" projection was tied to a 4-8× SIMD speedup that did not
+materialize on M4 Pro arm64 (see "Persona test status" below).
 
 ### 2. `.dmg` fork-bomb fix (CRITICAL)
 
@@ -222,6 +228,78 @@ CHANGELOG follows **Option A** alignment (fold v1.7.2 entry into
 v1.8.0, do not preserve a separate v1.7.2 section) per
 `docs/v1_8_0_release_notes_prep_2026-05-26.md` Open Question #1.
 
+### 7. Documentation + ship-process cleanup wave
+
+A user-impactful subset of the documentation / packaging / CI cleanup
+PRs that landed on `main` between v1.7.0 and v1.8.0 (in addition to
+the lint/clippy/deps green-up and doc-accuracy PRs already called out
+in §3 and §4 above):
+
+- **[PR #46][pr46]** — `mypy` resolves 7 substantive type errors
+  (post-cleanup follow-up; tightens runtime correctness for the public
+  Python API).
+- **[PR #47][pr47]** — `.dmg` packaging hardening: arch label + version
+  stamp accuracy follow-up to PR #42's fork-bomb fix. Removes a
+  user-confusing "universal" arch label on a `.dmg` that ships an
+  arm64-only `_rust.so`.
+- **[PR #48][pr48]** — `USAGE.md` §7b header refresh (v1.4.x → v1.7.x)
+  with regime guidance (salvaged from a stale PR #24).
+- **[PR #54][pr54-script]** — v1.8.0 release execution script + `.dmg`
+  build runbook (codifies the ship sequence so the next release does
+  not relitigate the build-environment quirks).
+- **[PR #58][pr58]** — CHANGELOG note for the `poker-solver` PATH shim
+  quirk (see "Known issues remaining" below for the user-facing
+  workaround).
+- **[PR #59][pr59-persona]** — persona-test status snapshot refresh
+  post-W3.2 / W3.4 retests (see "Persona test status" below).
+- **[PR #60][pr60-orphan]** — track previously-orphan reference targets
+  (closes 7 dangling-reference lints from the doc-cross-check sweep).
+
+This cleanup wave does not change any runtime behavior; it lifts the
+release boundary to a clean lint / docs / packaging baseline.
+
+### 8. Persona test status (post-v1.8 SIMD + W3.2 + W3.4 retests)
+
+The persona-test framework's counts as of 2026-05-26 (post the W3.2 +
+W3.4 retests; W2.3 turn-fixture retest IN PROGRESS):
+
+| Verdict | Count | Workflows |
+|---|---|---|
+| **PASS** | **9** | W1.1, W1.2, W1.3, W1.4, W2.5, W3.1, **W3.2** (new), **W3.4** (caveated), W4.1, W4.3 *(W4.3 via aggregator path)* |
+| **PARTIAL** | 5 | W1.5, W2.1, W2.2, W2.4, W3.3, W4.2 |
+| **BLOCKED** | 2 | W2.3 *(pending retest)*, others closed by v1.8 + PR #38 |
+| **FAIL** | 1 | W3.5 *(Type B-DOC; docs-only follow-up, no code patch needed per `v1_7_1_wrapper_fix_spec.md`)* |
+
+**Net delta vs the 2026-05-25 snapshot (7 / 5 / 4 / 2):** +2 PASS, -2
+BLOCKED, -1 FAIL→PARTIAL (W3.5 reclassified to PARTIAL-Type-B-DOC
+after the v1.8 retest confirmed bit-identical-to-v1.7.0 behavior).
+
+- **W3.2: BLOCKED → PASS.** PR 76 (PR #38, commit `feee974`) shipped
+  `solve_best_response(game, opponent_strategy, *, hero_player)` plus
+  a `poker-solver best-response` CLI subcommand; the Kuhn smoke shows
+  `exploit_gap_bb > 0` on both seats. Type A (correctness; cleared the
+  named API blocker). Source: `docs/persona_w3_2_smoke_2026-05-26.md`.
+- **W3.4: BLOCKED → PASS (caveated).** PASS on the **repurposed**
+  monotone-river 3-bet-pot polarization fixture (80.71 s wall-clock,
+  27% of the Sarah 300 s gate); all 7 acceptance thresholds met.
+  **The W3.4 unblock was via fixture-repurposing, NOT via the v1.8
+  SIMD perf gain** — the original W3.4 flop MDF fixture remains
+  perf-bound; v1.8 SIMD measured ~1.0× on M4 Pro arm64 did not deliver
+  the projected 4-8× speedup. Source:
+  `docs/persona_w3_4_retest_2026-05-26.md`.
+- **W3.5: FAIL → PARTIAL (Type B-DOC).** v1.8 SIMD bit-identical to
+  v1.7.0 on the 6-class smoke (delta ~0); classification stands per
+  `v1_7_1_wrapper_fix_spec.md` (docstring + regression-test gaps; no
+  code patch needed). Source:
+  `docs/persona_w3_5_retest_2026-05-26.md`.
+- **W2.3: PENDING.** Post-v1.8 retest agent in flight (`a99ec2e`) on
+  the pre-staged turn fixture. Final tally will be 9 or 10 PASS / 1 or
+  2 BLOCKED depending on the wall-clock measurement.
+
+Full per-workflow status: `docs/persona_test_status_2026-05-26.md`
+(supersedes the 2026-05-25 baseline). The post-v1.8 audit framing is
+captured at `docs/persona_status_post_v1_8_2026-05-26.md`.
+
 ---
 
 ## Known issues remaining
@@ -230,29 +308,50 @@ The following are **NOT** resolved in v1.8.0 and remain open for future
 work:
 
 - **Deep-cap A83 ≥33-pp bottom-pair-Ace divergence vs Brown reference
-  solver.** The Brown apples-to-apples acceptance test continues to
-  report per-cell strict divergences at the bottom-pair-Ace cluster
-  on the A83 board in deep-cap (100bb+) settings. **Root cause is
-  established as a combination of two documented designs, neither of
-  which is a DCFR-algorithm bug: (a) terminal-utility convention
-  divergence — Brown's solver awards the full pot (including base_pot)
-  to the winner, while our convention is zero-sum (winner receives
-  opponent contribution only); and (b) Nash multiplicity at indifference
-  manifolds in the deep-cap subgame.** Both solvers are essentially
-  Nash (Brown exploitability 0.06 chips at 2000 iters = 0.006% of pot;
-  matched-config empirical verification 2026-05-25, VERDICT C). **The
-  reframed 4-layer acceptance test (L1 structural / L2 shallow-strict /
-  L3 deep-directional L1 ≤ 1.9 / L3' p75 L1 ≤ 0.60 / L4 top-action
-  ≥ 60%) PASSES on both river spots — see Dry-run #10.** The strict
-  per-cell residual is treated as informational; see
-  `docs/a83_validation_2026-05-26.md` (DCFR-math validation, PASS),
+  solver — NOT-A-BUG (arbitrator-confirmed).** The Brown
+  apples-to-apples acceptance test continues to report per-cell strict
+  divergences at the bottom-pair-Ace cluster on the A83 board in
+  deep-cap (100bb+) settings. **The terminal-utility arbitration
+  (2026-05-26) rendered a NOT-A-BUG verdict** for the divergence: when
+  `initial_contributions` is set to `(base_pot/2, base_pot/2)` (the
+  seed-split applied by every production codepath), the per-terminal
+  delta vs Brown is a uniform constant that cancels exactly at the
+  regret-difference step, so the Nash equilibrium is unchanged. The
+  remaining per-cell residual is the combined effect of (a)
+  terminal-utility convention divergence at the audit-abstraction
+  layer (Brown awards full pot including `base_pot` to the winner;
+  ours is zero-sum) and (b) Nash multiplicity at indifference
+  manifolds in the deep-cap subgame. Both solvers are essentially
+  Nash (Brown exploitability 0.06 chips at 2000 iters = 0.006% of
+  pot; matched-config empirical verification 2026-05-25, VERDICT C).
+  **The reframed 4-layer acceptance test (L1 structural / L2
+  shallow-strict / L3 deep-directional L1 ≤ 1.9 / L3' p75 L1 ≤ 0.60 /
+  L4 top-action ≥ 60%) PASSES on both river spots — see Dry-run #10.**
+  The strict per-cell residual is treated as informational; see
+  `docs/terminal_utility_arbitration_2026-05-26.md` (NOT-A-BUG
+  arbitrator verdict), `docs/v1_6_1_ship_hold_review_2026-05-26.md`
+  (HOLD-LIFTED decision), `docs/a83_validation_2026-05-26.md`
+  (DCFR-math validation, PASS),
   `docs/a83_deep_cap_root_cause_investigation.md`,
   `docs/matched_config_investigation.md`, and the project memory rule
   `feedback_nash_multiplicity_acceptance.md`. The v1.6.1 engine bundle
-  has shipped piecewise on `origin/main` (10 PRs landed
-  2026-05-26 02:32-03:02 UTC); the hold is lifted and the fixes are
-  folded into v1.8.0 per `docs/v1_6_1_ship_hold_review_2026-05-26.md`
-  and `docs/v1_7_1_tag_decision_2026-05-26.md`.
+  shipped piecewise on `origin/main` (10 PRs landed 2026-05-26
+  02:32-03:02 UTC); the hold is lifted and the fixes are folded into
+  v1.8.0 per `docs/v1_6_1_ship_hold_review_2026-05-26.md` and
+  `docs/v1_7_1_tag_decision_2026-05-26.md`.
+- **`poker-solver` PATH shim quirk (dev-environment, pre-existing).**
+  If `poker-solver` on PATH fails with `ModuleNotFoundError: No module
+  named 'poker_solver'`, the shim is likely resolving against a stale
+  editable-install `.pth` from a deleted temp worktree in another
+  Python on PATH. Two equally good workarounds:
+  - `./.venv/bin/poker-solver ...` (from project root)
+  - `python -m poker_solver.cli ...` (with `.venv` activated)
+  Cleanup: `pip uninstall poker_solver` from the broken Python env,
+  then `pip install -e .` from project root. This is a pre-existing
+  dev-environment quirk surfaced by W3.2 smoke — NOT a v1.8 regression.
+  Full diagnostic: `docs/poker_solver_shim_fix_2026-05-26.md`. The
+  CHANGELOG carries the same workaround text under v1.8.0 known issues
+  (PR #58).
 - **`Range` fractional frequencies.** The spec for true fractional
   frequencies (e.g. `AKs:0.6`) landed in [PR #36][pr36]; the
   implementation is tracked separately and not in v1.8.0.
@@ -379,7 +478,11 @@ performance and a ~2-month-old critical packaging bug. Thanks to:
   payoff computation at terminal nodes) if profiling shows they're now
   the dominant cost.
 - **v1.9 candidate**: EMD bucketing for flop interactive viability.
-  v1.8 unblocks turn workflows; flop is the next persona-budget gate.
+  Since v1.8 SIMD measured ~1.0× on M4 Pro arm64 (root cause: LLVM
+  `-O3` already autovectorizes the small-slice case), EMD bucketing
+  is now the more likely lever for unblocking the perf-bound turn /
+  flop persona workflows (W2.3 / W3.4 flop / W2.1 / W2.4); the W2.3
+  retest in flight will set the final wall-clock baseline.
 - **v2.0**: full-tree preflop solver + range-based dealing (currently
   on a long-running v2 feature branch).
 
@@ -400,3 +503,10 @@ performance and a ~2-month-old critical packaging bug. Thanks to:
 [pr43]: https://github.com/amaster97/poker_solver/pull/43
 [pr44]: https://github.com/amaster97/poker_solver/pull/44
 [pr45]: https://github.com/amaster97/poker_solver/pull/45
+[pr46]: https://github.com/amaster97/poker_solver/pull/46
+[pr47]: https://github.com/amaster97/poker_solver/pull/47
+[pr48]: https://github.com/amaster97/poker_solver/pull/48
+[pr54-script]: https://github.com/amaster97/poker_solver/pull/54
+[pr58]: https://github.com/amaster97/poker_solver/pull/58
+[pr59-persona]: https://github.com/amaster97/poker_solver/pull/59
+[pr60-orphan]: https://github.com/amaster97/poker_solver/pull/60
