@@ -10,7 +10,7 @@ from __future__ import annotations
 import itertools
 import math
 import random
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Union
 
@@ -193,7 +193,13 @@ def _enumerate_exact(
     cards_needed: int,
 ) -> list[EquityResult]:
     results = [EquityResult() for _ in hands]
-    runouts: Sequence[Sequence[Card]]
+    # NOTE: ``Iterable[Sequence[Card]]`` (not ``Sequence[Sequence[Card]]``) —
+    # ``itertools.combinations`` returns an iterator (Iterable, not Sequence),
+    # and Sequence is invariant in its type parameter so a literal
+    # ``[()]: list[tuple[()]]`` would not be assignable to
+    # ``Sequence[Sequence[Card]]``. The loop below only iterates ``runouts``
+    # once, so Iterable is sufficient.
+    runouts: Iterable[Sequence[Card]]
     if cards_needed == 0:
         runouts = [()]
     else:

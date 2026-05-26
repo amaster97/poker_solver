@@ -465,8 +465,15 @@ class HUNLPoker:
             return (-c0 / bb, c0 / bb)
         if state.folded[1]:
             return (c1 / bb, -c1 / bb)
-        rank0 = evaluate(list(state.hole_cards[0]) + list(state.board))
-        rank1 = evaluate(list(state.hole_cards[1]) + list(state.board))
+        # Showdown requires hole cards. ``hole_cards`` is typed as the union
+        # ``tuple[tuple[Card, Card], tuple[Card, Card]] | tuple[()]`` so mypy
+        # can't index into it without narrowing; the runtime invariant is
+        # that a non-folded showdown always has the populated variant
+        # (chance nodes deal hole cards before the first player decision).
+        hole = state.hole_cards
+        assert len(hole) == 2, "showdown reached with no hole cards dealt"
+        rank0 = evaluate(list(hole[0]) + list(state.board))
+        rank1 = evaluate(list(hole[1]) + list(state.board))
         if rank0 > rank1:
             return (c1 / bb, -c1 / bb)
         if rank1 > rank0:
@@ -824,7 +831,12 @@ def _normalize_hole_action(
     """Accept either a packed-int hole outcome or a nested tuple of Cards."""
     if isinstance(action, tuple):
         return action  # type: ignore[return-value]
-    cards = _unpack_hole_outcome(int(action))  # type: ignore[arg-type]
+    if not isinstance(action, (int, str)):
+        raise TypeError(
+            f"_normalize_hole_action: expected packed-int Action or nested "
+            f"tuple of Cards, got {type(action).__name__}"
+        )
+    cards = _unpack_hole_outcome(int(action))
     return ((cards[0], cards[1]), (cards[2], cards[3]))
 
 

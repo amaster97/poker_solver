@@ -696,7 +696,13 @@ def _extract_first_decision_freqs(
             actions = game.legal_actions(state)
             key = game.infoset_key(state, cur)
             probs = sresult.average_strategy.get(key)
-            idx = 0 if probs is None else max(range(len(probs)), key=lambda i: probs[i])
+            if probs is None:
+                idx = 0
+            else:
+                # Bind to a non-Optional local so the lambda closure can
+                # index into it without mypy complaining about Optional.
+                probs_nn = probs
+                idx = max(range(len(probs_nn)), key=lambda i: probs_nn[i])
             state = game.apply(state, actions[idx])
             visited += 1
             continue
