@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14         # Apple Silicon (aarch64)
+            python: '3.13'
+            target: aarch64-apple-darwin
+          - os: macos-13         # Intel Mac (x86_64)
+            python: '3.13'
+            target: x86_64-apple-darwin
+          - os: ubuntu-22.04     # Linux x86_64
+            python: '3.13'
+            target: x86_64-unknown-linux-gnu
+          # Optional adds (gate on user OK before enabling):
+          # - os: ubuntu-22.04-arm
+          #   python: '3.13'
+          #   target: aarch64-unknown-linux-gnu
+          # - os: windows-2022
+          #   python: '3.13'
+          #   target: x86_64-pc-windows-msvc
+
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install maturin
+        run: pip install maturin
+
+      - name: Build Rust + Python tier
+        run: |
+          maturin develop --release --target ${{ matrix.target }}
+          pip install -e .
+
+      - name: Cargo unit tests
+        run: cargo test --lib --release --target ${{ matrix.target }}
+
+      - name: Pytest smoke (fast tier)
+        run: pytest -m "not slow" --timeout=120
+
+      - name: Differential SIMD test (cross-platform parity)
+        run: pytest tests/ -k "simd" -v --timeout=120
