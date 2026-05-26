@@ -666,9 +666,12 @@ is a thin wrapper around an existing library API; zero engine changes.
   frequencies across the villain range by combo weight.
 
   ```bash
-  poker-solver river --board "As 7c 2d Kh 5s" --hero AhKh \
+  poker-solver river --board "As 7c 2d Kh 5s" --hero AdQd \
       --villain-range "QQ,JJ,AKs" --iters 200
   ```
+
+  (Hero cards must not overlap any board card — e.g. `--hero AhKh` on
+  this board would error because `Kh` is on the board.)
 
   Flags: `--board` (5 cards), `--hero` (2-card hole), `--villain-range`
   (Pio notation), `--iters` (default 200), `--pot-bb` (default 10),
