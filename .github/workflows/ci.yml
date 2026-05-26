@@ -45,13 +45,19 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
+      - name: Create venv (maturin develop requires one)
+        run: |
+          python -m venv .venv
+          echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+
       - name: Install maturin
         run: pip install maturin
 
       - name: Build Rust + Python tier
         run: |
           maturin develop --release --target ${{ matrix.target }}
-          pip install -e .
+          pip install -e ".[dev]"
 
       - name: Cargo unit tests
         run: cargo test --lib --release --target ${{ matrix.target }}
@@ -60,4 +66,8 @@ jobs:
         run: pytest -m "not slow" --timeout=120
 
       - name: Differential SIMD test (cross-platform parity)
-        run: pytest tests/ -k "simd" -v --timeout=120
+        # Rust crate owns the SIMD impl + tests (simd::tests::*). No Python
+        # tests are tagged "simd" yet, so the previous `pytest -k simd`
+        # matched nothing. Run the Rust simd test module directly until
+        # Python-side parity tests land.
+        run: cargo test --release --target ${{ matrix.target }} -p cfr_core simd::tests
