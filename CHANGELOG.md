@@ -13,6 +13,50 @@ In-flight on feature branches; not yet merged to `main`.
 - v1.5/v2 follow-ups (Q3 exploitability slider reframe; range-based
   dealing; Rust callbacks; full-tree preflop).
 
+## [1.8.0] - 2026-05-XX
+
+### Cross-platform SIMD vector kernels
+
+DCFR hot loops now vectorized across all target ISAs with bit-identical
+output:
+
+- **aarch64**: NEON 128-bit 2-lane f64
+- **x86_64**: SSE2 (2-lane) baseline; AVX2 (4-lane) gated by
+  `is_x86_feature_detected!("avx2")` runtime check
+- **scalar fallback**: any architecture not covered + epilogue tail
+
+Vectorized kernels (all per-iter hot paths in `dcfr_vector.rs`):
+1. `discount_regrets` + `discount_strategy_sum` (Phase 1, PR #23 + AVX2 PR #25)
+2. `update_regret_sum` (Phase 2, PR #26)
+3. `update_strategy_sum` (Phase 3, PR #70)
+4. `compute_strategy` (Phase 4, PR #32)
+
+End-to-end cross-backend smoke test (PR #30) confirms bit-identical Kuhn
+solve output between scalar and SIMD paths over 1000 iterations.
+
+### Performance
+
+Per the v1.8 cross-platform SIMD spec
+(`docs/v1_8_cross_platform_simd_spec.md`):
+- Apple Silicon (M-series): ~4-8x speedup vs scalar on hot loops
+- x86_64 with AVX2: ~2-4x speedup
+- x86_64 SSE2-only: ~1.5-2x speedup
+- Pre-Haswell x86_64 / non-vectorized arches: no regression
+  (scalar path)
+
+Unblocks Sarah persona W2.3 (turn Nash) under 5-min budget on M-series.
+
+### CI hardening
+
+- PR #20: cross-platform CI matrix (Ubuntu x86_64 + macOS arm64)
+- PR #21: CI-driven release workflow
+- PR #22: Ship-hardening Guards B + C
+- PR #28: Brown build script self-bootstrap
+
+### Bug fixes / hardening (rolled into 1.7.1 and 1.8.0)
+
+- (Post-v1.7.1 fixes to be filled in at ship time)
+
 ## [1.7.0] - 2026-05-23
 
 ### Added
