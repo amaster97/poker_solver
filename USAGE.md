@@ -703,13 +703,22 @@ is a thin wrapper around an existing library API; zero engine changes.
 
 ---
 
-## 7b. Known perf cliffs (v1.4.x)
+## 7b. Known perf cliffs (v1.7.x)
 
-The honest framing: the v1.4.x Python solver targets two regimes
+The honest framing: the v1.7.x Python solver targets two regimes
 well — short pushfold (§3a) and fixed-cards postflop subgames (§3b).
 Outside those regimes, performance is bounded by the
 chance-enum-at-root architecture and the post-solve exploitability
 walk. The §5.2 aggregator is the production-safe workaround today.
+
+Regime guidance at a glance:
+
+- **River spots:** fast (sub-second to seconds on the Rust tier);
+  good for interactive use today.
+- **Turn spots:** minutes per solve on the Nash path; aggregator
+  (§5.2) is recommended for interactive turn queries.
+- **Flop spots:** not interactive on the Nash path; use the
+  aggregator (§5.2) for production-scale flop range queries.
 
 - **`initial_hole_cards=()` on flop / turn / river is slow.** The
   full-range chance-enum path (§5.1) walks the lossless combo tree at
