@@ -102,6 +102,24 @@ def _build_postflop_config(args: argparse.Namespace) -> HUNLConfig:
     (3=flop, 4=turn, 5=river). `--stacks` is the per-player BB count
     (symmetric); `--bet-sizes` overrides the bet-size menu.
     """
+    # PR 108 (v1.8 hot-patch): the Rust scalar backend (`--backend rust`)
+    # requires fixed hole cards to drive `solve_hunl_postflop`. The CLI
+    # has no `--initial-hole-cards` flag yet, so `--hunl-mode postflop
+    # --backend rust` would silently produce an empty strategy (chance
+    # root + empty `chance_outcomes()` => CFR returns `[0, 0]`). Hard-fail
+    # loudly until the RvR CLI sub-mode lands. See
+    # `docs/chance_outcomes_empty_rca_2026-05-26.md`.
+    if getattr(args, "backend", "python") == "rust":
+        raise ValueError(
+            "--hunl-mode postflop --backend rust currently has no way to "
+            "specify fixed hole cards, which the Rust scalar solver requires "
+            "(without them, the root becomes a chance node and the solve "
+            "returns an empty strategy). For range-vs-range Nash on a "
+            "postflop board, use the Python API "
+            "poker_solver.solve_range_vs_range_nash(config, hero_range, "
+            "villain_range, ...) instead. Use --backend python for the "
+            "reference postflop path."
+        )
     board_spec = getattr(args, "board", None)
     if not board_spec:
         raise ValueError(

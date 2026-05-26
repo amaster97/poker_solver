@@ -652,6 +652,37 @@ fn test_hunl_solve_reject_preflop() {
 }
 
 // ---------------------------------------------------------------------------
+// Test 12b (PR 108 hot-patch): solve_hunl_postflop hard-fails when called
+// without initial_hole_cards. Documented silent no-op in
+// `docs/chance_outcomes_empty_rca_2026-05-26.md`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_hunl_solve_reject_missing_hole_cards() {
+    let mut config = default_tiny_subgame();
+    config.initial_hole_cards = None;
+    let result = solve_hunl_postflop(
+        &config, None, 10, 1.5, 0.0, 2.0, None, None, None, 0.0, 0,
+    );
+    match result {
+        Err(HUNLSolveError::InvalidConfig(msg)) => {
+            assert!(
+                msg.contains("initial_hole_cards"),
+                "expected message to mention initial_hole_cards, got: {msg}"
+            );
+        }
+        Err(e) => panic!(
+            "missing hole cards should yield InvalidConfig, got: {:?}",
+            e
+        ),
+        Ok(out) => panic!(
+            "missing hole cards should be rejected, got Ok with {} infosets",
+            out.infoset_count
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Test 13: action ID constants match Python's canonical table.
 // ---------------------------------------------------------------------------
 
