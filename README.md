@@ -96,8 +96,18 @@ poker-solver solve --game hunl --hunl-mode tiny_subgame --iterations 500
 
 # Same river subgame on the Rust tier (~24x faster):
 poker-solver solve --game hunl --hunl-mode tiny_subgame --iterations 1000 --backend rust
+```
 
-# Ad-hoc postflop subgame from CLI flags (100 BB flop, custom bet menu):
+**Ad-hoc postflop subgames (`--hunl-mode postflop`)** run the full
+range-vs-range enumeration over the hole-card chance node, and that
+tree dominates wall-time regardless of iteration count or backend.
+Expect **multi-minute** runs on a flop (3-card board), and tens of
+seconds even on a river (5-card board) with a 1-size bet menu. Example
+form (not a Quick-start; budget time accordingly):
+
+```bash
+# Postflop ad-hoc subgame — expect minutes on a flop, even with --iterations 500.
+# For fast exploration of the API, use --hunl-mode tiny_subgame above.
 poker-solver solve --game hunl --hunl-mode postflop \
     --board "As 7c 2d" --stacks 100 --bet-sizes "33,75,150" \
     --iterations 500 --backend rust
