@@ -134,6 +134,42 @@ pub fn update_strategy_sum_scalar(strategy_sum: &mut [f64], strategy: &[f64], ow
     }
 }
 
+/// Scalar version of [`update_regret_sum_vector`] — DCFR vector-form
+/// regret update from `dcfr_vector.rs:443-450`.
+///
+/// For each `(h, a)`:
+///   `regret[h*A + a] += action_value[a*H + h] - node_value[h]`
+///
+/// Note the **shape asymmetry**:
+///   - `regret` is hand-major (`[h][a]`, contiguous over `a`).
+///   - `action_value` is action-major (`[a][h]`, contiguous over `h`).
+///   - `node_value` is per-hand (`[h]`, contiguous over `h`).
+///
+/// The reference traversal in Brown's `trainer.cpp:211-224` (MIT) writes
+/// `regret_weight` separately; the call-site in `dcfr_vector.rs` carries
+/// `regret_weight = 1.0` per DCFR spec (`trainer.cpp:354-355`), so the
+/// SIMD kernels here fold the constant away.
+#[inline]
+pub fn update_regret_sum_vector_scalar(
+    regret: &mut [f64],
+    action_value: &[f64],
+    node_value: &[f64],
+    hand_count: usize,
+    action_count: usize,
+) {
+    debug_assert_eq!(regret.len(), hand_count * action_count);
+    debug_assert_eq!(action_value.len(), action_count * hand_count);
+    debug_assert_eq!(node_value.len(), hand_count);
+    for h in 0..hand_count {
+        let offset = h * action_count;
+        let base = node_value[h];
+        for a in 0..action_count {
+            let delta = action_value[a * hand_count + h] - base;
+            regret[offset + a] += delta;
+        }
+    }
+}
+
 /// Scalar normalize-by-total (in-place). Mirrors the regret-matching
 /// fallback used in `dcfr.rs`'s `get_strategy` *bit-for-bit*: the original
 /// code does `*p /= total` (per-lane division), NOT `*p *= 1.0/total`
@@ -351,6 +387,61 @@ mod neon {
         }
     }
 
+    /// DCFR vector-form regret update — `regret[h*A + a] +=
+    /// action_value[a*H + h] - node_value[h]`.
+    ///
+    /// **Shape complication**: `regret` is hand-major but `action_value` is
+    /// action-major. Per the v1.8 roadmap, this first pass keeps the loop
+    /// structure scalar (outer over `a`, inner over `h`) but vectorizes the
+    /// inner-most subtraction across two contiguous hands per chunk.
+    /// `action_value[a*H + h..h+2]` and `node_value[h..h+2]` are both
+    /// contiguous over `h`, so `vsubq_f64` works directly; the scatter-add
+    /// into `regret[h*A + a]` and `regret[(h+1)*A + a]` is scalar (the
+    /// strided write defeats a vector store; a transpose-then-vectorize is
+    /// the Phase 3+ optimization per the roadmap).
+    ///
+    /// Bit-exactness vs scalar: each lane computes `av - node` followed by
+    /// `regret += diff` — the same two roundings as the scalar
+    /// `update_regret_sum_vector_scalar` reference.
+    ///
+    /// # Safety
+    /// All slices must satisfy: `regret.len() == H*A`,
+    /// `action_value.len() == A*H`, `node_value.len() == H`.
+    #[target_feature(enable = "neon")]
+    #[inline]
+    pub unsafe fn update_regret_sum_vector_neon(
+        regret: &mut [f64],
+        action_value: &[f64],
+        node_value: &[f64],
+        hand_count: usize,
+        action_count: usize,
+    ) {
+        debug_assert_eq!(regret.len(), hand_count * action_count);
+        debug_assert_eq!(action_value.len(), action_count * hand_count);
+        debug_assert_eq!(node_value.len(), hand_count);
+        for a in 0..action_count {
+            let av_base = action_value.as_ptr().add(a * hand_count);
+            let mut h = 0usize;
+            while h + 2 <= hand_count {
+                // Both av and node are contiguous over h.
+                let av = vld1q_f64(av_base.add(h));
+                let node = vld1q_f64(node_value.as_ptr().add(h));
+                let diff = vsubq_f64(av, node);
+                // Extract lanes for the scatter-add into hand-major regret.
+                let d0 = vgetq_lane_f64::<0>(diff);
+                let d1 = vgetq_lane_f64::<1>(diff);
+                *regret.get_unchecked_mut(h * action_count + a) += d0;
+                *regret.get_unchecked_mut((h + 1) * action_count + a) += d1;
+                h += 2;
+            }
+            while h < hand_count {
+                let delta = *av_base.add(h) - *node_value.get_unchecked(h);
+                *regret.get_unchecked_mut(h * action_count + a) += delta;
+                h += 1;
+            }
+        }
+    }
+
     /// Normalize in place: divide each lane by `total` (if positive) or
     /// fill with `1/n` (if zero). **Bit-identical to scalar** —
     /// `vdivq_f64` per-lane division (not multiply-by-reciprocal).
@@ -470,6 +561,55 @@ mod sse2 {
         while i < n {
             strategy[i] *= strat_scale;
             i += 1;
+        }
+    }
+
+    /// DCFR vector-form regret update on x86_64 via SSE2. Semantics:
+    /// `regret[h*A + a] += action_value[a*H + h] - node_value[h]`.
+    ///
+    /// Same shape strategy as the NEON path: outer loop over `a`, inner
+    /// over `h` in 2-wide chunks. `_mm_sub_pd` computes the diff over two
+    /// contiguous hands; the scatter-add into hand-major `regret` is
+    /// scalar (strided write defeats `_mm_storeu_pd`).
+    ///
+    /// # Safety
+    /// All slices must satisfy: `regret.len() == H*A`,
+    /// `action_value.len() == A*H`, `node_value.len() == H`. SSE2 is
+    /// baseline on every x86_64 target.
+    #[target_feature(enable = "sse2")]
+    #[inline]
+    pub unsafe fn update_regret_sum_vector_sse2(
+        regret: &mut [f64],
+        action_value: &[f64],
+        node_value: &[f64],
+        hand_count: usize,
+        action_count: usize,
+    ) {
+        debug_assert_eq!(regret.len(), hand_count * action_count);
+        debug_assert_eq!(action_value.len(), action_count * hand_count);
+        debug_assert_eq!(node_value.len(), hand_count);
+        for a in 0..action_count {
+            let av_base = action_value.as_ptr().add(a * hand_count);
+            let mut h = 0usize;
+            while h + 2 <= hand_count {
+                let av = _mm_loadu_pd(av_base.add(h));
+                let node = _mm_loadu_pd(node_value.as_ptr().add(h));
+                let diff = _mm_sub_pd(av, node);
+                // Extract lanes for the scatter-add into hand-major regret.
+                // _mm_cvtsd_f64 reads lane 0; lane 1 needs an unpackhi or
+                // store-and-read. Store to a 2-element buffer is the
+                // cleanest cross-version approach.
+                let mut buf = [0.0f64; 2];
+                _mm_storeu_pd(buf.as_mut_ptr(), diff);
+                *regret.get_unchecked_mut(h * action_count + a) += buf[0];
+                *regret.get_unchecked_mut((h + 1) * action_count + a) += buf[1];
+                h += 2;
+            }
+            while h < hand_count {
+                let delta = *av_base.add(h) - *node_value.get_unchecked(h);
+                *regret.get_unchecked_mut(h * action_count + a) += delta;
+                h += 1;
+            }
         }
     }
 }
@@ -724,6 +864,59 @@ pub fn update_regret_sum(
     update_regret_sum_scalar(regret_sum, action_values, node_value, opp_reach)
 }
 
+/// DCFR vector-form regret update — public dispatch.
+///
+/// Computes `regret[h*A + a] += action_value[a*H + h] - node_value[h]` for
+/// every `(h, a)` pair. Replaces the scalar double-loop in
+/// `dcfr_vector.rs:443-450`.
+///
+/// Dispatch order (compile-time):
+///   - `aarch64` + not `force_scalar` → NEON (`vsubq_f64` + scalar scatter)
+///   - `x86_64` + not `force_scalar` → SSE2 (`_mm_sub_pd` + scalar scatter)
+///   - else → scalar fallback
+#[inline]
+pub fn update_regret_sum_vector(
+    regret: &mut [f64],
+    action_value: &[f64],
+    node_value: &[f64],
+    hand_count: usize,
+    action_count: usize,
+) {
+    #[cfg(all(target_arch = "aarch64", not(feature = "force_scalar")))]
+    // SAFETY: NEON is baseline on aarch64; shape pre-conditions are
+    // debug-asserted in the kernel and statically enforced by the call site.
+    unsafe {
+        neon::update_regret_sum_vector_neon(
+            regret,
+            action_value,
+            node_value,
+            hand_count,
+            action_count,
+        )
+    }
+    #[cfg(all(
+        target_arch = "x86_64",
+        not(target_arch = "aarch64"),
+        not(feature = "force_scalar")
+    ))]
+    // SAFETY: SSE2 is baseline on every x86_64 target; shape pre-conditions
+    // are debug-asserted in the kernel.
+    unsafe {
+        sse2::update_regret_sum_vector_sse2(
+            regret,
+            action_value,
+            node_value,
+            hand_count,
+            action_count,
+        )
+    }
+    #[cfg(any(
+        feature = "force_scalar",
+        not(any(target_arch = "aarch64", target_arch = "x86_64"))
+    ))]
+    update_regret_sum_vector_scalar(regret, action_value, node_value, hand_count, action_count)
+}
+
 /// Strategy-sum update — public dispatch.
 #[inline]
 pub fn update_strategy_sum(strategy_sum: &mut [f64], strategy: &[f64], own_reach: f64) {
@@ -950,6 +1143,96 @@ mod tests {
                 "lane {} differs (AVX2 vs SSE2)",
                 i
             );
+        }
+    }
+
+    /// PR 63 — v1.8 Phase 2 vector-form regret update parity check.
+    /// Differential: SIMD dispatch vs scalar reference, bit-exact per lane.
+    #[test]
+    fn update_regret_sum_vector_matches_scalar_bit_exact() {
+        // HUNL-shape mini: 8 hands × 3 actions = 24 regret lanes,
+        // 24 action_value lanes (action-major), 8 node_value lanes.
+        let hand_count = 8;
+        let action_count = 3;
+        let action_value: Vec<f64> = (0..(hand_count * action_count))
+            .map(|i| (i as f64) * 0.13 - 1.5)
+            .collect();
+        let node_value: Vec<f64> = (0..hand_count).map(|i| (i as f64) * 0.07 + 0.5).collect();
+        let initial_regret: Vec<f64> = (0..(hand_count * action_count))
+            .map(|i| (i as f64) * 0.01 - 0.5)
+            .collect();
+
+        let mut via_simd = initial_regret.clone();
+        let mut via_scalar = initial_regret.clone();
+        update_regret_sum_vector(
+            &mut via_simd,
+            &action_value,
+            &node_value,
+            hand_count,
+            action_count,
+        );
+        update_regret_sum_vector_scalar(
+            &mut via_scalar,
+            &action_value,
+            &node_value,
+            hand_count,
+            action_count,
+        );
+        for i in 0..via_simd.len() {
+            assert_eq!(
+                via_simd[i].to_bits(),
+                via_scalar[i].to_bits(),
+                "lane {} differs: simd={} scalar={}",
+                i,
+                via_simd[i],
+                via_scalar[i]
+            );
+        }
+    }
+
+    /// Odd `hand_count` exercises the trailing-lane scalar tail.
+    #[test]
+    fn update_regret_sum_vector_handles_odd_hand_count() {
+        for hand_count in [1usize, 2, 3, 5, 7, 9, 17, 33] {
+            for action_count in [2usize, 3, 4] {
+                let action_value: Vec<f64> = (0..(hand_count * action_count))
+                    .map(|i| (i as f64) * 0.31 - 5.0)
+                    .collect();
+                let node_value: Vec<f64> =
+                    (0..hand_count).map(|i| (i as f64) * 0.17 - 0.3).collect();
+                let initial_regret: Vec<f64> = (0..(hand_count * action_count))
+                    .map(|i| (i as f64) * 0.02 + 0.1)
+                    .collect();
+
+                let mut via_simd = initial_regret.clone();
+                let mut via_scalar = initial_regret.clone();
+                update_regret_sum_vector(
+                    &mut via_simd,
+                    &action_value,
+                    &node_value,
+                    hand_count,
+                    action_count,
+                );
+                update_regret_sum_vector_scalar(
+                    &mut via_scalar,
+                    &action_value,
+                    &node_value,
+                    hand_count,
+                    action_count,
+                );
+                for i in 0..via_simd.len() {
+                    assert_eq!(
+                        via_simd[i].to_bits(),
+                        via_scalar[i].to_bits(),
+                        "H={} A={} lane {} differs: simd={} scalar={}",
+                        hand_count,
+                        action_count,
+                        i,
+                        via_simd[i],
+                        via_scalar[i]
+                    );
+                }
+            }
         }
     }
 
