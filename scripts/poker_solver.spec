@@ -38,11 +38,39 @@ ICON_PATH = str(REPO_ROOT / "assets" / "poker_solver.icns")
 # PR 44 fix: read __version__ dynamically from poker_solver/__init__.py
 # so Info.plist's CFBundleShortVersionString matches the actual package
 # version (previously hardcoded to "0.6.0" — stale since v0.7.0).
-_version_match = re.search(
+#
+# PR 86 hardening: pyproject.toml `[project] version` is the authoritative
+# source. Read it first; cross-check against poker_solver/__init__.py
+# `__version__`; fail loud on mismatch so we never ship a .dmg whose
+# Info.plist stamp drifts from the pyproject.toml release tag.
+_pyproject_text = (REPO_ROOT / "pyproject.toml").read_text()
+# Match the FIRST top-level `version = "x.y.z"` in pyproject.toml. The
+# `(?m)^version\s*=` anchor is intentionally strict so it does NOT match
+# the [tool.ruff] section's `target-version = "py39"` line.
+_pyproject_match = re.search(
+    r'(?m)^version\s*=\s*[\'"]([^\'"]+)[\'"]',
+    _pyproject_text,
+)
+_init_match = re.search(
     r'__version__\s*=\s*[\'"]([^\'"]+)[\'"]',
     (REPO_ROOT / "poker_solver" / "__init__.py").read_text(),
 )
-APP_VERSION = _version_match.group(1) if _version_match else "0.0.0"
+_pyproject_version = _pyproject_match.group(1) if _pyproject_match else None
+_init_version = _init_match.group(1) if _init_match else None
+if _pyproject_version is None:
+    raise RuntimeError(
+        "scripts/poker_solver.spec: pyproject.toml has no top-level "
+        "`version = \"x.y.z\"` line; refusing to stamp Info.plist with "
+        "a guess. Check pyproject.toml [project] section."
+    )
+if _init_version is not None and _init_version != _pyproject_version:
+    raise RuntimeError(
+        f"scripts/poker_solver.spec: version drift between pyproject.toml "
+        f"({_pyproject_version}) and poker_solver/__init__.py "
+        f"({_init_version}). Bring them back in sync before building the "
+        f".dmg — Info.plist stamp would otherwise mislead end users."
+    )
+APP_VERSION = _pyproject_version
 
 # PR 44 fix: widen `datas` / `binaries` / `hiddenimports` to capture
 # NiceGUI 3.x's static/templates dirs and the runtime submodule tree
@@ -128,7 +156,14 @@ exe = EXE(  # noqa: F821
     console=False,  # --windowed
     disable_windowed_traceback=False,
     argv_emulation=False,
-    target_arch="arm64",  # PLAN.md hardware target
+    # PR 86 hardening: arm64-only is the SHIPPED arch. The "universal2"
+    # nomenclature elsewhere in the repo refers ONLY to the maturin-built
+    # _rust.so (which IS universal2 for source-tree pip-install on x86_64
+    # Python under Rosetta).  The PyInstaller-bundled Python interpreter
+    # inside the .app is arm64-only by design (PLAN.md hardware target).
+    # The DMG filename `Poker-Solver-<version>-arm64.dmg` is authoritative;
+    # any doc that still says the .app is "universal2" is stale.
+    target_arch="arm64",  # PLAN.md hardware target — DO NOT change to universal2 without rebuilding all Python wheel deps.
     codesign_identity=None,  # Signing handled out-of-band by sign_and_notarize.py
     entitlements_file=None,
 )
