@@ -673,9 +673,13 @@ def test_memory_profiler_golden_file_river_only() -> None:
     canonical-field byte counts are pinned here. Any future schema or
     counting drift surfaces as a numerical diff.
 
-    Pinned values were captured fresh on a clean v1.5.0 worktree
-    (``dc3df6c``). If they drift, INVESTIGATE the cause before updating
-    — the most likely cause is a real regression in either the profiler
+    Pinned values were originally captured on a clean v1.5.0 worktree
+    (``dc3df6c``) and refreshed in PR 59 (post-PR-50, v1.7.1 bundle) to
+    reflect the facing-all-in guard suppressing the degenerate ALL_IN
+    action when ``stack <= to_call``. This shrinks the river action
+    menu (mean 3.25 -> 2.75 actions) and the solver arrays accordingly.
+    If they drift further, INVESTIGATE the cause before updating —
+    the most likely cause is a real regression in either the profiler
     or the solver's infoset key format, NOT a "harmless" change.
     """
     _require_profiler_surface()
@@ -703,16 +707,16 @@ def test_memory_profiler_golden_file_river_only() -> None:
     golden = {
         "iterations_at_snapshot": 10,
         "abstraction_table_bytes": 0,  # solve_hunl_postflop probes without abstraction
-        "solver_arrays_total_bytes": 832,
+        "solver_arrays_total_bytes": 704,
         "other_overhead_bytes": 1398,
-        "grand_total_bytes": 2230,
+        "grand_total_bytes": 2102,
         "per_street_count": 1,  # river-only -> one entry
         "river_infoset_count": 16,
-        "river_regret_bytes": 416,
-        "river_strategy_bytes": 416,
+        "river_regret_bytes": 352,
+        "river_strategy_bytes": 352,
         "river_other_bytes": 932,
-        "river_total_bytes": 1764,
-        "river_mean_actions": 3.25,
+        "river_total_bytes": 1636,
+        "river_mean_actions": 2.75,
         "river_max_actions": 4,
         "preflop_entry_is_none": True,
     }
