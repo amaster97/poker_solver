@@ -7,7 +7,7 @@ access, so this report is persisted here after the fact).
 `crates/cfr_core/src/simd.rs`, `crates/cfr_core/src/exploit.rs`, against
 Brown & Sandholm 2019 ("Solving Imperfect-Information Games via Discounted
 Regret Minimization") and Brown's reference C++ trainer
-(`references/noambrown_poker_solver/cpp/src/trainer.cpp`).
+(`references/code/noambrown_poker_solver/cpp/src/trainer.cpp`).
 **Scope:** Verify DCFR math correctness for the A83 deep-cap divergence
 (`As 8s 3s` board, `b1000r3000` action history, bottom-pair-Ace cells
 `3sAs` + `3cAc`, ~33-pp call-frequency divergence vs Brown).
@@ -34,7 +34,7 @@ verdicts, edge-case sweep, and a recommendation.
 
 ## 1. Locked DCFR hyperparameters
 
-Per `references/papers/brown_sandholm_2019.pdf` §3 and the project's locked
+Per `references/papers/dcfr_brown_2019.pdf` §3 and the project's locked
 DCFR config:
 
 | Hyperparameter | Brown 2019 value | Rust value | Status |
