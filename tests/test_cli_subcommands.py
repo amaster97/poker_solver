@@ -130,6 +130,43 @@ def test_river_error_path_hero_overlaps_board(
 
 
 # ---------------------------------------------------------------------------
+# solve --hunl-mode postflop --backend rust hard-fail (PR 108 hot-patch)
+# ---------------------------------------------------------------------------
+
+
+def test_solve_hunl_postflop_rust_without_hole_cards_hard_fails(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`solve --hunl-mode postflop --backend rust` without fixed hole cards must
+    HARD-FAIL with a readable error pointing to the RvR Nash API, not silently
+    produce an empty strategy. Documented in
+    `docs/chance_outcomes_empty_rca_2026-05-26.md`.
+    """
+    rc = main(
+        [
+            "solve",
+            "--game",
+            "hunl",
+            "--hunl-mode",
+            "postflop",
+            "--backend",
+            "rust",
+            "--board",
+            "As 7c 2d Kh 5s",
+            "--stacks",
+            "100",
+            "--iterations",
+            "10",
+        ]
+    )
+    assert rc == 2, f"expected non-zero exit (ValueError -> rc 2), got {rc}"
+    err = capsys.readouterr().err
+    assert "error:" in err
+    assert "hole cards" in err
+    assert "solve_range_vs_range_nash" in err
+
+
+# ---------------------------------------------------------------------------
 # parity subcommand
 # ---------------------------------------------------------------------------
 

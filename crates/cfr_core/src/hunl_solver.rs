@@ -589,5 +589,25 @@ fn validate_config(config: &HUNLConfig) -> Result<(), HUNLSolveError> {
     if config.rake_rate != 0.0 || config.rake_cap != 0 {
         return Err(HUNLSolveError::RakeNonZero);
     }
+    // PR 108 (v1.8 hot-patch): the scalar postflop solver requires fixed
+    // hole cards. Without them, `HUNLState::initial` makes the root a
+    // chance node (`cur_player = -1`), and `chance_outcomes()` returns
+    // empty because the postflop path can't enumerate the 1326-pair
+    // preflop deal (action ids don't fit `u8`). The CFR loop then
+    // iterates zero outcomes and returns `[0.0, 0.0]` on the first call,
+    // leaving `strategy_sum` empty across all iterations — a silent
+    // no-op. Mirror the inverse check in
+    // `dcfr_vector.rs::solve_range_vs_range_postflop_with_hands`
+    // (which rejects `Some` hole cards) so the asymmetry is closed.
+    // See `docs/chance_outcomes_empty_rca_2026-05-26.md`.
+    if config.initial_hole_cards.is_none() {
+        return Err(HUNLSolveError::InvalidConfig(
+            "solve_hunl_postflop requires initial_hole_cards = Some([[c0,c1],[c2,c3]]); \
+             no hole cards => chance root => silent no-op. \
+             For true range-vs-range Nash on a postflop board, use \
+             solve_range_vs_range_postflop (vector form) instead."
+                .into(),
+        ));
+    }
     Ok(())
 }
