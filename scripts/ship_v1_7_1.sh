@@ -152,8 +152,8 @@ done
 echo "[ship-v1.7.1] All 10 PR SHAs present locally."
 
 # Sanity: origin/main must still be at expected post-v1.7.0 SHA. Bumped to
-# 485aa8c1 on 2026-05-25 after PRs #27/#21/#22/#23 merged during pause window.
-EXPECTED_MAIN=485aa8c1
+# bc7779aa on 2026-05-25 after PR #29 (prior SHA bump) merged.
+EXPECTED_MAIN=bc7779aa
 ACTUAL_MAIN=$(git rev-parse origin/main | cut -c1-8)
 if [ "$ACTUAL_MAIN" != "$EXPECTED_MAIN" ]; then
     echo "FATAL: origin/main has moved past v1.7.0."
