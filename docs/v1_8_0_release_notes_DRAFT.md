@@ -308,11 +308,14 @@ The following are **NOT** resolved in v1.8.0 and remain open for future
 work:
 
 - **Deep-cap A83 ≥33-pp bottom-pair-Ace divergence vs Brown reference
-  solver — NOT-A-BUG (arbitrator-confirmed).** The Brown
+  solver — NOT-A-BUG (arbitrator-confirmed for terminal-utility;
+  Nash-multiplicity component remains the LEADING HYPOTHESIS,
+  empirical probe PENDING).** The Brown
   apples-to-apples acceptance test continues to report per-cell strict
   divergences at the bottom-pair-Ace cluster on the A83 board in
   deep-cap (100bb+) settings. **The terminal-utility arbitration
-  (2026-05-26) rendered a NOT-A-BUG verdict** for the divergence: when
+  (2026-05-26) rendered a NOT-A-BUG verdict** for the
+  terminal-utility component of the divergence: when
   `initial_contributions` is set to `(base_pot/2, base_pot/2)` (the
   seed-split applied by every production codepath), the per-terminal
   delta vs Brown is a uniform constant that cancels exactly at the
@@ -320,25 +323,64 @@ work:
   remaining per-cell residual is the combined effect of (a)
   terminal-utility convention divergence at the audit-abstraction
   layer (Brown awards full pot including `base_pot` to the winner;
-  ours is zero-sum) and (b) Nash multiplicity at indifference
-  manifolds in the deep-cap subgame. Both solvers are essentially
-  Nash (Brown exploitability 0.06 chips at 2000 iters = 0.006% of
-  pot; matched-config empirical verification 2026-05-25, VERDICT C).
-  **The reframed 4-layer acceptance test (L1 structural / L2
-  shallow-strict / L3 deep-directional L1 ≤ 1.9 / L3' p75 L1 ≤ 0.60 /
-  L4 top-action ≥ 60%) PASSES on both river spots — see Dry-run #10.**
-  The strict per-cell residual is treated as informational; see
+  ours is zero-sum) and (b) **Nash multiplicity at indifference
+  manifolds in the deep-cap subgame — leading hypothesis, NOT YET
+  empirically confirmed.** The original A83 Track A perturbed-seed
+  probe (2026-05-26) attempted to confirm Nash multiplicity via two
+  `--regret-init-noise` 200K-iter runs that produced "bit-identical"
+  outputs; that result was later INVALIDATED — the CLI invocation
+  hit a no-op path (`chance_outcomes()` empty due to `initial_hole_cards
+  = None`), so the bit-identicality reflects "two no-op runs", not
+  Nash convergence. The `--regret-init-noise` flag implementation
+  itself is correct (3 unit tests in `dcfr_vector.rs::tests` PASS).
+  A corrected empirical probe via the vector-form RvR entrypoint
+  (`solve_range_vs_range_nash`) is queued; see
+  `docs/a83_track_a_results_analysis_2026-05-26.md` and
+  `docs/a83_followup_correct_experiment_2026-05-26.md`. Both solvers
+  are essentially Nash (Brown exploitability 0.06 chips at 2000 iters
+  = 0.006% of pot; matched-config empirical verification 2026-05-25,
+  VERDICT C). **The reframed 4-layer acceptance test (L1 structural
+  / L2 shallow-strict / L3 deep-directional L1 ≤ 1.9 / L3' p75 L1
+  ≤ 0.60 / L4 top-action ≥ 60%) PASSES on both river spots — see
+  Dry-run #10.** The strict per-cell residual is treated as
+  informational; see
   `docs/terminal_utility_arbitration_2026-05-26.md` (NOT-A-BUG
-  arbitrator verdict), `docs/v1_6_1_ship_hold_review_2026-05-26.md`
+  arbitrator verdict for terminal-utility component),
+  `docs/v1_6_1_ship_hold_review_2026-05-26.md`
   (HOLD-LIFTED decision), `docs/a83_validation_2026-05-26.md`
   (DCFR-math validation, PASS),
   `docs/a83_deep_cap_root_cause_investigation.md`,
-  `docs/matched_config_investigation.md`, and the project memory rule
+  `docs/matched_config_investigation.md`,
+  `docs/a83_track_a_results_analysis_2026-05-26.md`
+  (INVALIDATION of Track A v1 probe), and the project memory rule
   `feedback_nash_multiplicity_acceptance.md`. The v1.6.1 engine bundle
   shipped piecewise on `origin/main` (10 PRs landed 2026-05-26
   02:32-03:02 UTC); the hold is lifted and the fixes are folded into
   v1.8.0 per `docs/v1_6_1_ship_hold_review_2026-05-26.md` and
   `docs/v1_7_1_tag_decision_2026-05-26.md`.
+- **Gate 4 200K-iter river/turn validation results — PROVISIONAL,
+  re-run pending.** The 2026-05-25 Gate 4 200K river-phase run
+  (reported `5.28e-14 mbb/g` exploitability, monotone clean) and the
+  2026-05-26 Gate 4 200K v2 attempts (river: 186-byte empty-strategy
+  output; turn: killed mid-run at ~60 min) both used the same
+  `solve --hunl-mode postflop --backend rust` CLI path **without
+  `--initial-hole-cards`**, which routes through
+  `_rust.solve_hunl_postflop` with `HUNLConfig.initial_hole_cards =
+  None`. Per `docs/a83_track_a_results_analysis_2026-05-26.md` §2c,
+  `HUNLState::chance_outcomes` returns `Vec::new()` defensively when
+  `hole_cards = None`, the scalar CFR loop's chance branch iterates
+  over the empty list and returns `[0.0, 0.0]` immediately, no
+  infoset is ever inserted into `strategy_sum`, and the reported
+  exploitability is then recomputed by `_rust.compute_exploitability`
+  against an empty strategy map (falls back to `uniform(n_actions)`
+  on every cache miss per `exploit.rs:472-475`). The earlier
+  `5.28e-14` figure was from the prior nohup that may have hit the
+  same no-op path; treat that value as PROVISIONAL until a re-run
+  via the correct entrypoint (or via `solve_range_vs_range_nash`)
+  is completed. The Gate 4 200K validation does NOT block the
+  v1.8.0 release boundary: the v1.5 Brown apples-to-apples
+  acceptance test (Dry-run #10) is the canonical pass; Gate 4 was
+  a secondary high-iter sanity check.
 - **`poker-solver` PATH shim quirk (dev-environment, pre-existing).**
   If `poker-solver` on PATH fails with `ModuleNotFoundError: No module
   named 'poker_solver'`, the shim is likely resolving against a stale
