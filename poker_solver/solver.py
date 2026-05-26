@@ -26,6 +26,37 @@ class SolveResult:
     backend: str = "python"
 
 
+@dataclass(frozen=True)
+class BestResponseResult:
+    """Output of `solve_best_response`.
+
+    PR 76 — exploitative play (hero's deterministic best-response vs a fixed
+    villain strategy). See `docs/pr_proposals/v1_exploitative_play_spec.md` §3.
+
+    Attributes:
+        hero_strategy: pure (one-hot) BR strategy keyed by hero infoset.
+            Each value sums to 1.0 (one entry == 1.0, others == 0.0). Hero
+            infosets not visited under `opponent_strategy` are omitted.
+        exploit_value_bb: hero's expected value when playing this BR
+            strategy against `opponent_strategy`. Units match the game's
+            utility function (BB/hand for HUNL; chips/hand for Kuhn/Leduc).
+        on_strategy_value_bb: hero's expected value if BOTH players play
+            `opponent_strategy` (the symmetric counterfactual). Same units.
+        exploit_gap_bb: `exploit_value_bb - on_strategy_value_bb`. Always
+            >= 0 in exact arithmetic (BR is no-worse than any reference);
+            tiny negative values (~1e-12) are float rounding and the
+            caller may clamp.
+        hero_player: 0 (SB-equivalent) or 1 (BB-equivalent); echoed back
+            for round-trip clarity.
+    """
+
+    hero_strategy: dict[str, list[float]]
+    exploit_value_bb: float
+    on_strategy_value_bb: float
+    exploit_gap_bb: float
+    hero_player: int
+
+
 def solve(
     game: Game,
     iterations: int,
@@ -310,21 +341,52 @@ def _best_response_value(
 ) -> float:
     """Compute `br_player`'s value when best-responding to opponents on `strategy`.
 
+    Thin shim over :func:`_best_response_value_and_strategy` for the
+    callers that only need the scalar (notably :func:`exploitability`).
+    Behavior is byte-identical to the pre-PR-76 implementation; the
+    refactor only adds the strategy-returning sibling.
+    """
+    value, _br_strategy = _best_response_value_and_strategy(game, strategy, br_player)
+    return value
+
+
+def _best_response_value_and_strategy(
+    game: Game,
+    strategy: Mapping[str, Sequence[float]],
+    br_player: int,
+) -> tuple[float, dict[str, list[float]]]:
+    """Compute BR value AND the deterministic BR strategy.
+
     Walks the tree collecting (state, counterfactual_reach) groups per
     `br_player` infoset, then picks the action maximizing the responder's
     expected utility per infoset. For multi-round games infosets are visited
     in DFS pre-order; one BR pass therefore uses the previous pass's choices
     at deeper infosets, so we iterate to a fixed point.
+
+    Returns ``(value, br_strategy)`` where ``br_strategy`` is a one-hot
+    encoding of ``best_action``: each visited hero infoset maps to a vector
+    of length ``len(legal_actions)`` with a single 1.0 at the BR index and
+    0.0 elsewhere. Ties are broken by lowest index (numpy.argmax semantics)
+    so the encoding is deterministic.
+
+    Infosets not reached under ``strategy`` (zero counterfactual reach for
+    `br_player`) are absent from ``br_strategy`` — they have no BR action
+    to report. Callers that need a total strategy should fall back to
+    uniform for missing keys (mirrors `exploitability()` semantics).
     """
     infoset_groups: dict[str, list[tuple]] = {}
     _collect_infosets(
         game, strategy, game.initial_state(), 1.0, br_player, infoset_groups
     )
     best_action: dict[str, int] = {}
+    # Cache action-list lengths so the one-hot encoding step can do the
+    # right size lookup without re-walking the tree.
+    action_count: dict[str, int] = {}
     while True:
         previous = dict(best_action)
         for key, entries in infoset_groups.items():
             actions = entries[0][1]
+            action_count[key] = len(actions)
             action_values = np.zeros(len(actions), dtype=np.float64)
             for state, _actions, cf_reach in entries:
                 for idx, action in enumerate(actions):
@@ -339,7 +401,7 @@ def _best_response_value(
             best_action[key] = int(np.argmax(action_values))
         if best_action == previous:
             break
-    return float(
+    value = float(
         _br_state_value(
             game,
             strategy,
@@ -347,6 +409,89 @@ def _best_response_value(
             br_player,
             best_action,
         )
+    )
+    # One-hot encode: hero infoset → action-probability vector.
+    br_strategy: dict[str, list[float]] = {}
+    for key, action_idx in best_action.items():
+        n_actions = action_count[key]
+        vec = [0.0] * n_actions
+        vec[action_idx] = 1.0
+        br_strategy[key] = vec
+    return value, br_strategy
+
+
+def solve_best_response(
+    game: Game,
+    opponent_strategy: Mapping[str, Sequence[float]],
+    *,
+    hero_player: int = 0,
+) -> BestResponseResult:
+    """Compute hero's deterministic best-response against a fixed opponent.
+
+    PR 76 — exploitative play. Given a fixed villain mixed strategy, find
+    the hero's pure best-response strategy + report the exploit value
+    (BB/hand hero wins over and above the symmetric-counterfactual value).
+
+    Args:
+        game: any object implementing the ``Game`` protocol (Kuhn, Leduc,
+            HUNL postflop subgame, etc.).
+        opponent_strategy: villain's strategy dict keyed by infoset key.
+            Values are action-probability lists summing to 1.0. Missing
+            keys default to uniform random over legal actions, matching
+            :func:`exploitability` semantics. Hero entries in this dict
+            are ignored — hero plays argmax instead. (We accept a single
+            full-game strategy dict because the user typically loads a
+            blueprint that covers both players; only the villain side is
+            consulted.)
+        hero_player: 0 (SB / acts-first-preflop) or 1 (BB). Hero plays
+            BR; villain plays the supplied mixed strategy. Defaults to 0.
+
+    Returns:
+        :class:`BestResponseResult` with:
+          - ``hero_strategy``: one-hot BR per visited hero infoset.
+          - ``exploit_value_bb``: hero's EV under BR vs ``opponent_strategy``.
+          - ``on_strategy_value_bb``: hero's EV if BOTH players play
+            ``opponent_strategy`` (symmetric counterfactual reference).
+          - ``exploit_gap_bb``: ``exploit_value_bb - on_strategy_value_bb``.
+            Always >= 0 in exact arithmetic.
+          - ``hero_player``: echoed back.
+
+    Notes:
+        The BR walk is deterministic — ties broken by lowest action index
+        (matches ``numpy.argmax`` semantics). For zero-sum 2p games this
+        is equivalent to one half of the :func:`exploitability` walk
+        (the hero side); the other half (BR vs hero) is what
+        ``exploitability`` averages, here we only need the hero side.
+    """
+    if hero_player not in (0, 1):
+        raise ValueError(
+            f"hero_player must be 0 or 1; got {hero_player!r} "
+            "(0 = SB / acts first preflop, 1 = BB)"
+        )
+
+    # Hero's BR value + strategy vs the fixed villain.
+    br_value, hero_strategy = _best_response_value_and_strategy(
+        game, opponent_strategy, hero_player
+    )
+
+    # On-strategy reference: both players play `opponent_strategy`. This
+    # mirrors `_game_value` but uses the supplied dict for both seats
+    # (hero entries fall back to uniform via the existing default in
+    # `_expected_value`).
+    ev = _expected_value(
+        game,
+        opponent_strategy,
+        game.initial_state(),
+        np.ones(game.num_players + 1, dtype=np.float64),
+    )
+    on_strategy_value = float(ev[hero_player])
+
+    return BestResponseResult(
+        hero_strategy=hero_strategy,
+        exploit_value_bb=float(br_value),
+        on_strategy_value_bb=on_strategy_value,
+        exploit_gap_bb=float(br_value) - on_strategy_value,
+        hero_player=int(hero_player),
     )
 
 
