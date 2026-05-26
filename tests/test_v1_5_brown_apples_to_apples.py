@@ -100,10 +100,28 @@ fresh clone or pre-PR-23 checkout still collects cleanly.
 from __future__ import annotations
 
 import importlib
+import os
 from pathlib import Path
 from typing import Any
 
 import pytest
+
+
+def _skip_or_fail(reason: str) -> None:
+    """Acceptance-test precondition gate (Guard C convention, PR 65).
+
+    Default behaviour: ``pytest.skip(reason)`` — keeps test collection green
+    on fresh clones / pre-prerequisite checkouts where Brown's binary or PR 23
+    artefacts may be missing.
+
+    When the environment variable ``STRICT_ACCEPTANCE=1`` is set (CI release
+    workflow + PR 65 Guard A), the helper calls ``pytest.fail(reason)`` instead,
+    surfacing missing prerequisites as hard failures so v1.5+ acceptance claims
+    cannot silently regress. See ``docs/ship_process_hardening.md`` Guard C.
+    """
+    if os.environ.get("STRICT_ACCEPTANCE", "").strip() in ("1", "true", "TRUE"):
+        pytest.fail(reason)
+    pytest.skip(reason)  # noqa: skip-ban — sole legitimate skip site, gated above
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SPOTS_JSON = REPO_ROOT / "tests" / "data" / "river_spots.json"
@@ -189,28 +207,28 @@ except Exception:  # noqa: BLE001
 
 
 def _require_preconditions() -> None:
-    """Skip cleanly if any precondition is unmet."""
+    """Skip cleanly if any precondition is unmet (or hard-fail under STRICT_ACCEPTANCE)."""
     if not _WRAPPER_OK:
-        pytest.skip(
+        _skip_or_fail(
             f"poker_solver.parity.noambrown_wrapper unavailable: {_WRAPPER_ERR}"
         )
     if not _CORE_OK:
-        pytest.skip("poker_solver core surface failed to import")
+        _skip_or_fail("poker_solver core surface failed to import")
     if _rust_solve_rvr is None:
-        pytest.skip(
+        _skip_or_fail(
             "_rust.solve_range_vs_range_rust missing — PR 23 not merged / not built. "
             "After PR 23 lands, run `maturin develop --release` to enable."
         )
     if not SPOTS_JSON.exists():
-        pytest.skip(f"river fixture missing: {SPOTS_JSON}")
+        _skip_or_fail(f"river fixture missing: {SPOTS_JSON}")
 
 
 def _require_brown_binary() -> Path:
-    """Skip if Brown's binary is not built. Returns the binary path on success."""
+    """Skip if Brown's binary is not built (or hard-fail under STRICT_ACCEPTANCE)."""
     assert find_brown_binary is not None  # narrowed by _require_preconditions
     binary = find_brown_binary()
     if binary is None or not Path(binary).exists():
-        pytest.skip(
+        _skip_or_fail(
             "Brown's river_solver_optimized not built; "
             "run `bash scripts/build_noambrown.sh` to enable parity tests."
         )

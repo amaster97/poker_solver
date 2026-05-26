@@ -1,0 +1,42 @@
+name: Skip-Ban (Acceptance Tests)
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Forbid pytest.skip() in acceptance tests
+        run: |
+          # Define acceptance test patterns (extend as more tests get classified)
+          ACCEPTANCE_FILES=(
+            "tests/test_v1_5_brown_apples_to_apples.py"
+            "tests/test_asymmetric_range_sanity.py"
+            "tests/test_minimal_nash_fixture.py"
+          )
+
+          FAIL=0
+          for f in "${ACCEPTANCE_FILES[@]}"; do
+              if [ -f "$f" ]; then
+                  # Allow _skip_or_fail() and lines explicitly marked
+                  # `# noqa: skip-ban`. Forbid bare pytest.skip() elsewhere.
+                  if grep -nE "^\s*pytest\.skip\(" "$f" | grep -v "_skip_or_fail" | grep -v "noqa: skip-ban"; then
+                      echo "[FAIL] $f contains bare pytest.skip() - use _skip_or_fail() or pytest.fail() instead"
+                      FAIL=1
+                  fi
+              fi
+          done
+
+          if [ "$FAIL" = "1" ]; then
+              echo "Acceptance tests must HARD-FAIL on missing prereqs, not silently skip."
+              echo "Use _skip_or_fail() (env-gated via STRICT_ACCEPTANCE) or pytest.fail() (always)."
+              exit 1
+          else
+              echo "[OK] No bare pytest.skip() in acceptance tests"
+          fi

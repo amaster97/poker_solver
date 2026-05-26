@@ -664,6 +664,7 @@ def test_memory_profiler_real_config_closed_form_calibration() -> None:
 # -- PR 36 #3: golden-file no-regression pin ------------------------------
 
 
+@pytest.mark.golden
 def test_memory_profiler_golden_file_river_only() -> None:
     """PR 36 #3: golden-file no-regression on a fixed config + seed.
 

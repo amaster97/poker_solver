@@ -1,0 +1,33 @@
+name: Golden File Check
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check if PR modifies golden tests
+        id: check_goldens
+        run: |
+          if git diff origin/main...HEAD --name-only | grep -E "test_.*golden|golden.*test|snapshot.*test|expected_.*\.json" | head -5; then
+            echo "modifies_goldens=true" >> $GITHUB_OUTPUT
+          else
+            echo "modifies_goldens=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Require [regen-goldens] tag in commit message
+        if: steps.check_goldens.outputs.modifies_goldens == 'true'
+        run: |
+          if git log origin/main..HEAD --pretty=format:"%s%n%b" | grep -qE "\[regen-goldens?\]"; then
+            echo "[OK] [regen-goldens] tag found"
+          else
+            echo "[FAIL] Golden files modified but no [regen-goldens] tag in any commit message"
+            echo "If you intend to regenerate goldens, add [regen-goldens] to a commit message."
+            exit 1
+          fi
