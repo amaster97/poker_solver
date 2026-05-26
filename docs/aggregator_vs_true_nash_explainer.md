@@ -18,8 +18,9 @@ The first is the **Pluribus-style blueprint aggregator**. The second is the
 **vector-form CFR** that mirrors Brown's reference C++ trainer at
 `references/code/noambrown_poker_solver/cpp/src/trainer.cpp:138-240`
 structurally (three independent code reviews concur; empirical parity
-verified on shallow-cap spots, currently under investigation for a
-deep-cap facing-raise divergence — see Example 3).
+verified on shallow-cap spots; the deep-cap facing-raise residual
+divergence is **resolved as Nash-multiplicity within an indifference
+manifold** — see Example 3).
 
 Treating their outputs as interchangeable has caused real test-verdict drift
 in this project. This doc exists so you don't make that mistake.
@@ -120,22 +121,33 @@ indexing mis-aligned the columns); range-to-player-slot inversion
 (Brown's P0 opens river, this engine's P1 opens river); and
 hand-string suit-order normalization (`cdhs` vs `shdc`).
 
-**However, a v1.6.1-bundle dry-run (PR 33+34+35-A+B+40 composed)
-empirically re-confirms a residual algorithmic divergence at deep-cap
-facing-raise that the structural reviews did not surface.** On A83 at
-`b1000r3000`, bottom-pair-Ace cells (3sAs, 3cAc) call ~0.69 in Rust
-vs ~0.36 in Brown — 33-pp delta, max |diff| 0.33. K72 max |diff| is
-~0.07. Action-axis permutation IS applied; the gap is semantic.
+**Earlier dry-runs flagged a residual deep-cap divergence (A83
+`b1000r3000` bottom-pair-Ace cells: ~0.69 Rust vs ~0.36 Brown, 33-pp
+delta) that the structural reviews did not surface. That investigation
+is closed.** The divergence decomposed into two compound causes, both
+resolved:
 
-Shallow-cap and river single-shot paths empirically match Brown; the
-gap is isolated to deep-cap facing-raise. The structural reviews
-verified CODE matches Brown's algorithm; they did not verify the
-algorithm produces Brown's empirical OUTPUT at this scenario — a
-label-vs-semantics gap (`MEMORY.md::feedback_label_vs_semantics`).
-Investigation in flight: best-response cross-check, iteration sweep
-500/1000/2000/4000/8000, and side-by-side re-read of
-`dcfr_vector.rs::traverse` vs `trainer.cpp:138-240` on the
-facing-raise path. Full report: `docs/v1_6_1_dryrun_verification.md`.
+1. **Test-side wrapper bugs** (action-axis column ordering, range-to-
+   player-slot inversion, hand-string suit-order normalization) — fixed
+   in the v1.7.1 bundle (PR 52 / PR 55 / PR 56). After the wrapper
+   fixes, the original 22-42pp acceptance-test signal collapsed.
+2. **Nash-multiplicity at depth ≥ 11 facing-all-in `(c, f)` AA leaves.**
+   Per [`a83_validation_2026-05-26.md`](a83_validation_2026-05-26.md) +
+   [`terminal_utility_audit_2026-05-26.md`](terminal_utility_audit_2026-05-26.md) +
+   [`terminal_utility_arbitration_2026-05-26.md`](terminal_utility_arbitration_2026-05-26.md)
+   (arbitrator's **"NOT A BUG"** verdict for the terminal-utility
+   convention), the deep-cap residual is two solvers landing on
+   different points within the same indifference manifold. Brown's
+   exploitability at 2000 iters is 0.06 chips (0.006% of pot) — both
+   solvers are essentially Nash.
+
+The v1.5 acceptance test was reframed from strict per-cell to a four-
+layer sanity-check gate (structural + shallow-strict + deep max-L1 ≤ 1.9
++ top-action ≥ 60%) and PASSES on `origin/main`. Shallow-cap and river
+single-shot paths remain bit-identical to Brown. The v1.6.1 ship hold
+was lifted per
+[`v1_6_1_ship_hold_review_2026-05-26.md`](v1_6_1_ship_hold_review_2026-05-26.md);
+the engine bundle ships piecewise on `main` and folds into v1.8.0.
 
 ## When to use which
 
