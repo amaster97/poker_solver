@@ -31,6 +31,38 @@ pip install -e ".[dev]"
 Python 3.9+ (developed on 3.13). Primary platform is macOS / M-series;
 Linux is supported but less exercised.
 
+### Known development environment hazard — pyenv x86_64 Python vs arm64 `.so`
+
+On Apple Silicon, `pyenv`'s default Python build (notably `3.13-dev`) is
+often installed as an **x86_64** binary, while the project's native
+extension `poker_solver/_rust.cpython-313-darwin.so` is built **arm64-only**
+by `maturin develop` on M-series hosts. Mixing the two produces a silent
+SKIP for parity / diff tests, a `ModuleNotFoundError: No module named
+'poker_solver._rust'`, or a misleading "missing symbol" `dlopen` error —
+none of which point clearly at the arch mismatch.
+
+**Verify your Python arch (must be `arm64` on Apple Silicon):**
+
+```bash
+python -c "import platform; print(platform.machine())"      # expect: arm64
+```
+
+**Recommended workflow:** always invoke the project's own venv binaries,
+which are universal2 / arm64-native on Apple Silicon, rather than a
+PATH-resolved `python` / `pytest` that may be a pyenv shim:
+
+```bash
+./.venv/bin/python -m poker_solver.cli ...
+./.venv/bin/pytest
+```
+
+**Symptoms to watch for:** silent SKIPs in `pytest` output for parity /
+diff tests, `ModuleNotFoundError` on `poker_solver._rust`, or `dlopen`
+"missing symbol" errors when the underlying issue is actually an arch
+mismatch. If you see any of these, run the one-liner above and confirm
+the running Python is `arm64`. Full RCA and workaround details:
+[`docs/poker_solver_shim_fix_2026-05-26.md`](docs/poker_solver_shim_fix_2026-05-26.md).
+
 ## Running tests
 
 ```bash
