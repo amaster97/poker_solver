@@ -1,15 +1,35 @@
 # Morning Checklist — 2026-05-26
 
-**Session-wrap audit timestamp:** 2026-05-26 (overnight burst close)
+**Session-wrap audit timestamp:** 2026-05-26 (overnight burst close;
+updated post-PR-93-ablation-landing).
 **Local HEAD:** `98fb503` (`main`, 1 commit behind `origin/main`)
 **Action on wake:** `git fetch && git pull --ff-only origin main` to pick
-up PR #68 (`b401f6c` — A83 Nash multiplicity confirmation doc).
+up PR #68 (`b401f6c` — A83 Nash multiplicity confirmation doc) + PR #114
+(A83 reconcile-urgent surface doc).
+
+> **READ FIRST — A83 status is IN FLUX post-ablation.**
+> The PR 93 terminal-utility convention ablation (agent `acebb72f`,
+> completed after the RESUME / release notes / morning checklist were
+> written) returned `CONVENTION-IS-A83-CAUSE` with max |Δ| = 12-50pp.
+> This contradicts the "A83 fully closed" framing in PR #49 RESUME doc
+> and the v1.8.0 release notes draft. **Read
+> `docs/A83_RECONCILE_URGENT_2026-05-26.md` BEFORE acting on any morning
+> task below.** PR 93 has NOT been merged; it is staged for your review.
 
 ---
 
 ## Decisions / approvals needed
 
-1. **PR #49 RESUME doc** — **READ FIRST**. Morning hand-off doc.
+0. **A83 RECONCILE (NEW; HIGH PRIORITY).** Read
+   `docs/A83_RECONCILE_URGENT_2026-05-26.md`. Decide which framing is
+   canonical (Nash multiplicity / convention / both) and whether
+   v1.6.1 hold-lift + v1.8.0 ship sequence stand as-written or need
+   the framing softened. PR 93 ablation results doc is on the
+   `pr-93-terminal-utility-ablation` branch (commit `986f48d`); do
+   NOT touch that branch — review-only.
+1. **PR #49 RESUME doc** — **READ AFTER #0**. Morning hand-off doc;
+   the "A83 fully closed" language is now stale per the PR 93 ablation
+   result. (PR description will carry the same caveat banner.)
    URL: https://github.com/amaster97/poker_solver/pull/49
 2. **PR #20 cross-platform CI matrix** — open; CI timeout investigation
    complete; rebase branch staged at
@@ -45,12 +65,18 @@ git stash --include-untracked && \
 
 - **v1.6.0 .dmg fork-bomb** — RCA + asset pull + warning text + repackaged
   build slot in v1.8.0.
-- **A83 deep-cap 33pp gap** — Nash multiplicity empirically confirmed
-  via corrected probe (PR #68 merged as `b401f6c`).
-  Doc: `docs/a83_nash_multiplicity_confirmed_2026-05-26.md`. **NOT a
-  bug** — design diff vs Brown (acceptable per
-  `feedback_external_solver_sanity_check.md` +
-  `feedback_nash_multiplicity_acceptance.md`).
+- **A83 deep-cap 33pp gap** — **IN FLUX (was "RESOLVED").** Nash
+  multiplicity empirically confirmed via corrected probe (PR #68
+  merged as `b401f6c`); doc:
+  `docs/a83_nash_multiplicity_confirmed_2026-05-26.md`. **However, the
+  PR 93 terminal-utility convention ablation (NOT merged; agent
+  `acebb72f`) subsequently returned `CONVENTION-IS-A83-CAUSE` with
+  max |Δ| = 12-50pp under varied-convention / fixed-init-regret /
+  fixed-seed conditions.** Both findings are empirically real and
+  measure different controlled-variables; relative contributions to
+  the 33pp Brown gap are unsettled. See
+  `docs/A83_RECONCILE_URGENT_2026-05-26.md` for the reconciliation
+  hypothesis and required user decisions.
 - **v1.6.1 hold lifted** — folded into v1.8.0 per
   `docs/v1_6_1_ship_hold_review_2026-05-26.md`.
 - **v1.7.1 closed as obsolete** — piecewise-merged; no tag.
