@@ -13,9 +13,18 @@ In-flight on feature branches; not yet merged to `main`.
 - v1.5/v2 follow-ups (Q3 exploitability slider reframe; range-based
   dealing; Rust callbacks; full-tree preflop).
 
-## [1.7.2] - 2026-05-26
+## [1.8.0] - Unreleased
 
-### Fixed — Critical .dmg fork-bomb on Finder launch (PR #42, 728206e)
+The v1.8.0 release folds in the v1.6.1 engine bundle (shipped piecewise
+on `main`), v1.7.2 CI hardening, the cross-platform SIMD work, and the
+.dmg fork-bomb fix below. Per
+`docs/v1_7_1_tag_decision_2026-05-26.md`, neither v1.7.1 nor v1.7.2
+will be tagged; v1.8.0 is the next clean release boundary. See
+`docs/v1_8_0_release_notes_DRAFT.md` for the full forthcoming entry.
+
+### v1.7.x fixes carried into v1.8.0
+
+#### Fixed — Critical .dmg fork-bomb on Finder launch (PR #42, 728206e)
 
 - The v1.6.0 `.dmg` (and any PyInstaller-built `.dmg` predating PR #42)
   had a critical fork-bomb on Finder launch: double-clicking
@@ -25,12 +34,12 @@ In-flight on feature branches; not yet merged to `main`.
   Mac (each spawned child re-launched the parent, exponentially).
 - **v1.6.0 `.dmg` asset has been retroactively pulled from the
   GitHub Release.** The release page now carries a critical warning
-  pointing users at the v1.7.2 repackaged build (or the from-source
+  pointing users at the v1.8.0 repackaged build (or the from-source
   install) instead. See `docs/dmg_spawn_loop_rca_2026-05-26.md` for
   the full RCA.
 - PR #42 (commit `728206e`) adds `multiprocessing.freeze_support()`
   guard to the PyInstaller entry point, eliminating the fork-bomb on
-  the v1.7.2 build. A user-facing warning was also added to the
+  the v1.8.0 build. A user-facing warning was also added to the
   release notes for v1.6.0.
 
 ## [1.7.0] - 2026-05-23
@@ -48,20 +57,23 @@ In-flight on feature branches; not yet merged to `main`.
 
 ### Status
 
-- v1.6.1 engine bundle: HELD pending acceptance gate redefinition
-  (deep-cap Brown apples-to-apples reveals architectural divergence
-  in payoff convention; see internal mirror v1.6.1 no-go synthesis)
-- PR 44 .dmg packaging fix: VERIFIED on disk; ready for Gate 5 attachment
+- v1.6.1 engine bundle: **HOLD lifted** per
+  `docs/v1_6_1_ship_hold_review_2026-05-26.md`. Bundle has shipped
+  piecewise on `origin/main` (PR 50, 51, 52, 54, 55, 56, 53b, 53c) and
+  is folded into v1.8.0.
+- PR 44 .dmg packaging fix: VERIFIED on disk; superseded by PR #42
+  freeze_support fork-bomb fix (commit `728206e`), folded into v1.8.0.
 
 ## [1.6.0] - 2026-05-23
 
 ### Retroactive amendment (2026-05-26)
 
 The v1.6.0 `.dmg` has a critical fork-bomb on Finder launch — fixed
-in v1.7.2 (PR #42, commit `728206e`). The v1.6.0 `.dmg` asset has
-been retroactively pulled from the GitHub Release. See the v1.7.2
-entry above and `docs/dmg_spawn_loop_rca_2026-05-26.md` for the
-full RCA. Use the v1.7.2 repackaged build instead.
+on `main` in PR #42 (commit `728206e`) and shipping in v1.8.0. The
+v1.6.0 `.dmg` asset has been retroactively pulled from the GitHub
+Release. See the v1.8.0 entry above and
+`docs/dmg_spawn_loop_rca_2026-05-26.md` for the full RCA. Use the
+v1.8.0 repackaged build (when published) instead.
 
 ### Added — GUI Gate 2 (UI completeness)
 - **Range-vs-range solve panel** (PR 24a) — visual RvR mode with hero_player selector
@@ -73,7 +85,11 @@ full RCA. Use the v1.7.2 repackaged build instead.
 - **44 new UI smoke tests** total (7 from PR 24a + 9 from PR 24b)
 
 ### Notes
-- Engine bundle (PR 33+34+35 for true Brown parity) still deferred to v1.6.1 pending per-action divergence diagnosis
+- Engine bundle (PR 33+34+35 for true Brown parity): **shipped piecewise
+  on `origin/main`** (PR 50, 51, 52, 54, 55, 56, 53b, 53c) and folded
+  into v1.8.0; v1.6.1 hold lifted per
+  `docs/v1_6_1_ship_hold_review_2026-05-26.md`. Original v1.6.0-era
+  text retained below for context.
 - GUI is functionally complete for Gate 2; awaiting engine acceptance test PASS before final persona retest sweep
 - Per `feedback_ui_packaging_sync`: this ship triggers PR 11 .dmg rebuild (LEG 19 candidate) + PR 10b UI re-audit downstream
 
@@ -186,8 +202,12 @@ full RCA. Use the v1.7.2 repackaged build instead.
   (Q3 default for v1.5.0).
 - UI surfacing (v1.5.0 is internal-only per the documented Q4 default;
   user-facing UI integration deferred to a later minor).
-- SIMD kernels for vector-shape arithmetic (expected 4-8x speedup based
-  on PR 8 NEON-on-scalar experience).
+- SIMD kernels for vector-shape arithmetic (subsequently wired in v1.8;
+  empirical bench measured ~1.0× on Apple Silicon for the vector-form
+  CFR workload — LLVM autovec at `-O3` already covered the small-slice
+  case, and the bottleneck is per-iter scalar work outside the SIMD
+  inner loops. Primary value is portability + a stable hand-written
+  floor. See `docs/v1_8_simd_perf_benchmark_2026-05-26.md`.).
 - Preflop RvR with suit-iso reduction.
 
 ## [1.4.3] - 2026-05-23

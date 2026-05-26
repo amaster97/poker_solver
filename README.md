@@ -13,25 +13,30 @@ locking. Goalpost: PioSolver-class HU local solving on a MacBook.
 
 - **Latest tagged release:** v1.7.0 (aggregator→vector wiring + CLI
   subcommands — PR 43 + PR 44). The v1.0 → v1.7.0 trajectory is
-  documented in [`CHANGELOG.md`](CHANGELOG.md). v1.6.1 (engine bundle,
-  deep-cap investigation) is held pending the A83 acceptance test
-  resolution.
+  documented in [`CHANGELOG.md`](CHANGELOG.md). **Next release:
+  v1.8.0** (cross-platform SIMD + .dmg fork-bomb fix + v1.6.1 engine
+  bundle + v1.7.2 CI hardening, all merged on `main`; tag pending).
+  v1.6.1 engine bundle has shipped piecewise on `origin/main` and is
+  folded into v1.8.0 (see
+  [`docs/v1_7_1_tag_decision_2026-05-26.md`](docs/v1_7_1_tag_decision_2026-05-26.md)
+  for the tag-strategy decision).
 - **License:** MIT.
 - **Platforms:** macOS (Apple Silicon primary), Linux. Intel Mac is
   source-build only.
 - **Python:** 3.9+. Rust toolchain required (stable channel).
 - **Working install path:** source build (`pip install -e .`).
 - **`.dmg` installer:** **v1.6.0 `.dmg` has a critical fork-bomb bug on
-  Finder launch — DO NOT use until the v1.7.2+ packaging fix lands.**
+  Finder launch — DO NOT use until the v1.8.0 packaging fix lands.**
   See Known issues. Use the CLI source install (below) instead.
 
-### macOS install (.dmg — NOT RECOMMENDED until v1.7.2)
+### macOS install (.dmg — NOT RECOMMENDED until v1.8.0)
 
 > ⚠️ **CRITICAL:** the v1.6.0 `.dmg` currently spawns processes
 > uncontrollably on Finder launch and can freeze your Mac. Root cause
 > identified (missing `multiprocessing.freeze_support()` in the
-> PyInstaller entry point); fix queued for v1.7.2. Until then, use the
-> source install below. Full RCA:
+> PyInstaller entry point); fix merged on `main` (PR #42, commit
+> `728206e`) and ships in v1.8.0. Until v1.8.0 is tagged + released,
+> use the source install below. Full RCA:
 > [`docs/dmg_spawn_loop_rca_2026-05-26.md`](docs/dmg_spawn_loop_rca_2026-05-26.md).
 
 Apple silicon (arm64) only. See
@@ -224,32 +229,34 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the PR-flow contract.
   cause: `scripts/pyinstaller_entry.py` did not call
   `multiprocessing.freeze_support()` at module level, so each NiceGUI
   worker spawned by uvicorn re-execs the entire frozen app, recursively.
-  The fix is patched on `pr-78-dmg-freeze-support-fix` (this PR);
-  re-packaged `.dmg` will ship in v1.7.2. **Use the source install
-  above** until then. Full RCA:
+  The fix is merged on `main` (PR #42, commit `728206e`); re-packaged
+  `.dmg` ships in v1.8.0. **Use the source install above** until then.
+  Full RCA:
   [`docs/dmg_spawn_loop_rca_2026-05-26.md`](docs/dmg_spawn_loop_rca_2026-05-26.md).
   Earlier v1.4.0 `.dmg` had a different defect (nicegui missing from
   bundle), fixed in PR 44; the current v1.6.0 fork-bomb issue is
   separate.
-- **v1.5.0 Brown acceptance test currently FAILS — v1.6.1 ship HELD
-  pending investigation.** Three code reviews verified the Rust
-  vector-form CFR is structurally faithful to Brown's
-  `cpp/src/trainer.cpp:138-240` (iteration loop, DCFR weights, regret
-  matching all match line-by-line). PR 40 confirmed and fixed three
-  test-side encoding artifacts (action-axis column ordering,
-  range-to-player-slot inversion, hand-string suit-order). **But a
-  v1.6.1-bundle dry-run (PR 33+34+35-A+B+40 composed, 2000-DCFR-iter)
-  empirically re-confirms a residual algorithmic divergence at
-  deep-cap facing-raise** (not yet localized): on A83 at `b1000r3000`,
-  bottom-pair-Ace cells (3sAs, 3cAc) show 33-pp call-frequency
-  divergence (Brown ~0.36, Rust ~0.69), max |diff| 0.33. K72 max
-  |diff| ~0.07. Affected: deep-cap facing-raise on bottom-pair-Ace at
-  large raise sizes. Unaffected: river single-shot, shallow-cap
-  postflop, push/fold preflop. The structural reviews verified CODE
-  matches Brown's algorithm; they did not verify the algorithm
-  produces Brown's empirical OUTPUT at this scenario — a
-  label-vs-semantics gap. Investigation in flight: best-response
-  cross-check + iteration sweep + facing-raise path re-read.
+- **Deep-cap RvR acceptance vs Brown: Nash-multiplicity on indifference
+  manifold (resolved); v1.6.1 ship HOLD lifted.** Investigation closed.
+  The v1.5 Brown acceptance test PASSES under the reframed 4-layer gate
+  (structural + shallow-strict + deep max-L1 ≤ 1.9 + top-action ≥ 60%);
+  both A83 and K72 PASS, and the v1.8 SIMD landing did not perturb the
+  output (see
+  [`docs/v1_5_brown_current_state_2026-05-26.md`](docs/v1_5_brown_current_state_2026-05-26.md)).
+  The earlier 33-pp K72/A83 deep-cap divergence traced to two compound
+  causes, both resolved: (1) test-side wrapper bugs (suit-encoding,
+  P0/P1 player convention, hand-string sort order) — fixed in the
+  v1.7.1 bundle (PR 52/55/56); (2) Nash-multiplicity at depth ≥ 11
+  facing-all-in `(c,f)` AA leaves — both solvers are within the
+  indifference manifold (Brown exploitability 0.06 chips at 2000 iters
+  = 0.006% of pot). The residual 33-pp deep-cap divergence is acceptable
+  per the Nash-multiplicity acceptance framework (see
+  [`docs/a83_validation_2026-05-26.md`](docs/a83_validation_2026-05-26.md)).
+  v1.6.1 ship HOLD lifted per
+  [`docs/v1_6_1_ship_hold_review_2026-05-26.md`](docs/v1_6_1_ship_hold_review_2026-05-26.md);
+  the engine bundle (PR 50, 51, 52, 54, 55, 56, 53b, 53c) has shipped
+  piecewise on `origin/main`. Investigation details:
+  [`docs/a83_deep_cap_root_cause_investigation.md`](docs/a83_deep_cap_root_cause_investigation.md).
 - **`Range` fractional frequencies** (e.g. `AKo:0.25` syntax) not yet
   supported — `Range` has no `weight` field. Set-membership operations
   (`Range.diff`) work today; mixed-frequency operations require a

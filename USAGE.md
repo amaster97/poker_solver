@@ -43,14 +43,14 @@ mock mode (see §4).
 > packaged `.app` spawns processes uncontrollably on macOS launch and
 > can freeze your Mac. Root cause is a missing
 > `multiprocessing.freeze_support()` call in the PyInstaller entry
-> point; fix queued for v1.7.2. Until then, use **Path B** below.
+> point; fix merged on `main` (PR #42, commit `728206e`) and ships in
+> v1.8.0. Until v1.8.0 is tagged + released, use **Path B** below.
 > Full RCA:
 > [`docs/dmg_spawn_loop_rca_2026-05-26.md`](docs/dmg_spawn_loop_rca_2026-05-26.md).
 
 The historical `.dmg` build script (`sh scripts/build_macos_dmg.sh`)
-remains in the repo; once the packaging fix lands and a re-signed v1.7.2
-build is verified, this section will be restored with a working install
-flow. The current shipped artifact (`Poker-Solver-1.6.0-arm64.dmg`) is
+remains in the repo; once the v1.8.0 re-signed build is published, this
+section will be restored with a working install flow. The current shipped artifact (`Poker-Solver-1.6.0-arm64.dmg`) is
 ad-hoc signed (not notarized) and arm64-only. The "universal2" claim
 that appeared in earlier release labeling was retired in PR 44 (DMG
 filename now matches the actual arch) and reinforced in PR 86 (build
