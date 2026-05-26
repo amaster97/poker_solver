@@ -199,7 +199,13 @@ def _cmd_precompute_abstraction(args: argparse.Namespace) -> int:
     if args.mc_iterations < 5_000:
         subgame = default_tiny_subgame()
         required_boards = [subgame.initial_board]
-        required_hands = [subgame.initial_hole_cards[0], subgame.initial_hole_cards[1]]
+        # ``initial_hole_cards`` is typed as the union
+        # ``tuple[tuple[Card, Card], tuple[Card, Card]] | tuple[()]``;
+        # ``default_tiny_subgame`` always populates it with the 2-pair variant,
+        # so narrow for mypy before indexing.
+        hole = subgame.initial_hole_cards
+        assert len(hole) == 2, "default_tiny_subgame must define both hole pairs"
+        required_hands = [hole[0], hole[1]]
 
     build_abstraction(
         out_path=out_path,

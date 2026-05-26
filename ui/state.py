@@ -1468,6 +1468,10 @@ class AppState:
     runner: SolveRunner
     prefs: UIPrefs
     state_path: Path  # ~/.poker_solver_ui/state.json
+    # Cross-view stash: library_browser writes the selected spot id here so
+    # spot_input can pick it up and dispatch ``Library.get`` (spec §4.5).
+    # ``None`` means "no library spot pending load".
+    selected_library_spot_id: str | None = None
 
 
 _STATE_DIR: Path = Path.home() / ".poker_solver_ui"
