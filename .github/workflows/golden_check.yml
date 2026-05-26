@@ -15,10 +15,18 @@ jobs:
       - name: Check if PR modifies golden tests
         id: check_goldens
         run: |
-          if git diff origin/main...HEAD --name-only | grep -E "test_.*golden|golden.*test|snapshot.*test|expected_.*\.json" | head -5; then
+          # NOTE: piping into `head` would mask grep's exit status (head always
+          # exits 0 even on empty input), causing the `if` to always succeed and
+          # modifies_goldens to always be 'true'. Use `grep -q` so the exit
+          # status of grep itself drives the branch.
+          changed_files=$(git diff origin/main...HEAD --name-only)
+          if echo "$changed_files" | grep -qE "test_.*golden|golden.*test|snapshot.*test|expected_.*\.json"; then
             echo "modifies_goldens=true" >> $GITHUB_OUTPUT
+            echo "Detected golden file modifications:"
+            echo "$changed_files" | grep -E "test_.*golden|golden.*test|snapshot.*test|expected_.*\.json" | head -5
           else
             echo "modifies_goldens=false" >> $GITHUB_OUTPUT
+            echo "No golden file modifications detected."
           fi
 
       - name: Require [regen-goldens] tag in commit message
