@@ -7,11 +7,14 @@
 //! path that is **runtime-detected** via `is_x86_feature_detected!("avx2")`
 //! — prebuilt binaries don't know the host CPU at compile time, so the
 //! dispatch happens at run time (the AVX2 path is selected on hosts that
-//! advertise AVX2, otherwise we fall back to SSE2, then scalar).
+//! advertise AVX2, otherwise we fall back to SSE2, then scalar). PR 70
+//! (v1.8 Phase 3) extends the same NEON / AVX2-runtime / SSE2-baseline
+//! dispatch to the `update_strategy_sum` hot kernel.
 //!
 //! Apple M-series CPUs expose 128-bit NEON: two `f64` lanes per vector
 //! (`float64x2_t`). x86_64 SSE2 exposes the same 2-lane f64 width via
-//! `__m128d`. The DCFR hot kernels here are:
+//! `__m128d`; AVX2 widens to 4-lane f64 via `__m256d`. The DCFR hot kernels
+//! here are:
 //!
 //!  1. **Discount** — multiply `regret_sum[i]` by either `pos_scale` or
 //!     `neg_scale` depending on the sign of the existing regret; multiply
@@ -482,15 +485,18 @@ mod neon {
 }
 
 // ---------------------------------------------------------------------------
-// x86_64 SSE2 kernels (PR 61 — v1.8 Phase 1). SSE2 is baseline on every
-// x86_64 target (it's part of the x86_64 ABI), so no runtime detection is
-// needed — `target_arch = "x86_64"` implies SSE2 availability. The 4-lane
-// AVX2 path (PR 68 — v1.8 Phase 2) is layered on top of this with runtime
-// detection via `is_x86_feature_detected!("avx2")`.
+// x86_64 SSE2 kernels (PR 61 — v1.8 Phase 1; extended by PR 63 Phase 2 for
+// `update_regret_sum_vector`, then by PR 70 Phase 3 for `update_strategy_sum`).
+// SSE2 is baseline on every x86_64 target (it's part of the x86_64 ABI), so
+// no runtime detection is needed — `target_arch = "x86_64"` implies SSE2
+// availability. The 4-lane AVX2 path (PR 68 — v1.8 Phase 2; extended by PR 70
+// for `update_strategy_sum`) is layered on top of this with runtime detection
+// via `is_x86_feature_detected!("avx2")`.
 //
-// Scope: only the discount kernel is SIMD-vectorized in PR 61/68. The
-// other kernels (positive_regrets_and_total, update_regret_sum,
-// update_strategy_sum, normalize) keep scalar fallback on x86_64 for now;
+// Scope: the discount kernel (PR 61/68), `update_regret_sum_vector`
+// (PR 63), and `update_strategy_sum` (PR 70) are SIMD-vectorized here.
+// The remaining kernels (positive_regrets_and_total, update_regret_sum
+// scalar variant, normalize) still keep scalar fallback on x86_64 for now;
 // extending them follows the same template.
 // ---------------------------------------------------------------------------
 
@@ -612,22 +618,59 @@ mod sse2 {
             }
         }
     }
+
+    /// `strategy_sum[i] += own_reach * strategy[i]` — vectorized via SSE2,
+    /// bit-identical to scalar (two roundings: `_mm_mul_pd` then
+    /// `_mm_add_pd`, not a fused multiply-add). See
+    /// [`super::neon::update_strategy_sum_neon`] for the rationale on why
+    /// we avoid FMA on this kernel.
+    ///
+    /// # Safety
+    /// `strategy_sum` and `strategy` must have identical length; SSE2
+    /// loads/stores via `_mm_loadu_pd` / `_mm_storeu_pd` are
+    /// unaligned-safe.
+    #[target_feature(enable = "sse2")]
+    #[inline]
+    pub unsafe fn update_strategy_sum_sse2(
+        strategy_sum: &mut [f64],
+        strategy: &[f64],
+        own_reach: f64,
+    ) {
+        debug_assert_eq!(strategy_sum.len(), strategy.len());
+        let n = strategy_sum.len();
+        let own = _mm_set1_pd(own_reach);
+        let mut i = 0usize;
+        while i + 2 <= n {
+            let s = _mm_loadu_pd(strategy_sum.as_ptr().add(i));
+            let st = _mm_loadu_pd(strategy.as_ptr().add(i));
+            let prod = _mm_mul_pd(own, st);
+            let updated = _mm_add_pd(s, prod);
+            _mm_storeu_pd(strategy_sum.as_mut_ptr().add(i), updated);
+            i += 2;
+        }
+        while i < n {
+            strategy_sum[i] += own_reach * strategy[i];
+            i += 1;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
-// x86_64 AVX2 kernels (PR 68 — v1.8 Phase 2). AVX2 is NOT baseline on
-// x86_64 (introduced with Haswell, 2013); presence varies across deployed
-// hardware (older Sandy/Ivy Bridge Intel Macs lack it). We compile the
-// AVX2 functions unconditionally on `target_arch = "x86_64"` and gate the
-// call site with `is_x86_feature_detected!("avx2")` so prebuilt binaries
-// pick the right path at run time.
+// x86_64 AVX2 kernels (PR 68 — v1.8 Phase 2; extended by PR 70 Phase 3
+// for `update_strategy_sum`). AVX2 is NOT baseline on x86_64 (introduced
+// with Haswell, 2013); presence varies across deployed hardware (older
+// Sandy/Ivy Bridge Intel Macs lack it). We compile the AVX2 functions
+// unconditionally on `target_arch = "x86_64"` and gate the call site with
+// `is_x86_feature_detected!("avx2")` so prebuilt binaries pick the right
+// path at run time.
 //
 // 4 f64 lanes per vector via `__m256d` ⇒ ≈2× throughput over SSE2's 2-lane
-// path on the discount kernel. Semantics match SSE2 / scalar bit-for-bit
-// (same operation graph: mul + cmpgt + and + andnot + or). The tail
-// handling drops to a 2-lane SSE2 epilogue for the (n % 4)/2 lanes, then
-// to scalar for any final lane, so a length-7 slice goes 4-lane AVX2,
-// then 2-lane SSE2, then 1 scalar — all bit-identical to scalar.
+// path on the discount and strategy-sum kernels. Semantics match SSE2 /
+// scalar bit-for-bit (same operation graph: mul + cmpgt + and + andnot +
+// or for discount; mul + add for strategy_sum, no FMA). The tail handling
+// drops to a 2-lane SSE2 epilogue for the (n % 4)/2 lanes, then to scalar
+// for any final lane, so a length-7 slice goes 4-lane AVX2, then 2-lane
+// SSE2, then 1 scalar — all bit-identical to scalar.
 // ---------------------------------------------------------------------------
 
 #[cfg(target_arch = "x86_64")]
@@ -723,6 +766,58 @@ mod avx2 {
         }
         while i < n {
             strategy[i] *= strat_scale;
+            i += 1;
+        }
+    }
+
+    /// `strategy_sum[i] += own_reach * strategy[i]` — vectorized via AVX2
+    /// (4-lane f64). Bit-identical to scalar on each lane (two roundings:
+    /// `_mm256_mul_pd` then `_mm256_add_pd`, not FMA — see
+    /// [`super::neon::update_strategy_sum_neon`] for rationale).
+    ///
+    /// Tail handling: 2-lane SSE2 epilogue for `n % 4 ∈ {2, 3}`, then
+    /// 1-lane scalar.
+    ///
+    /// # Safety
+    /// `strategy_sum` and `strategy` must have identical length. AVX2
+    /// loads/stores via `_mm256_loadu_pd` / `_mm256_storeu_pd` are
+    /// unaligned-safe. Caller MUST have verified
+    /// `std::is_x86_feature_detected!("avx2")` (the
+    /// `#[target_feature(enable = "avx2")]` attribute makes the compiler
+    /// emit AVX2 instructions; calling on a non-AVX2 host is UB).
+    #[target_feature(enable = "avx2")]
+    #[inline]
+    pub unsafe fn update_strategy_sum_avx2(
+        strategy_sum: &mut [f64],
+        strategy: &[f64],
+        own_reach: f64,
+    ) {
+        debug_assert_eq!(strategy_sum.len(), strategy.len());
+        let n = strategy_sum.len();
+        let own = _mm256_set1_pd(own_reach);
+        let mut i = 0usize;
+        // 4-lane AVX2 main loop.
+        while i + 4 <= n {
+            let s = _mm256_loadu_pd(strategy_sum.as_ptr().add(i));
+            let st = _mm256_loadu_pd(strategy.as_ptr().add(i));
+            let prod = _mm256_mul_pd(own, st);
+            let updated = _mm256_add_pd(s, prod);
+            _mm256_storeu_pd(strategy_sum.as_mut_ptr().add(i), updated);
+            i += 4;
+        }
+        // 2-lane SSE2 epilogue (n % 4 ∈ {2, 3}).
+        let own2 = _mm_set1_pd(own_reach);
+        while i + 2 <= n {
+            let s = _mm_loadu_pd(strategy_sum.as_ptr().add(i));
+            let st = _mm_loadu_pd(strategy.as_ptr().add(i));
+            let prod = _mm_mul_pd(own2, st);
+            let updated = _mm_add_pd(s, prod);
+            _mm_storeu_pd(strategy_sum.as_mut_ptr().add(i), updated);
+            i += 2;
+        }
+        // 1-lane scalar tail.
+        while i < n {
+            strategy_sum[i] += own_reach * strategy[i];
             i += 1;
         }
     }
@@ -918,6 +1013,16 @@ pub fn update_regret_sum_vector(
 }
 
 /// Strategy-sum update — public dispatch.
+///
+/// Dispatch order:
+///   - `aarch64` (compile-time) + not `force_scalar` → NEON (`vmulq_f64` +
+///     `vaddq_f64`, 2-lane f64, two roundings — bit-identical to scalar)
+///   - `x86_64` (compile-time) + not `force_scalar`, AVX2 detected at run
+///     time via `std::is_x86_feature_detected!("avx2")` → AVX2
+///     (`_mm256_mul_pd` + `_mm256_add_pd`, 4-lane f64, two roundings)
+///   - `x86_64` (compile-time) + not `force_scalar`, no AVX2 → SSE2
+///     (`_mm_mul_pd` + `_mm_add_pd`, 2-lane f64 baseline on x86_64)
+///   - else (incl. `force_scalar`) → scalar fallback
 #[inline]
 pub fn update_strategy_sum(strategy_sum: &mut [f64], strategy: &[f64], own_reach: f64) {
     #[cfg(all(target_arch = "aarch64", not(feature = "force_scalar")))]
@@ -925,7 +1030,30 @@ pub fn update_strategy_sum(strategy_sum: &mut [f64], strategy: &[f64], own_reach
     unsafe {
         neon::update_strategy_sum_neon(strategy_sum, strategy, own_reach)
     }
-    #[cfg(not(all(target_arch = "aarch64", not(feature = "force_scalar"))))]
+    #[cfg(all(
+        target_arch = "x86_64",
+        not(target_arch = "aarch64"),
+        not(feature = "force_scalar")
+    ))]
+    {
+        // Runtime dispatch: prefer AVX2 (4-lane f64) if the host advertises
+        // it, else drop to SSE2 (baseline on x86_64), else scalar (defensive
+        // — SSE2 is x86_64-ABI baseline so this branch should never run).
+        if std::is_x86_feature_detected!("avx2") {
+            // SAFETY: AVX2 detected at run time; slice bounds checked;
+            // loads/stores are unaligned-safe.
+            unsafe { avx2::update_strategy_sum_avx2(strategy_sum, strategy, own_reach) }
+        } else if std::is_x86_feature_detected!("sse2") {
+            // SAFETY: SSE2 baseline on x86_64; slice bounds checked; loads/stores unaligned-safe.
+            unsafe { sse2::update_strategy_sum_sse2(strategy_sum, strategy, own_reach) }
+        } else {
+            update_strategy_sum_scalar(strategy_sum, strategy, own_reach)
+        }
+    }
+    #[cfg(any(
+        feature = "force_scalar",
+        not(any(target_arch = "aarch64", target_arch = "x86_64"))
+    ))]
     update_strategy_sum_scalar(strategy_sum, strategy, own_reach)
 }
 
@@ -1051,6 +1179,35 @@ mod tests {
         }
     }
 
+    /// PR 70 — SSE2 path parity check for `update_strategy_sum`. Only runs
+    /// on x86_64; on aarch64 the public dispatcher routes to NEON.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn update_strategy_sum_sse2_matches_scalar() {
+        // Mix of lane widths (1, 2, 3, 5, 7, 9) to exercise the 2-lane
+        // body + 1-lane tail. Includes signed inputs.
+        for len in [1usize, 2, 3, 5, 7, 9, 16, 33] {
+            let st: Vec<f64> = (0..len).map(|i| (i as f64) * 0.13 - 0.5).collect();
+            let init: Vec<f64> = (0..len).map(|i| 1.0 + (i as f64) * 0.07).collect();
+            let mut a = init.clone();
+            let mut b = init.clone();
+            // SAFETY: SSE2 is baseline on x86_64; slices valid + same length.
+            unsafe { super::sse2::update_strategy_sum_sse2(&mut a, &st, 0.37) };
+            update_strategy_sum_scalar(&mut b, &st, 0.37);
+            for i in 0..len {
+                assert_eq!(
+                    a[i].to_bits(),
+                    b[i].to_bits(),
+                    "len={} lane {} differs (a={} b={})",
+                    len,
+                    i,
+                    a[i],
+                    b[i]
+                );
+            }
+        }
+    }
+
     /// PR 68 — AVX2 path parity check. Only runs on x86_64 hosts that
     /// actually advertise AVX2 (the test is `#[cfg(target_arch = "x86_64")]`-
     /// compiled, but guarded by a runtime `is_x86_feature_detected!` so it's
@@ -1113,6 +1270,39 @@ mod tests {
                     "len={} lane {} differs (AVX2 vs scalar)",
                     len,
                     i
+                );
+            }
+        }
+    }
+
+    /// PR 70 — AVX2 path parity check for `update_strategy_sum`. Compile-time
+    /// gated on x86_64 (AVX2 module only exists on x86_64); runtime no-ops on
+    /// pre-Haswell hosts that lack AVX2 (SSE2 parity is covered by the test
+    /// above).
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn update_strategy_sum_avx2_matches_scalar() {
+        if !std::is_x86_feature_detected!("avx2") {
+            return; // No-op on pre-Haswell x86_64 hardware.
+        }
+        // Lengths to exercise 4-lane body, 2-lane mid-tail, 1-lane tail.
+        for len in [1usize, 2, 3, 4, 5, 6, 7, 8, 9, 16, 17, 33] {
+            let st: Vec<f64> = (0..len).map(|i| (i as f64) * 0.11 - 0.3).collect();
+            let init: Vec<f64> = (0..len).map(|i| 0.5 + (i as f64) * 0.09).collect();
+            let mut a = init.clone();
+            let mut b = init.clone();
+            // SAFETY: AVX2 detected at run time above; slices valid.
+            unsafe { super::avx2::update_strategy_sum_avx2(&mut a, &st, 0.41) };
+            update_strategy_sum_scalar(&mut b, &st, 0.41);
+            for i in 0..len {
+                assert_eq!(
+                    a[i].to_bits(),
+                    b[i].to_bits(),
+                    "len={} lane {} differs (a={} b={})",
+                    len,
+                    i,
+                    a[i],
+                    b[i]
                 );
             }
         }

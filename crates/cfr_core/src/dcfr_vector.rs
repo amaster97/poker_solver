@@ -464,15 +464,25 @@ impl VectorDCFR {
                     );
                     // strategy_sum[h,a] += reach_p[h] * avg_weight * strategy[h,a]
                     // Mirrors `trainer.cpp:226-237` (MIT).
+                    //
+                    // PR 70 (v1.8 Phase 3): the inner `a` loop is routed
+                    // through `simd::update_strategy_sum`, which dispatches
+                    // to NEON (aarch64, compile-time) / AVX2 (x86_64,
+                    // runtime-detected) / SSE2 (x86_64 baseline) / scalar.
+                    // The kernel is bit-identical to the prior scalar inner
+                    // loop on each lane (two roundings, no FMA).
                     for h in 0..update_hands {
                         let weight = reach_p[h] * avg_weight;
                         if weight == 0.0 {
                             continue;
                         }
                         let offset = h * action_count;
-                        for a in 0..action_count {
-                            info.strategy_sum[offset + a] += weight * strategy[offset + a];
-                        }
+                        let row_end = offset + action_count;
+                        crate::simd::update_strategy_sum(
+                            &mut info.strategy_sum[offset..row_end],
+                            &strategy[offset..row_end],
+                            weight,
+                        );
                     }
                 }
 
