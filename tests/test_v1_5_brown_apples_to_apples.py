@@ -145,7 +145,7 @@ def _skip_or_fail(reason: str) -> None:
     """
     if os.environ.get("STRICT_ACCEPTANCE", "").strip() in ("1", "true", "TRUE"):
         pytest.fail(reason)
-    pytest.skip(reason)  # skip-ban exempt: sole legitimate skip site, gated above
+    pytest.skip(reason)  # noqa: skip-ban — sole legitimate skip site, gated above
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
