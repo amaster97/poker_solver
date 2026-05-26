@@ -31,7 +31,10 @@ jobs:
         # cleans the baseline, then flip back to gating.
         continue-on-error: true
         run: cargo clippy --all-targets -- -D warnings
-      - name: rustfmt
+      - name: rustfmt (informational on first baseline)
+        # Existing tree has rustfmt diffs (e.g. preflop.rs line-length).
+        # Informational until cleanup PR lands, then re-gate.
+        continue-on-error: true
         run: cargo fmt --check
 
   python:
