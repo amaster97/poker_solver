@@ -625,7 +625,12 @@ description, so the same configuration always resolves to the same row.
   `NotImplementedError`; full preflop is shipping in v1.1.0. Working
   paths today: the river subgame solver (`--hunl-mode tiny_subgame`) and
   ad-hoc postflop subgames (`--hunl-mode postflop`). Short stacks: use
-  the charts in §3a.
+  the charts in §3a. Note: `--hunl-mode postflop` enumerates the full
+  hole-card chance node, so tree construction dominates wall-time —
+  expect multi-minute runs on a flop and tens of seconds on a river,
+  largely independent of `--iterations` or `--backend`. Use
+  `--hunl-mode tiny_subgame` (or the `poker-solver river` subcommand
+  in §7a) for fast hand-vs-hand or fixed-hero-vs-range exploration.
 - **Production-scale flop/turn solves not validated end-to-end.** The
   postflop solver works on toy ranges and is bit-exact between Python
   and Rust, but a full standard-flop / standard-range solve has not
