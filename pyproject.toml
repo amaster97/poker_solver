@@ -64,6 +64,7 @@ markers = [
     "very_slow: hour-scale builds (production precompute); opt-out of timeout cap",
     "parity_noambrown: river-spot parity diff vs Noam Brown's river_solver_optimized (deselect with -m 'not parity_noambrown')",
     "ui: tests that require nicegui (skip if not installed)",
+    "golden: tests that compare against frozen golden values; require explicit [regen-goldens] commit-message tag to update (Guard B)",
 ]
 
 [tool.ruff]
