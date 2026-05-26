@@ -224,12 +224,12 @@ def test_postflop_flop_solve_strategy_is_valid() -> None:
         for p in probs:
             assert not math.isnan(p), f"NaN in probs at infoset {key!r}: {probs}"
             assert not math.isinf(p), f"Inf in probs at infoset {key!r}: {probs}"
-            assert (
-                0.0 <= p <= 1.0
-            ), f"prob {p} out of [0, 1] at infoset {key!r}: {probs}"
-        assert sum(probs) == pytest.approx(
-            1.0, abs=1e-9
-        ), f"probs do not sum to 1 at infoset {key!r}: sum={sum(probs)}"
+            assert 0.0 <= p <= 1.0, (
+                f"prob {p} out of [0, 1] at infoset {key!r}: {probs}"
+            )
+        assert sum(probs) == pytest.approx(1.0, abs=1e-9), (
+            f"probs do not sum to 1 at infoset {key!r}: sum={sum(probs)}"
+        )
 
 
 # -- Spec §9.1 #5-7: rejection paths --------------------------------------
@@ -358,9 +358,9 @@ def test_postflop_solve_memory_budget_aborts_cleanly() -> None:
             seed=42,
             memory_budget_gb=0.001,
         )
-    assert (
-        len(exc_info.value.args) >= 2
-    ), "MemoryError must carry partial MemoryReport as args[1] per spec §7.7"
+    assert len(exc_info.value.args) >= 2, (
+        "MemoryError must carry partial MemoryReport as args[1] per spec §7.7"
+    )
     report = exc_info.value.args[1]
     assert isinstance(report, MemoryReport)
     assert report.grand_total_bytes > 0
@@ -554,9 +554,9 @@ def test_postflop_river_solve_strategy_is_valid() -> None:
         for p in probs:
             assert not math.isnan(p), f"NaN in probs at infoset {key!r}: {probs}"
             assert not math.isinf(p), f"Inf in probs at infoset {key!r}: {probs}"
-            assert (
-                0.0 <= p <= 1.0
-            ), f"prob {p} out of [0, 1] at infoset {key!r}: {probs}"
+            assert 0.0 <= p <= 1.0, (
+                f"prob {p} out of [0, 1] at infoset {key!r}: {probs}"
+            )
         assert sum(probs) == pytest.approx(1.0, abs=1e-6), (
             f"probs do not sum to 1.0 +/- 1e-6 at infoset {key!r}: "
             f"sum={sum(probs)}, probs={probs}"
@@ -587,12 +587,12 @@ def test_postflop_river_solve_with_pr4_abstraction_works() -> None:
     bucket_p1 = lookup_bucket(
         tables, FIXTURE_RIVER_BOARD, FIXTURE_RIVER_HOLES[1], Street.RIVER
     )
-    assert (
-        isinstance(bucket_p0, int) and bucket_p0 >= 0
-    ), f"lookup_bucket(P0) returned non-int or negative: {bucket_p0!r}"
-    assert (
-        isinstance(bucket_p1, int) and bucket_p1 >= 0
-    ), f"lookup_bucket(P1) returned non-int or negative: {bucket_p1!r}"
+    assert isinstance(bucket_p0, int) and bucket_p0 >= 0, (
+        f"lookup_bucket(P0) returned non-int or negative: {bucket_p0!r}"
+    )
+    assert isinstance(bucket_p1, int) and bucket_p1 >= 0, (
+        f"lookup_bucket(P1) returned non-int or negative: {bucket_p1!r}"
+    )
 
     # End-to-end: attach the AbstractionRef and solve.
     import dataclasses
@@ -638,9 +638,9 @@ def test_postflop_river_solve_memory_budget_aborts_cleanly() -> None:
             seed=42,
             memory_budget_gb=1e-9,  # 1 byte; smaller than any allocation
         )
-    assert (
-        len(exc_info.value.args) >= 2
-    ), "MemoryError must carry partial MemoryReport as args[1] per spec §7.7"
+    assert len(exc_info.value.args) >= 2, (
+        "MemoryError must carry partial MemoryReport as args[1] per spec §7.7"
+    )
     report = exc_info.value.args[1]
     assert isinstance(report, MemoryReport)
     assert report.grand_total_bytes > 0, (

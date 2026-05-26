@@ -197,9 +197,9 @@ def test_library_put_get_roundtrip(tmp_path: Path) -> None:
         # only restore exploitability_history to length-1 with the final
         # value preserved. Documented as a known limitation; widen the
         # roundtrip if a future schema migration adds the history column.
-        assert (
-            len(returned.exploitability_history) >= 1
-        ), "exploitability_history must have at least the final value"
+        assert len(returned.exploitability_history) >= 1, (
+            "exploitability_history must have at least the final value"
+        )
         assert returned.exploitability_history[-1] == pytest.approx(
             original.exploitability_history[-1]
         )
@@ -341,12 +341,12 @@ def test_library_list_returns_metadata_only(tmp_path: Path) -> None:
         assert len(rows) == 3
         for row in rows:
             assert isinstance(row, SpotMetadata)
-            assert not hasattr(
-                row, "average_strategy"
-            ), "SpotMetadata must not carry the decompressed strategy blob"
-            assert not hasattr(
-                row, "strategy"
-            ), "SpotMetadata must not carry a strategy field"
+            assert not hasattr(row, "average_strategy"), (
+                "SpotMetadata must not carry the decompressed strategy blob"
+            )
+            assert not hasattr(row, "strategy"), (
+                "SpotMetadata must not carry a strategy field"
+            )
     finally:
         lib.close()
 
@@ -651,6 +651,6 @@ def test_library_schema_version_mismatch_errors(tmp_path: Path) -> None:
     with pytest.raises(LibrarySchemaError) as exc_info:
         Library.open(db_path)
     msg = str(exc_info.value).lower()
-    assert (
-        "newer" in msg
-    ), f"LibrarySchemaError message must mention 'newer'; got {msg!r}"
+    assert "newer" in msg, (
+        f"LibrarySchemaError message must mention 'newer'; got {msg!r}"
+    )

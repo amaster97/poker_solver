@@ -318,8 +318,8 @@ def test_cli_solve_with_abstraction_loads_file(tmp_path):
         text=True,
         timeout=120,
     )
-    assert (
-        solve_proc.returncode == 0
-    ), f"stderr={solve_proc.stderr!r}\nstdout={solve_proc.stdout!r}"
+    assert solve_proc.returncode == 0, (
+        f"stderr={solve_proc.stderr!r}\nstdout={solve_proc.stdout!r}"
+    )
     # "Game value" is the proxy output line from the CLI solve subcommand.
     assert "Game value" in solve_proc.stdout or "game_value" in solve_proc.stdout

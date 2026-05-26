@@ -77,6 +77,14 @@ const GAMMA: f64 = 2.0;
 
 /// Reports which backend is compiled in. Useful for log inspection
 /// when this test runs in CI on multiple architectures.
+//
+// `clippy::needless_return` (rustc 1.95+) flags the early `return`s, but
+// removing them changes semantics: each `#[cfg(...)]` block guards one
+// arm and the trailing arm acts as a fallback; without `return`, an
+// active early-arm value would be discarded and execution would fall
+// through to the fallback block. The early-return form is the clearest
+// expression of "pick the first cfg-active arm". Allow the lint here.
+#[allow(clippy::needless_return)]
 fn compiled_backend() -> &'static str {
     #[cfg(feature = "force_scalar")]
     {

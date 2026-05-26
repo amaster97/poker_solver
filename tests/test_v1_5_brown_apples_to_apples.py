@@ -145,7 +145,8 @@ def _skip_or_fail(reason: str) -> None:
     """
     if os.environ.get("STRICT_ACCEPTANCE", "").strip() in ("1", "true", "TRUE"):
         pytest.fail(reason)
-    pytest.skip(reason)  # noqa: skip-ban — sole legitimate skip site, gated above
+    pytest.skip(reason)  # skip-ban exempt: sole legitimate skip site, gated above
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SPOTS_JSON = REPO_ROOT / "tests" / "data" / "river_spots.json"
@@ -771,8 +772,8 @@ def test_v1_5_brown_apples_to_apples_parity(spot_id: str) -> None:
                 if l1 > L1_PER_ROW_CEILING and len(l1_examples) < 10:
                     l1_examples.append(
                         f"Bp{brown_player}/Rp{rust_player} hand={hand_str} hist={history_substr!r}: "
-                        f"L1={l1:.3f} brown={['%.3f' % p for p in brown_probs]} "
-                        f"rust={['%.3f' % p for p in rust_probs]} actions={actions}"
+                        f"L1={l1:.3f} brown={[f'{p:.3f}' for p in brown_probs]} "
+                        f"rust={[f'{p:.3f}' for p in rust_probs]} actions={actions}"
                     )
 
                 # Layer 4 top-action agreement.
@@ -858,10 +859,10 @@ def test_v1_5_brown_apples_to_apples_parity(spot_id: str) -> None:
         f"{SHALLOW_MAX_VIOLATIONS_PER_SPOT}):\n  "
         + "\n  ".join(shallow_violations[:20])
         + "\n\nRoot histories cannot have action-menu divergence (no "
-        f"cap-reached / facing-all-in possible at depth 0). A violation here "
-        f"is a genuine engine bug — likely in hole-card hashing, terminal "
-        f"utility, or DCFR weighting. Triage: "
-        f"`crates/cfr_core/src/dcfr_vector.rs`."
+        "cap-reached / facing-all-in possible at depth 0). A violation here "
+        "is a genuine engine bug — likely in hole-card hashing, terminal "
+        "utility, or DCFR weighting. Triage: "
+        "`crates/cfr_core/src/dcfr_vector.rs`."
     )
 
     # Layer 3 — L1 directional.
@@ -873,9 +874,9 @@ def test_v1_5_brown_apples_to_apples_parity(spot_id: str) -> None:
         f"Nash multiplicity up to ~1.8). Examples (top 10):\n  "
         + "\n  ".join(l1_examples)
         + "\n\nThis level of divergence approaches strategy inversion and "
-        f"cannot be explained by Nash non-uniqueness or Brown's "
-        f"terminal-utility convention drift; it indicates a strategy "
-        f"near-inversion."
+        "cannot be explained by Nash non-uniqueness or Brown's "
+        "terminal-utility convention drift; it indicates a strategy "
+        "near-inversion."
     )
     assert l1_p75 <= L1_P75_CEILING, (
         f"{spot_id}: DIRECTIONAL FAIL — 75th-percentile L1 distance "
@@ -894,6 +895,5 @@ def test_v1_5_brown_apples_to_apples_parity(spot_id: str) -> None:
             f"Rust matches with ≥ {TOP_ACTION_MIN_MASS:.0%} on only "
             f"{top_action_pass_rate:.1%} of {top_action_checks} checks "
             f"(need ≥ {TOP_ACTION_PASS_FLOOR:.0%}). Examples of "
-            f"directional disagreement (top 10):\n  "
-            + "\n  ".join(top_action_failures)
+            f"directional disagreement (top 10):\n  " + "\n  ".join(top_action_failures)
         )

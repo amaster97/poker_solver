@@ -44,7 +44,7 @@ class Range:
     def __iter__(self):
         return iter(self.combos)
 
-    def diff(self, other: "Range") -> "Range":
+    def diff(self, other: Range) -> Range:
         """Return a new ``Range`` of combos in ``self`` that are NOT in ``other``.
 
         Set-difference semantics, preserving combo order from ``self``. This is

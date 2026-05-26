@@ -97,8 +97,7 @@ def _parse_board(raw: str) -> tuple:
         # Concatenated form ("AsKc7d"): split every 2 chars.
         if len(cleaned) % 2 != 0:
             raise ValueError(
-                f"initial_board {raw!r} has odd length; expected pairs of "
-                "(rank, suit)"
+                f"initial_board {raw!r} has odd length; expected pairs of (rank, suit)"
             )
         tokens = [cleaned[i : i + 2] for i in range(0, len(cleaned), 2)]
     return tuple(Card.from_str(t) for t in tokens)
@@ -286,9 +285,7 @@ def run_batch(
         for row in rows:
             try:
                 spot = _build_spot(row)
-            except (
-                Exception
-            ) as exc:  # noqa: BLE001 — surface all CSV errors per spec §5.2
+            except Exception as exc:  # noqa: BLE001 — surface all CSV errors per spec §5.2
                 print(f"[ERROR] {row.name}: {exc}", file=out, flush=True)
                 counts.error += 1
                 continue

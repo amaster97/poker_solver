@@ -160,21 +160,25 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 4b. Python format (black --check)
+# 4b. Python format (ruff format --check)
 # ---------------------------------------------------------------------------
-echo "[4b/10] Python format (black)"
-if ! command -v black > /dev/null 2>&1; then
-    echo "  $FAIL_SYMBOL  black not installed — run 'pip install -e .[dev]'"
-    record "black" "$FAIL_SYMBOL" "missing tool"
-    FAILED="$FAILED black"
-elif black --check poker_solver tests > /tmp/check_pr_black 2>&1; then
-    echo "  $PASS_SYMBOL  black --check"
-    record "black" "$PASS_SYMBOL" ""
+# PR 79: replaced `black --check` with `ruff format --check` (single
+# formatter; black and ruff-format diverge on edge cases at
+# line-length=88, and CONTRIBUTING required BOTH to pass which is
+# impossible in general).
+echo "[4b/10] Python format (ruff format)"
+if ! command -v ruff > /dev/null 2>&1; then
+    echo "  $FAIL_SYMBOL  ruff not installed — run 'pip install -e .[dev]'"
+    record "ruff-format" "$FAIL_SYMBOL" "missing tool"
+    FAILED="$FAILED ruff-format"
+elif ruff format --check > /tmp/check_pr_ruff_format 2>&1; then
+    echo "  $PASS_SYMBOL  ruff format --check"
+    record "ruff-format" "$PASS_SYMBOL" ""
 else
-    echo "  $FAIL_SYMBOL  black --check (run 'black poker_solver tests' to fix)"
-    tail -20 /tmp/check_pr_black | sed 's/^/      /'
-    record "black" "$FAIL_SYMBOL" "see logs"
-    FAILED="$FAILED black"
+    echo "  $FAIL_SYMBOL  ruff format --check (run 'ruff format' to fix)"
+    tail -20 /tmp/check_pr_ruff_format | sed 's/^/      /'
+    record "ruff-format" "$FAIL_SYMBOL" "see logs"
+    FAILED="$FAILED ruff-format"
 fi
 
 # ---------------------------------------------------------------------------

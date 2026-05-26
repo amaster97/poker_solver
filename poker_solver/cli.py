@@ -340,7 +340,7 @@ def _cmd_ui(args: argparse.Namespace) -> int:
         from ui.app import launch  # type: ignore[import-not-found]
     except ImportError:
         print(
-            "UI support not installed. " "Install with `pip install poker-solver[ui]`.",
+            "UI support not installed. Install with `pip install poker-solver[ui]`.",
             file=sys.stderr,
         )
         return 2
@@ -661,9 +661,7 @@ def _cmd_river(args: argparse.Namespace) -> int:
 
     board_cards = parse_board(args.board)
     if len(board_cards) != 5:
-        raise ValueError(
-            f"--board must specify 5 river cards; got {len(board_cards)}"
-        )
+        raise ValueError(f"--board must specify 5 river cards; got {len(board_cards)}")
 
     hero_cards = parse_hand(args.hero)
     if len(hero_cards) != 2:
@@ -674,9 +672,7 @@ def _cmd_river(args: argparse.Namespace) -> int:
 
     board_set = set(board_cards)
     if hero_pair[0] in board_set or hero_pair[1] in board_set:
-        raise ValueError(
-            f"--hero {args.hero!r} overlaps with --board {args.board!r}"
-        )
+        raise ValueError(f"--hero {args.hero!r} overlaps with --board {args.board!r}")
 
     villain_range = parse_range(args.villain_range)
     villain_combos = [
@@ -738,8 +734,7 @@ def _cmd_river(args: argparse.Namespace) -> int:
         hero_keys = [
             (key, probs)
             for key, probs in result.average_strategy.items()
-            if len(key.split("|")) == 4
-            and _hole_matches(key.split("|")[0], hero_pair)
+            if len(key.split("|")) == 4 and _hole_matches(key.split("|")[0], hero_pair)
         ]
         if hero_keys:
             # Sort by history length then lex; take the first decision (smallest).

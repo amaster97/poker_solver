@@ -24,7 +24,9 @@ from poker_solver.parity.noambrown_wrapper import find_brown_binary
 # ---------------------------------------------------------------------------
 
 
-def test_pushfold_happy_path_emits_frequency(capsys: pytest.CaptureFixture[str]) -> None:
+def test_pushfold_happy_path_emits_frequency(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     """Stock AA jam at 9 BB returns 1.0 (chart-validated; AA always shoves)."""
     rc = main(["pushfold", "--stack", "9", "--position", "sb_jam", "--hand", "AA"])
     assert rc == 0
@@ -38,7 +40,16 @@ def test_pushfold_happy_path_emits_frequency(capsys: pytest.CaptureFixture[str])
 def test_pushfold_json_round_trips(capsys: pytest.CaptureFixture[str]) -> None:
     """--json emits a parseable object with the expected keys."""
     rc = main(
-        ["pushfold", "--stack", "8", "--position", "bb_call_vs_jam", "--hand", "AKs", "--json"]
+        [
+            "pushfold",
+            "--stack",
+            "8",
+            "--position",
+            "bb_call_vs_jam",
+            "--hand",
+            "AKs",
+            "--json",
+        ]
     )
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
@@ -133,6 +144,7 @@ def test_parity_error_path_unknown_fixture(capsys: pytest.CaptureFixture[str]) -
     assert "Available:" in err
 
 
+@pytest.mark.slow
 @pytest.mark.skipif(
     find_brown_binary() is None,
     reason="Brown's binary not built (scripts/build_noambrown.sh). "
@@ -146,6 +158,12 @@ def test_parity_happy_path_runs_to_completion(
     Reduced iters keeps the wall-clock under ~60s; we only assert the CLI
     wrapper renders the headline metrics — the per-action numeric diff is
     owned by ``tests/test_river_diff.py``.
+
+    Marked ``@pytest.mark.slow`` because empirical wall-clock ranges
+    ~120-190s (Brown solve dominates); ``pytest.ini_options.timeout=90``
+    is too tight, and ``scripts/build_macos_dmg.sh`` bumps the timeout
+    to 300s as a workaround. Default ``pytest`` run deselects via
+    ``-m 'not slow'`` (CI / local).
     """
     rc = main(
         [

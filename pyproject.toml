@@ -16,10 +16,15 @@ classifiers = [
     "Operating System :: OS Independent",
     "Topic :: Games/Entertainment",
 ]
-dependencies = ["numpy>=1.24", "psutil>=5.9"]
+dependencies = ["numpy>=1.24", "psutil>=5.9", "rich>=13.0"]
 
 [project.optional-dependencies]
-dev = ["black>=24.0", "maturin>=1.7", "pytest>=7.0", "pytest-timeout>=2.3", "ruff>=0.6"]
+# PR 79 (2026-05-26): dropped `black` in favour of `ruff format` (single
+# formatter; black/ruff-format diverge on edge cases at line-length=88,
+# and CHANGELOG already names ruff as the formatter going forward).
+# Added `mypy>=1.8`: CONTRIBUTING/DEVELOPER/README require `mypy
+# poker_solver` strict-clean as part of the check battery.
+dev = ["maturin>=1.7", "mypy>=1.8", "pytest>=7.0", "pytest-timeout>=2.3", "ruff>=0.6"]
 ui = ["nicegui>=3.0,<4.0"]
 # PyInstaller is OPT-IN: only installed when packaging the macOS .app.
 # Default `pip install -e .` does NOT pull it in.  See assets/README.md.
@@ -76,19 +81,22 @@ extend-exclude = ["references/code", "references/manual_downloads"]
 # E = pycodestyle errors, W = pycodestyle warnings, F = pyflakes,
 # I = isort, B = flake8-bugbear, UP = pyupgrade, SIM = flake8-simplify.
 select = ["E", "F", "W", "I", "B", "UP", "SIM"]
-# black handles formatting; let it own line-length judgment calls.
+# ruff format owns line-length judgement calls (PR 79 dropped black).
 ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["B011"]  # assert False is fine in tests
 
-[tool.black]
-line-length = 88
-target-version = ["py39"]
-extend-exclude = '''
-/(
-    references/code
-  | references/manual_downloads
-  | target
-)/
-'''
+# PR 79: Black removed in favour of ruff format (single formatter). The
+# project's [tool.ruff] line-length=88 / target-version=py39 already
+# matches the prior black config exactly; ruff format handles the
+# `references/{code,manual_downloads}` exclusion via `extend-exclude`
+# above.
+
+[tool.mypy]
+# PR 79: the PyO3-built `poker_solver._rust` extension has no .pyi stubs
+# (maturin doesn't emit them; PR 23 / 33 didn't hand-write them). And
+# `rich` is a runtime dep but ships no type stubs by default (rich-stubs
+# is a separate package). Both are import-only sites; the import error
+# is noisy without `ignore_missing_imports`.
+ignore_missing_imports = true

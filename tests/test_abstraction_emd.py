@@ -124,9 +124,9 @@ def test_kmeans_separates_clearly_distinct_clusters():
         preds = assignments[mask]
         majority = np.bincount(preds).max()
         homogeneity = majority / mask.sum()
-        assert (
-            homogeneity >= 0.50
-        ), f"Cluster {label}: homogeneity {homogeneity:.2f} below 0.50 floor"
+        assert homogeneity >= 0.50, (
+            f"Cluster {label}: homogeneity {homogeneity:.2f} below 0.50 floor"
+        )
 
 
 def test_kmeans_reproducible_with_seed():

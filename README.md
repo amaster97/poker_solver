@@ -11,11 +11,11 @@ locking. Goalpost: PioSolver-class HU local solving on a MacBook.
 
 ## Status
 
-- **Latest tagged release:** v1.6.0 (GUI Gate 2 surfaces — PR 24a + PR 24b). The
-  v1.0 → v1.6.0 trajectory is documented in [`CHANGELOG.md`](CHANGELOG.md).
-  v1.7.0 (aggregator→vector wiring + CLI subcommands) is in flight;
-  v1.6.1 (engine bundle, deep-cap investigation) is held pending the
-  A83 acceptance test resolution.
+- **Latest tagged release:** v1.7.0 (aggregator→vector wiring + CLI
+  subcommands — PR 43 + PR 44). The v1.0 → v1.7.0 trajectory is
+  documented in [`CHANGELOG.md`](CHANGELOG.md). v1.6.1 (engine bundle,
+  deep-cap investigation) is held pending the A83 acceptance test
+  resolution.
 - **License:** MIT.
 - **Platforms:** macOS (Apple Silicon primary), Linux. Intel Mac is
   source-build only.
@@ -44,7 +44,7 @@ source "$HOME/.cargo/env"
 # Build + install the Python package (compiles the Rust extension via maturin):
 pip install -e .
 
-# Optional dev tools (pytest, ruff, black, maturin):
+# Optional dev tools (pytest, ruff, mypy, maturin):
 pip install -e ".[dev]"
 
 # Optional UI extra (NiceGUI):
