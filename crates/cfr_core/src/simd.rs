@@ -1,10 +1,13 @@
-//! Cross-platform 128-bit SIMD kernels for the DCFR inner loop.
+//! Cross-platform 128/256-bit SIMD kernels for the DCFR inner loop.
 //!
 //! PR 8 introduced ARM NEON paths for Apple Silicon (`vmulq_f64`, `vfmaq_f64`,
 //! etc.). PR 61 (v1.8 Phase 1) extends the dispatch with a parallel SSE2
 //! path so x86_64 hosts (Intel Macs, x86 Linux, Windows) also get 2-lane
-//! f64 SIMD on the discount kernel. Wider-vector AVX2 (4-lane) is deferred
-//! to v1.8 Phase 2+.
+//! f64 SIMD on the discount kernel. PR 68 (v1.8 Phase 2) adds a 4-lane AVX2
+//! path that is **runtime-detected** via `is_x86_feature_detected!("avx2")`
+//! — prebuilt binaries don't know the host CPU at compile time, so the
+//! dispatch happens at run time (the AVX2 path is selected on hosts that
+//! advertise AVX2, otherwise we fall back to SSE2, then scalar).
 //!
 //! Apple M-series CPUs expose 128-bit NEON: two `f64` lanes per vector
 //! (`float64x2_t`). x86_64 SSE2 exposes the same 2-lane f64 width via
@@ -390,14 +393,14 @@ mod neon {
 // ---------------------------------------------------------------------------
 // x86_64 SSE2 kernels (PR 61 — v1.8 Phase 1). SSE2 is baseline on every
 // x86_64 target (it's part of the x86_64 ABI), so no runtime detection is
-// needed — `target_arch = "x86_64"` implies SSE2 availability. Wider AVX2
-// (4-lane f64) is deferred to v1.8 Phase 2; the SSE2 path is the safe
-// universal baseline.
+// needed — `target_arch = "x86_64"` implies SSE2 availability. The 4-lane
+// AVX2 path (PR 68 — v1.8 Phase 2) is layered on top of this with runtime
+// detection via `is_x86_feature_detected!("avx2")`.
 //
-// Scope: only the discount kernel is SSE2-vectorized in PR 61. The other
-// kernels (positive_regrets_and_total, update_regret_sum,
+// Scope: only the discount kernel is SIMD-vectorized in PR 61/68. The
+// other kernels (positive_regrets_and_total, update_regret_sum,
 // update_strategy_sum, normalize) keep scalar fallback on x86_64 for now;
-// extending them follows the same template and is the v1.8 Phase 2 task.
+// extending them follows the same template.
 // ---------------------------------------------------------------------------
 
 #[cfg(target_arch = "x86_64")]
@@ -472,10 +475,124 @@ mod sse2 {
 }
 
 // ---------------------------------------------------------------------------
-// Public dispatch: prefer NEON on aarch64, SSE2 on x86_64, scalar otherwise.
-// The `discount` helpers and the regret/strategy updaters expose one public
-// entrypoint each so callers (`dcfr.rs`, `dcfr_vector.rs`, `hunl_solver.rs`)
-// don't sprinkle `#[cfg(...)]`.
+// x86_64 AVX2 kernels (PR 68 — v1.8 Phase 2). AVX2 is NOT baseline on
+// x86_64 (introduced with Haswell, 2013); presence varies across deployed
+// hardware (older Sandy/Ivy Bridge Intel Macs lack it). We compile the
+// AVX2 functions unconditionally on `target_arch = "x86_64"` and gate the
+// call site with `is_x86_feature_detected!("avx2")` so prebuilt binaries
+// pick the right path at run time.
+//
+// 4 f64 lanes per vector via `__m256d` ⇒ ≈2× throughput over SSE2's 2-lane
+// path on the discount kernel. Semantics match SSE2 / scalar bit-for-bit
+// (same operation graph: mul + cmpgt + and + andnot + or). The tail
+// handling drops to a 2-lane SSE2 epilogue for the (n % 4)/2 lanes, then
+// to scalar for any final lane, so a length-7 slice goes 4-lane AVX2,
+// then 2-lane SSE2, then 1 scalar — all bit-identical to scalar.
+// ---------------------------------------------------------------------------
+
+#[cfg(target_arch = "x86_64")]
+mod avx2 {
+    use core::arch::x86_64::*;
+
+    /// Sign-conditional discount via AVX2. Same semantics as
+    /// `discount_regrets_sse2`/`discount_regrets_scalar`. Processes 4 f64
+    /// lanes per iteration via `__m256d`, then drops to 2-lane SSE2 then
+    /// scalar for the tail (3/2/1 trailing lanes respectively).
+    ///
+    /// # Safety
+    /// `regrets` must be a valid mutable slice. AVX2 loads/stores via
+    /// `_mm256_loadu_pd` / `_mm256_storeu_pd` are unaligned-safe. Caller
+    /// MUST have verified `is_x86_feature_detected!("avx2")` (the
+    /// `#[target_feature(enable = "avx2")]` attribute makes the compiler
+    /// emit AVX2 instructions; calling on a non-AVX2 host is UB).
+    #[target_feature(enable = "avx2")]
+    #[inline]
+    pub unsafe fn discount_regrets_avx2(regrets: &mut [f64], pos_scale: f64, neg_scale: f64) {
+        let n = regrets.len();
+        let pos = _mm256_set1_pd(pos_scale);
+        let neg = _mm256_set1_pd(neg_scale);
+        let zero = _mm256_setzero_pd();
+        let mut i = 0usize;
+        // 4-lane AVX2 main loop.
+        while i + 4 <= n {
+            let v = _mm256_loadu_pd(regrets.as_ptr().add(i));
+            // mask_pos: all-1 bits in lanes where v > 0, all-0 otherwise.
+            // _CMP_GT_OQ = ordered, non-signaling, "greater than" (matches
+            // SSE2 `_mm_cmpgt_pd` which is also ordered greater-than).
+            let mask_pos = _mm256_cmp_pd::<_CMP_GT_OQ>(v, zero);
+            let scaled_pos = _mm256_mul_pd(v, pos);
+            let scaled_neg = _mm256_mul_pd(v, neg);
+            // Manual AVX blend: (mask & scaled_pos) | (~mask & scaled_neg).
+            // For v == 0, both scaled values are 0 so the choice is moot.
+            let pos_part = _mm256_and_pd(mask_pos, scaled_pos);
+            let neg_part = _mm256_andnot_pd(mask_pos, scaled_neg);
+            let blended = _mm256_or_pd(pos_part, neg_part);
+            _mm256_storeu_pd(regrets.as_mut_ptr().add(i), blended);
+            i += 4;
+        }
+        // 2-lane SSE2 epilogue (n % 4 == 2 or 3).
+        let pos2 = _mm_set1_pd(pos_scale);
+        let neg2 = _mm_set1_pd(neg_scale);
+        let zero2 = _mm_setzero_pd();
+        while i + 2 <= n {
+            let v = _mm_loadu_pd(regrets.as_ptr().add(i));
+            let mask_pos = _mm_cmpgt_pd(v, zero2);
+            let scaled_pos = _mm_mul_pd(v, pos2);
+            let scaled_neg = _mm_mul_pd(v, neg2);
+            let pos_part = _mm_and_pd(mask_pos, scaled_pos);
+            let neg_part = _mm_andnot_pd(mask_pos, scaled_neg);
+            let blended = _mm_or_pd(pos_part, neg_part);
+            _mm_storeu_pd(regrets.as_mut_ptr().add(i), blended);
+            i += 2;
+        }
+        // Final scalar tail (single lane).
+        while i < n {
+            if regrets[i] > 0.0 {
+                regrets[i] *= pos_scale;
+            } else if regrets[i] < 0.0 {
+                regrets[i] *= neg_scale;
+            }
+            i += 1;
+        }
+    }
+
+    /// `strategy_sum[i] *= strat_scale` vectorized via AVX2 (4 f64 lanes).
+    ///
+    /// # Safety
+    /// `strategy` must be a valid mutable slice; caller MUST have verified
+    /// `is_x86_feature_detected!("avx2")`.
+    #[target_feature(enable = "avx2")]
+    #[inline]
+    pub unsafe fn discount_strategy_sum_avx2(strategy: &mut [f64], strat_scale: f64) {
+        let n = strategy.len();
+        let scale = _mm256_set1_pd(strat_scale);
+        let mut i = 0usize;
+        while i + 4 <= n {
+            let v = _mm256_loadu_pd(strategy.as_ptr().add(i));
+            let scaled = _mm256_mul_pd(v, scale);
+            _mm256_storeu_pd(strategy.as_mut_ptr().add(i), scaled);
+            i += 4;
+        }
+        // 2-lane SSE2 epilogue.
+        let scale2 = _mm_set1_pd(strat_scale);
+        while i + 2 <= n {
+            let v = _mm_loadu_pd(strategy.as_ptr().add(i));
+            let scaled = _mm_mul_pd(v, scale2);
+            _mm_storeu_pd(strategy.as_mut_ptr().add(i), scaled);
+            i += 2;
+        }
+        while i < n {
+            strategy[i] *= strat_scale;
+            i += 1;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public dispatch: prefer NEON on aarch64, AVX2 (runtime) > SSE2 on x86_64,
+// scalar otherwise. The `discount` helpers and the regret/strategy updaters
+// expose one public entrypoint each so callers (`dcfr.rs`, `dcfr_vector.rs`,
+// `hunl_solver.rs`) don't sprinkle `#[cfg(...)]`.
 // ---------------------------------------------------------------------------
 
 // Dispatch macro: prefer NEON on aarch64 unless the `force_scalar` feature
@@ -484,9 +601,10 @@ mod sse2 {
 
 /// Sign-conditional regret discount — public dispatch.
 ///
-/// Dispatch order (compile-time):
-///   - `aarch64` + not `force_scalar` → NEON (`vmulq_f64` + `vbslq_f64`)
-///   - `x86_64` + not `force_scalar` → SSE2 (`_mm_mul_pd` + manual blend)
+/// Dispatch order:
+///   - `aarch64` + not `force_scalar` → NEON (compile-time, always present)
+///   - `x86_64` + not `force_scalar` → AVX2 if `is_x86_feature_detected!` at
+///     runtime, else SSE2 (baseline on x86_64), else scalar.
 ///   - else → scalar fallback
 #[inline]
 pub fn discount_regrets(regrets: &mut [f64], pos_scale: f64, neg_scale: f64) {
@@ -502,10 +620,23 @@ pub fn discount_regrets(regrets: &mut [f64], pos_scale: f64, neg_scale: f64) {
         not(target_arch = "aarch64"),
         not(feature = "force_scalar")
     ))]
-    // SAFETY: SSE2 is baseline on every x86_64 target (part of the x86_64
-    // ABI); slice bounds are checked above; loads/stores are unaligned-safe.
-    unsafe {
-        sse2::discount_regrets_sse2(regrets, pos_scale, neg_scale)
+    {
+        // Runtime dispatch: prefer AVX2 (4-lane f64) if the host advertises
+        // it, otherwise drop to SSE2 (baseline on x86_64). Scalar is the
+        // final fallback if AVX2/SSE2 are both somehow unavailable (which
+        // shouldn't happen — SSE2 is x86_64-ABI baseline — but the branch
+        // is here for completeness).
+        if std::is_x86_feature_detected!("avx2") {
+            // SAFETY: AVX2 detected at run time; slice bounds checked;
+            // loads/stores are unaligned-safe.
+            unsafe { avx2::discount_regrets_avx2(regrets, pos_scale, neg_scale) }
+        } else if std::is_x86_feature_detected!("sse2") {
+            // SAFETY: SSE2 detected (baseline on x86_64); slice bounds
+            // checked; loads/stores are unaligned-safe.
+            unsafe { sse2::discount_regrets_sse2(regrets, pos_scale, neg_scale) }
+        } else {
+            discount_regrets_scalar(regrets, pos_scale, neg_scale)
+        }
     }
     #[cfg(any(
         feature = "force_scalar",
@@ -516,7 +647,9 @@ pub fn discount_regrets(regrets: &mut [f64], pos_scale: f64, neg_scale: f64) {
 
 /// Strategy-sum discount — public dispatch.
 ///
-/// Dispatch order matches [`discount_regrets`]: NEON > SSE2 > scalar.
+/// Dispatch order matches [`discount_regrets`]: NEON (aarch64, compile-time)
+/// > AVX2 (x86_64, runtime-detected via `is_x86_feature_detected!`) > SSE2
+/// (x86_64 baseline) > scalar.
 #[inline]
 pub fn discount_strategy_sum(strategy: &mut [f64], strat_scale: f64) {
     #[cfg(all(target_arch = "aarch64", not(feature = "force_scalar")))]
@@ -529,9 +662,18 @@ pub fn discount_strategy_sum(strategy: &mut [f64], strat_scale: f64) {
         not(target_arch = "aarch64"),
         not(feature = "force_scalar")
     ))]
-    // SAFETY: see discount_regrets — SSE2 baseline on x86_64.
-    unsafe {
-        sse2::discount_strategy_sum_sse2(strategy, strat_scale)
+    {
+        // Runtime dispatch: prefer AVX2 (4-lane f64) if the host advertises
+        // it, else drop to SSE2 (baseline on x86_64), else scalar.
+        if std::is_x86_feature_detected!("avx2") {
+            // SAFETY: AVX2 detected at run time; slice valid; unaligned loads/stores.
+            unsafe { avx2::discount_strategy_sum_avx2(strategy, strat_scale) }
+        } else if std::is_x86_feature_detected!("sse2") {
+            // SAFETY: SSE2 baseline on x86_64; slice valid; unaligned loads/stores.
+            unsafe { sse2::discount_strategy_sum_sse2(strategy, strat_scale) }
+        } else {
+            discount_strategy_sum_scalar(strategy, strat_scale)
+        }
     }
     #[cfg(any(
         feature = "force_scalar",
@@ -713,6 +855,101 @@ mod tests {
         discount_strategy_sum_scalar(&mut b, 0.5);
         for i in 0..a.len() {
             assert_eq!(a[i].to_bits(), b[i].to_bits(), "lane {} differs", i);
+        }
+    }
+
+    /// PR 68 — AVX2 path parity check. Only runs on x86_64 hosts that
+    /// actually advertise AVX2 (the test is `#[cfg(target_arch = "x86_64")]`-
+    /// compiled, but guarded by a runtime `is_x86_feature_detected!` so it's
+    /// a no-op on older x86_64 hardware lacking AVX2). On Apple Silicon /
+    /// other non-x86_64 targets, the whole test is compile-time excluded.
+    ///
+    /// Verifies AVX2 (4-lane f64) bit-exact-matches scalar across signed
+    /// inputs and tail lengths (0..=11 covers main-loop 4-multiples plus
+    /// 2-lane SSE2 epilogue plus 1-lane scalar tail).
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn discount_regrets_avx2_matches_scalar() {
+        if !std::is_x86_feature_detected!("avx2") {
+            // Older x86_64 (pre-Haswell, e.g. Sandy/Ivy Bridge Intel Macs).
+            // SSE2 path already covered by the dedicated SSE2 test above.
+            return;
+        }
+        // Mixed-sign inputs incl. zero, sub-normals, and varying lengths
+        // (sweep 0..=11 so we cross main-loop / SSE2-epilogue / scalar-tail).
+        let inputs: Vec<f64> = vec![
+            -2.5, -1.0, 0.0, 1.0, 2.5, -0.3, 0.7, 0.0, 1e-10, -1e-10, 3.14, -42.0,
+        ];
+        for len in 0..=inputs.len() {
+            let slice = &inputs[..len];
+            let mut a = slice.to_vec();
+            let mut b = slice.to_vec();
+            // SAFETY: AVX2 verified by runtime check above.
+            unsafe { super::avx2::discount_regrets_avx2(&mut a, 0.7, 0.3) };
+            discount_regrets_scalar(&mut b, 0.7, 0.3);
+            for i in 0..a.len() {
+                assert_eq!(
+                    a[i].to_bits(),
+                    b[i].to_bits(),
+                    "len={} lane {} differs (AVX2 vs scalar)",
+                    len,
+                    i
+                );
+            }
+        }
+    }
+
+    /// PR 68 — AVX2 strategy-sum path parity check.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn discount_strategy_sum_avx2_matches_scalar() {
+        if !std::is_x86_feature_detected!("avx2") {
+            return;
+        }
+        for len in 0..=13 {
+            let inputs: Vec<f64> = (0..len).map(|i| (i as f64) * 0.1 - 0.5).collect();
+            let mut a = inputs.clone();
+            let mut b = inputs.clone();
+            // SAFETY: AVX2 verified by runtime check above.
+            unsafe { super::avx2::discount_strategy_sum_avx2(&mut a, 0.5) };
+            discount_strategy_sum_scalar(&mut b, 0.5);
+            for i in 0..a.len() {
+                assert_eq!(
+                    a[i].to_bits(),
+                    b[i].to_bits(),
+                    "len={} lane {} differs (AVX2 vs scalar)",
+                    len,
+                    i
+                );
+            }
+        }
+    }
+
+    /// PR 68 — AVX2 vs SSE2 cross-check (both should equal scalar, so they
+    /// equal each other). Catches cases where AVX2 and SSE2 each pass their
+    /// scalar parity test but diverge from each other (shouldn't happen given
+    /// identical op graph, but cheap to guard).
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn discount_regrets_avx2_matches_sse2() {
+        if !std::is_x86_feature_detected!("avx2") {
+            return;
+        }
+        let inputs: Vec<f64> = vec![
+            -2.5, -1.0, 0.0, 1.0, 2.5, -0.3, 0.7, 0.0, 1e-10, -1e-10, 3.14, -42.0, 7.0,
+        ];
+        let mut a = inputs.clone();
+        let mut b = inputs.clone();
+        // SAFETY: both feature gates verified at run time.
+        unsafe { super::avx2::discount_regrets_avx2(&mut a, 0.7, 0.3) };
+        unsafe { super::sse2::discount_regrets_sse2(&mut b, 0.7, 0.3) };
+        for i in 0..a.len() {
+            assert_eq!(
+                a[i].to_bits(),
+                b[i].to_bits(),
+                "lane {} differs (AVX2 vs SSE2)",
+                i
+            );
         }
     }
 
