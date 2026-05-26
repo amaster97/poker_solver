@@ -338,6 +338,7 @@ def _combo_to_hole_string(combo: tuple[Any, Any]) -> str:
 
 def _rust_history_substr_for_canonical(
     canonical_history: tuple[tuple[str, int], ...],
+    stack_ceiling: int | None = None,
 ) -> str:
     """Render canonical history tokens as our hunl.py history substring.
 
@@ -391,12 +392,24 @@ def _rust_history_substr_for_canonical(
             tokens.append("f")
             break
         elif kind == "b":
-            chips_added = amt - contrib[actor]
-            tokens.append(f"b{chips_added}")
+            if stack_ceiling is not None and amt == stack_ceiling:
+                # All-in jam: Rust emits "A" regardless of chip amount
+                # (`crates/cfr_core/src/hunl.rs:703-712`, ACTION_ALL_IN
+                # branch). Inverse of `_walk_our_tokens`'s "A" branch at
+                # `noambrown_wrapper.py:1017-1033`.
+                tokens.append("A")
+            else:
+                chips_added = amt - contrib[actor]
+                tokens.append(f"b{chips_added}")
             contrib[actor] = amt
             actor = 1 - actor
         elif kind == "r":
-            tokens.append(f"r{amt}")
+            if stack_ceiling is not None and amt == stack_ceiling:
+                # All-in raise: Rust emits "A" regardless of chip amount
+                # (same as the bet branch above).
+                tokens.append("A")
+            else:
+                tokens.append(f"r{amt}")
             contrib[actor] = amt
             actor = 1 - actor
     return "".join(tokens)
@@ -511,10 +524,18 @@ def test_v1_5_brown_apples_to_apples_parity(spot_id: str) -> None:
     brown_keys_p1 = set(brown_dump.players[1].profile.keys())
     brown_keys_all = brown_keys_p0 | brown_keys_p1
 
+    # Stack ceiling = initial contribution + remaining stack. Rust emits
+    # bets/raises whose amount reaches this ceiling as the literal "A"
+    # token (`crates/cfr_core/src/hunl.rs:703-712`); the renderer needs
+    # this to invert correctly.
+    stack_ceiling = int(spot.pot) // 2 + int(spot.stack)
+
     matched_history_count = 0
     for brown_key in brown_keys_all:
         canonical = canonicalize_brown_history(brown_key, spot=spot)  # type: ignore[misc]
-        history_substr = _rust_history_substr_for_canonical(canonical)
+        history_substr = _rust_history_substr_for_canonical(
+            canonical, stack_ceiling=stack_ceiling
+        )
         # Did EITHER Rust player produce a strategy row at this history?
         if (0, history_substr) in rust_lookup or (1, history_substr) in rust_lookup:
             matched_history_count += 1
@@ -535,7 +556,9 @@ def test_v1_5_brown_apples_to_apples_parity(spot_id: str) -> None:
         brown_hands = brown_dump.players[player].hands
         for brown_key, entry in brown_profile.items():
             canonical = canonicalize_brown_history(brown_key, spot=spot)  # type: ignore[misc]
-            history_substr = _rust_history_substr_for_canonical(canonical)
+            history_substr = _rust_history_substr_for_canonical(
+                canonical, stack_ceiling=stack_ceiling
+            )
             rust_rows = rust_lookup.get((player, history_substr))
             if rust_rows is None:
                 # Counted in coverage; not a per-cell diff.
