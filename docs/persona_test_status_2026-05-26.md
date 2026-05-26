@@ -7,6 +7,8 @@
 
 **Supersedes:** `docs/persona_test_status_2026-05-25.md`. The 2026-05-25 snapshot remains accurate as a historical baseline; this document is the current-of-record.
 
+**v1.6.1 hold-lift — now empirically backed (2026-05-26).** The v1.6.1 ship-hold-lift decision (`docs/v1_6_1_ship_hold_review_2026-05-26.md`) rested on the reasoning that the A83 33pp Brown apples-to-apples gap reflects Nash multiplicity at deep-cap indifference manifolds rather than an engine bug. That reasoning has now been **empirically confirmed** via a corrected 2000-iter `solve_range_vs_range_rust` perturbation probe: with the same RNG seed and only `ε = 1e-9` initial-regret perturbation, the resulting average strategies diverge by up to `max |Δ| = 0.998499` on indifference-manifold cells and ~25-28% on the bottom-pair-Ace cluster. The hold-lift is retrospectively bulletproof. See `docs/a83_nash_multiplicity_confirmed_2026-05-26.md` for full evidence (verdict, methodology, top-10 cells, targeted-cluster cells) and `scripts/a83_nash_multiplicity_probe.py` for the reproducible probe. This is upstream of the persona-test framework (the multiplicity validation does not move any persona verdict), but it removes the largest open uncertainty around the v1.6.1/v1.7.x/v1.8.0 ship sequence.
+
 Sources:
 - Spec: `docs/pr13_prep/persona_acceptance_spec.md`
 - Time budgets: `docs/pr13_prep/persona_time_budgets.md`
