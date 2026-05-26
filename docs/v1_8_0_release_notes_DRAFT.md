@@ -1,12 +1,17 @@
 # poker-solver v1.8.0 — Cross-platform SIMD + `.dmg` fork-bomb fix
 
 **Status: DRAFT — Phases 1-4 + AVX2 all merged to `main` as of
-`77e751c` (PR #32, 2026-05-26). v1.6.1 hold lifted; engine + parity
-fixes from the v1.7.1 bundle and v1.7.2 (.dmg fork-bomb fix + CI
-hardening) are folded into v1.8.0 per
+`77e751c` (PR #32, 2026-05-26). v1.6.1 hold-lift currently UNDER
+REVIEW pending A83 reconciliation (PR 93 terminal-utility ablation
+landed post-RESUME with a result that contradicts the prior "fully
+closed via Nash multiplicity" framing — see
+`docs/A83_RECONCILE_URGENT_2026-05-26.md` and the Known-issues entry
+below). Engine + parity fixes from the v1.7.1 bundle and v1.7.2 (.dmg
+fork-bomb fix + CI hardening) are folded into v1.8.0 per
 `docs/v1_6_1_ship_hold_review_2026-05-26.md` and
 `docs/v1_7_1_tag_decision_2026-05-26.md`. Do not publish until the
-final ship sequence executes (tag + GitHub release).**
+A83 framing reconciliation is settled and the final ship sequence
+executes (tag + GitHub release).**
 
 **Release date:** 2026-05-XX (TBD at ship time)
 **Tag:** `v1.8.0` (to be created at ship time)
@@ -317,54 +322,93 @@ The following are **NOT** resolved in v1.8.0 and remain open for future
 work:
 
 - **Deep-cap A83 ≥33-pp bottom-pair-Ace divergence vs Brown reference
-  solver — NOT-A-BUG (Nash multiplicity EMPIRICALLY CONFIRMED).**
-  Nash multiplicity has been empirically confirmed via a corrected
-  2000-iter `solve_range_vs_range_rust` perturbation probe
-  (2026-05-26): with the same RNG seed and only `ε = 1e-9` initial
-  regret perturbation, the resulting average strategies diverge by
-  up to **`max |Δ| = 0.998499`** on indifference-manifold cells
-  (deep-cap raise-sequence histories) and **~25-28%** on the original
-  bottom-pair-Ace cluster (`3sAs` / `3cAc` at `b1000r3000`). Same code,
-  same seed, infinitesimal perturbation, near-100% strategy divergence
-  on the most sensitive cells — that is the signature of an
-  equilibrium manifold whose specific point is selected by the
-  initial conditions. The 33pp Brown apples-to-apples divergence is
-  design-acceptable Nash non-uniqueness, not a bug; both engines are
-  correct and each converges to A Nash equilibrium. Full evidence:
-  `docs/a83_nash_multiplicity_confirmed_2026-05-26.md` (verdict,
-  methodology, top-10 cells, targeted-cluster cells). The corrected
-  probe script is tracked at
-  `scripts/a83_nash_multiplicity_probe.py` and is reproducible from a
-  fresh checkout; the 500 KB JSON dumps live at `~/Desktop/a83_correct_probe_*.json`
-  (outside the repo). The terminal-utility arbitration (2026-05-26)
-  separately rendered a NOT-A-BUG verdict for the terminal-utility
-  component (uniform constant offset cancels at the regret-difference
-  step). **The reframed 4-layer acceptance test (L1 structural / L2
-  shallow-strict / L3 deep-directional L1 ≤ 1.9 / L3' p75 L1 ≤ 0.60
-  / L4 top-action ≥ 60%) PASSES on both river spots — see
-  Dry-run #10.** Honest caveat: the probe used 2000 iters (matching
-  the v1.5 Brown apples-to-apples acceptance baseline); at much
-  higher iter counts the per-cell Δ envelope might narrow as more
-  equilibrium ties get broken, but the multiplicity exists at the
-  limit and the apples-to-apples comparison vs Brown holds at the
-  iter count both were measured at. See
-  `docs/a83_nash_multiplicity_confirmed_2026-05-26.md` (empirical
-  confirmation), `docs/terminal_utility_arbitration_2026-05-26.md`
-  (NOT-A-BUG arbitrator verdict for terminal-utility component),
-  `docs/v1_6_1_ship_hold_review_2026-05-26.md` (HOLD-LIFTED decision,
-  now empirically backed), `docs/a83_validation_2026-05-26.md`
-  (DCFR-math validation, PASS),
-  `docs/a83_deep_cap_root_cause_investigation.md`,
-  `docs/matched_config_investigation.md`,
-  `docs/a83_track_a_results_analysis_2026-05-26.md` (INVALIDATION of
-  Track A v1 probe; the v1 200K probe hit `chance_outcomes()` no-op
-  when `initial_hole_cards = None` — superseded by the corrected
-  probe), and the project memory rule
-  `feedback_nash_multiplicity_acceptance.md`. The v1.6.1 engine
-  bundle shipped piecewise on `origin/main` (10 PRs landed 2026-05-26
-  02:32-03:02 UTC); the hold is lifted and the fixes are folded into
-  v1.8.0 per `docs/v1_6_1_ship_hold_review_2026-05-26.md` and
-  `docs/v1_7_1_tag_decision_2026-05-26.md`.
+  solver — UNDER REVIEW (two empirical mechanisms identified;
+  relative contributions unsettled; v1.6.1 hold-lift decision UNDER
+  REVIEW pending reconciliation).** As of 2026-05-26 there are
+  **two** empirical findings that each independently produce
+  significant strategy divergence on the A83 deep-cap fixture; both
+  may contribute to the 33pp Brown apples-to-apples gap:
+
+  1. **Nash multiplicity at deep-cap indifference manifolds (PR #68,
+     merged as `b401f6c`).** A corrected 2000-iter
+     `solve_range_vs_range_rust` perturbation probe: with the same
+     RNG seed and only `ε = 1e-9` initial regret perturbation, the
+     resulting average strategies diverge by up to
+     **`max |Δ| = 0.998499`** on indifference-manifold cells
+     (deep-cap raise-sequence histories) and ~25-28% on the original
+     bottom-pair-Ace cluster (`3sAs` / `3cAc` at `b1000r3000`). That
+     is the signature of an equilibrium manifold whose specific
+     point is selected by the initial conditions. Full evidence:
+     `docs/a83_nash_multiplicity_confirmed_2026-05-26.md`.
+     Probe script: `scripts/a83_nash_multiplicity_probe.py`.
+
+  2. **Terminal-utility convention regret-update bias (PR #93
+     ablation; NOT merged at v1.8.0 ship time).** A paired
+     Rust-vs-Rust ablation varying ONLY the terminal-utility
+     convention (Brown-style `+base_pot` at winner-take-all leaves
+     vs Rust-default `c_loser`-only), with init regrets + RNG seed
+     FIXED, returned verdict `CONVENTION-IS-A83-CAUSE`:
+     **max |Δ| = 12.27pp** at 2000 iters and **10.28pp** at 8000
+     iters on `dry_A83_rainbow` (divergence PERSISTS with more
+     iters), and **49.99pp** at both iter counts on
+     `dry_K72_rainbow`. The mechanism: while the per-leaf offset
+     IS uniform (`+base_pot` at every winner-take-all leaf), the
+     regret-update step weights leaves by opp-reach
+     (`Σ_h π_{-i}(h) · u(h, a)`), and different actions reach
+     terminals with different total opp-reach mass, so the
+     per-leaf constant becomes an action-dependent regret offset
+     that does NOT cancel across actions. The arbitrator's prior
+     algebra (per-leaf offset uniform → cancels at regret-difference
+     step) was **insufficient** rather than wrong — it stopped at
+     the per-leaf level before the reach-weighted aggregation step.
+     Full evidence: `docs/a83_terminal_utility_ablation_results_2026-05-26.md`
+     (on `pr-93-terminal-utility-ablation` branch, commit `986f48d`).
+     Ablation script: `scripts/a83_terminal_utility_ablation.py` (same branch).
+
+  Both findings are empirically real and measure different
+  controlled-variables. The 33pp Brown apples-to-apples gap is
+  plausibly a combination: convention shifts which equilibrium
+  region gets selected (PR #93), and Nash multiplicity covers the
+  residual within-region drift (PR #68). Relative contributions are
+  not yet decomposed.
+
+  **The reframed 4-layer Brown apples-to-apples acceptance test
+  (L1 structural / L2 shallow-strict / L3 deep-directional L1 ≤ 1.9
+  / L3' p75 L1 ≤ 0.60 / L4 top-action ≥ 60%) still PASSES on both
+  river spots — see Dry-run #10.** That gate is structural +
+  statistical, not strict per-action; it passes regardless of which
+  mechanism dominates.
+
+  **v1.6.1 hold-lift decision is UNDER REVIEW** pending user
+  reconciliation. Neither finding reverses the hold-lift outright
+  (both engines still converge to A valid Nash and the reframed
+  4-layer gate still passes), but the prior rationale ("33pp gap
+  is design-acceptable Nash non-uniqueness") was written before
+  the PR 93 ablation result existed and is now incomplete. See
+  `docs/A83_RECONCILE_URGENT_2026-05-26.md` for the full
+  reconciliation hypothesis and the user decision required.
+
+  Related references:
+  `docs/a83_nash_multiplicity_confirmed_2026-05-26.md` (PR #68
+  empirical confirmation),
+  `docs/a83_terminal_utility_ablation_results_2026-05-26.md`
+  (PR #93 ablation; on the non-merged branch),
+  `docs/terminal_utility_arbitration_2026-05-26.md` (prior
+  arbitrator verdict; algebra now superseded by PR #93 mechanism
+  analysis),
+  `docs/A83_RECONCILE_URGENT_2026-05-26.md` (reconciliation surface
+  doc + user decision required),
+  `docs/v1_6_1_ship_hold_review_2026-05-26.md` (HOLD-LIFTED
+  decision; rationale text now incomplete),
+  `docs/a83_validation_2026-05-26.md` (DCFR-math validation, PASS),
+  `docs/a83_deep_cap_root_cause_investigation.md` (superseded; §2(d)
+  banner via PR #63),
+  `docs/a83_track_a_results_analysis_2026-05-26.md` (INVALIDATION
+  of Track A v1 probe — the v1 200K probe hit `chance_outcomes()`
+  no-op when `initial_hole_cards = None` — superseded by the
+  corrected probe),
+  and the project memory rule
+  `feedback_nash_multiplicity_acceptance.md`.
 - **Gate 4 200K-iter river/turn validation results — PROVISIONAL,
   re-run pending.** The 2026-05-25 Gate 4 200K river-phase run
   (reported `5.28e-14 mbb/g` exploitability, monotone clean) and the
