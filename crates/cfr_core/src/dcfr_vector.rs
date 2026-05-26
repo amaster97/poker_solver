@@ -445,18 +445,23 @@ impl VectorDCFR {
                 // at the leaf.
                 let regret_weight = 1.0_f64; // DCFR uses `regret_weight = 1` (`trainer.cpp:354-355`).
                 let avg_weight = 1.0_f64; // DCFR uses `avg_weight = 1` (`trainer.cpp:355`).
+                let _ = regret_weight; // folded into the SIMD kernel (== 1.0).
                 {
                     let info = self.infosets[node_idx]
                         .as_mut()
                         .expect("decision node must have an infoset slot");
-                    for h in 0..update_hands {
-                        let offset = h * action_count;
-                        let base = node_values[h];
-                        for a in 0..action_count {
-                            let delta = (action_values[a * update_hands + h] - base) * regret_weight;
-                            info.regret[offset + a] += delta;
-                        }
-                    }
+                    // PR 63 (v1.8 Phase 2): cross-platform SIMD update.
+                    // Replaces the scalar double-loop. Bit-exact vs scalar
+                    // (covered by `simd::tests::update_regret_sum_vector_*`).
+                    // Shape: `info.regret` is hand-major (`[h][a]`),
+                    // `action_values` is action-major (`[a][h]`).
+                    simd::update_regret_sum_vector(
+                        &mut info.regret,
+                        &action_values,
+                        &node_values,
+                        update_hands,
+                        action_count,
+                    );
                     // strategy_sum[h,a] += reach_p[h] * avg_weight * strategy[h,a]
                     // Mirrors `trainer.cpp:226-237` (MIT).
                     for h in 0..update_hands {
