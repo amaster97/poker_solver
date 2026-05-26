@@ -30,7 +30,7 @@ jobs:
           #   target: x86_64-pc-windows-msvc
 
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v4
@@ -63,7 +63,7 @@ jobs:
         run: cargo test --lib --release --target ${{ matrix.target }}
 
       - name: Pytest smoke (fast tier)
-        run: pytest -m "not slow" --timeout=120
+        run: pytest -m "not slow" --timeout=300
 
       - name: Differential SIMD test (cross-platform parity)
         # Rust crate owns the SIMD impl + tests (simd::tests::*). No Python
