@@ -1,5 +1,19 @@
 # A83 Deep-Cap Root-Cause Investigation
 
+> ⚠️ **STATUS — 2026-05-26: PARTIALLY SUPERSEDED.** §2 Candidate (d)'s claim
+> that the terminal-utility convention applies only to win-leaves is
+> **mathematically incorrect**. The actual offset is `+base_pot/2` per
+> player UNIFORMLY across all leaves (verified by arbitration agent +
+> validator's third pass + orchestrator algebra check). Uniform constants
+> don't affect Nash strategy. The 33pp A83 divergence is NOT explained by
+> terminal-utility convention. Likely cause: Nash multiplicity at deep-cap
+> indifference manifolds (Track A empirical probe pending; agent acebb72f).
+>
+> **Authoritative sources superseding this doc:**
+> - `docs/terminal_utility_arbitration_2026-05-26.md` (algebra verdict: NOT A BUG)
+> - `docs/a83_validation_2026-05-26.md` (DCFR math PASS, 3rd audit)
+> - `docs/v1_6_1_ship_hold_review_2026-05-26.md` (HOLD lifted)
+
 **Date:** 2026-05-23 (late)
 **Mode:** READ-ONLY investigation, no code modified.
 **Trigger:** v1.6.1 dry-run failed acceptance on `dry_A83_rainbow` with 33pp
@@ -144,6 +158,11 @@ showed double-digit divergence with Fix C in place). So this is
 load-bearing but NOT SUFFICIENT.
 
 ### Candidate (d): Brown's base_pot in terminal utility — semantic Nash polytope difference
+
+> **2026-05-26 CORRECTION:** This subsection's algebra is wrong; see top
+> banner. Preserved for archaeology and reproducibility of the prior
+> misdiagnosis. The conclusion that "utility convention differs" is
+> correct; the conclusion that "this difference is strategic" is wrong.
 
 **Mechanism (newly identified):**
 
