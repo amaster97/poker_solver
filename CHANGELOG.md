@@ -42,6 +42,21 @@ will be tagged; v1.8.0 is the next clean release boundary. See
   the v1.8.0 build. A user-facing warning was also added to the
   release notes for v1.6.0.
 
+### Known issues / Installation notes
+
+- **`poker-solver` shim may resolve to a broken Python env on first-time install.**
+  If a stale editable-install `.pth` from a prior worktree lingers in another
+  Python environment on PATH (common after `pip install -e .` in a temporary
+  build dir), the shim resolves there and fails to find `poker_solver`. Two
+  workarounds, in order of robustness:
+  1. Use `./.venv/bin/poker-solver ...` from the project root (recommended).
+  2. With `.venv` activated, run `python -m poker_solver.cli ...` (bypasses
+     the shim entirely).
+  Cleanup: `pip uninstall poker_solver` from any broken Python env where it
+  shouldn't be installed. Per
+  [`docs/poker_solver_shim_fix_2026-05-26.md`](docs/poker_solver_shim_fix_2026-05-26.md).
+  This is a pre-existing dev-environment quirk (not a v1.8 regression).
+
 ## [1.7.0] - 2026-05-23
 
 ### Added
