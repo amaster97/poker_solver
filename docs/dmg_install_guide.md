@@ -1,9 +1,20 @@
-# macOS .dmg Install Guide (v1.6.0)
+# macOS .dmg Install Guide (v1.6.0 — withdrawn; v1.8.0 repackage pending)
 
-> ⚠️ As of 2026-05-26, the v1.6.0 `.dmg` has been retroactively pulled from
-> the GitHub Release due to a fork-bomb bug — see
-> `docs/dmg_spawn_loop_rca_2026-05-26.md`. This guide is preserved for use
-> with the upcoming v1.7.2 repackaged build, NOT v1.6.0.
+> ⚠️ **As of 2026-05-26, the v1.6.0 `.dmg` has been retroactively pulled
+> from the GitHub Release** due to a fork-bomb bug (see
+> `docs/dmg_spawn_loop_rca_2026-05-26.md`). **The v1.8.0 repackaged
+> `.dmg` is pending** — the freeze_support fix merged on `main` in PR #42
+> (commit `728206e`) and ships in v1.8.0 (no v1.7.1 or v1.7.2 tag; both
+> closed as obsolete per `docs/v1_7_1_tag_decision_2026-05-26.md`).
+>
+> **What to do until v1.8.0 .dmg ships:** install from source
+> (`pip install -e .` — see the README's "Install (from source)"
+> section). The CLI / Python API tiers carry the full engine.
+>
+> This guide is preserved for the upcoming v1.8.0 repackaged build; the
+> install flow and Gatekeeper-bypass instructions below carry over
+> unchanged. The SHA256 / file-size lines will be updated once the
+> v1.8.0 .dmg is built and signed.
 
 Step-by-step instructions for installing and first-launching the v1.6.0
 `.dmg` build of Poker Solver on macOS. The .dmg is **adhoc-signed**
@@ -110,12 +121,13 @@ entirely. The same arm64-only and feature-set caveats below still apply.
   README's "Install (from source)" section.
 - **Adhoc-signed, not notarized.** macOS 14+ may display additional
   warnings on first launch. Bypass with Option A or B above.
-- **v1.6.0 feature set only.** Newer features merged after v1.6.0 are
-  available only via source install:
-  - v1.7.0 vector-form range-vs-range API (aggregator → vector wiring)
-  - v1.7.0 CLI subcommands (push/fold, range-vs-range)
-  - Subsequent engine work shipped on `main`
-  Rebuild the .dmg from a newer tag once those features GA.
+- **v1.6.0 .dmg feature set is now outdated.** The v1.6.0 .dmg has
+  been pulled (see the top-of-file banner); the upcoming v1.8.0
+  repackaged build folds in everything merged on `main` since v1.6.0
+  (vector-form RvR API, CLI subcommands, SIMD wiring, freeze_support
+  .dmg fork-bomb fix, v1.6.1 engine bundle, v1.7.2 CI hardening). Until
+  the v1.8.0 .dmg is tagged + released, source install (`pip install
+  -e .`) is the supported path.
 
 ## Troubleshooting
 
@@ -152,5 +164,8 @@ recommended path for everything else.
 
 ## Related documents
 
-- [`../CHANGELOG.md`](../CHANGELOG.md) — v1.6.0 release notes including
-  the packaging fixes that produced this .dmg.
+- [`../CHANGELOG.md`](../CHANGELOG.md) — release log; the v1.6.0 entry
+  carries a retroactive amendment noting the .dmg pull, and the
+  forthcoming v1.8.0 entry will document the repackage.
+- [`dmg_spawn_loop_rca_2026-05-26.md`](dmg_spawn_loop_rca_2026-05-26.md)
+  — RCA for the fork-bomb that pulled v1.6.0.
