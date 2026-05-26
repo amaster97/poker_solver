@@ -23,7 +23,7 @@ from poker_solver.library import (
     _resolve_library_path,
 )
 from poker_solver.range import Range, parse_range
-from poker_solver.solver import solve
+from poker_solver.solver import solve, solve_best_response
 
 HandInput = Union[list[Card], Range]
 
@@ -169,6 +169,111 @@ def _build_hunl_with_args(args: argparse.Namespace) -> Game:
         ref = AbstractionRef(source_path=str(path.resolve()), version=version)
         config = replace(config, abstraction=ref)
     return HUNLPoker(config)
+
+
+def _cmd_best_response(args: argparse.Namespace) -> int:
+    """PR 76 — compute hero's BR against a fixed opponent strategy.
+
+    Loads the opponent strategy from a JSON file (schema:
+    ``{"strategy": {<infoset_key>: [probs]}}`` — optional ``format_version``
+    and ``config`` fields are accepted but not validated against the engine
+    in this MVP), constructs the requested game, and runs
+    :func:`solve_best_response`. Prints exploit value / gap to stdout and
+    optionally writes the hero's BR strategy JSON to ``--output``.
+    """
+    # Build the game (reuses the same factory map as `solve`).
+    game = _GAMES[args.game](args)
+
+    # Load opponent strategy.
+    opp_path = Path(args.opponent)
+    if not opp_path.exists():
+        print(f"error: opponent strategy file not found: {opp_path}", file=sys.stderr)
+        return 1
+    try:
+        payload = _json.loads(opp_path.read_text(encoding="utf-8"))
+    except _json.JSONDecodeError as e:
+        print(f"error: opponent strategy JSON parse failed: {e}", file=sys.stderr)
+        return 1
+    if not isinstance(payload, dict):
+        print("error: opponent strategy file root must be a JSON object", file=sys.stderr)
+        return 1
+    raw_strategy = payload.get("strategy", payload)
+    if not isinstance(raw_strategy, dict):
+        print(
+            "error: 'strategy' field must be an object {infoset_key: [probs]}",
+            file=sys.stderr,
+        )
+        return 1
+    opponent_strategy: dict[str, list[float]] = {}
+    for key, probs in raw_strategy.items():
+        if not isinstance(probs, list):
+            print(
+                f"error: strategy[{key!r}] is not a list of floats",
+                file=sys.stderr,
+            )
+            return 1
+        opponent_strategy[str(key)] = [float(p) for p in probs]
+
+    hero_player = 0 if args.hero_position == "SB" else 1
+
+    # Run BR.
+    result = solve_best_response(
+        game, opponent_strategy, hero_player=hero_player
+    )
+
+    summary = {
+        "hero_player": result.hero_player,
+        "hero_position": args.hero_position,
+        "on_strategy_value_bb": result.on_strategy_value_bb,
+        "exploit_value_bb": result.exploit_value_bb,
+        "exploit_gap_bb": result.exploit_gap_bb,
+        "exploit_gap_mbb": result.exploit_gap_bb * 1000.0,
+        "hero_infoset_count": len(result.hero_strategy),
+        "opponent_infoset_count": len(opponent_strategy),
+        "game": args.game,
+    }
+
+    if args.output:
+        out_path = Path(args.output)
+        out_payload = {
+            "format_version": "1.0",
+            "format": "poker-solver/strategy",
+            "game_id": args.game,
+            "hero_player": result.hero_player,
+            "summary": summary,
+            "strategy": result.hero_strategy,
+        }
+        out_path.write_text(
+            _json.dumps(out_payload, sort_keys=True, indent=2), encoding="utf-8"
+        )
+        print(f"Hero BR strategy written to {out_path}", file=sys.stderr)
+
+    if args.json:
+        print(_json.dumps(summary, sort_keys=True, indent=2))
+        return 0
+
+    # Human-readable summary.
+    print("Best-response analysis")
+    print("======================")
+    print(f"Hero: {args.hero_position} (player {result.hero_player})")
+    print(
+        f"Opponent strategy: {opp_path.name} "
+        f"({summary['opponent_infoset_count']:,} infosets)"
+    )
+    print(f"Game: {args.game}")
+    print()
+    print(f"On-strategy value:    {result.on_strategy_value_bb:+.6f} BB/hand")
+    print(f"Exploit (BR) value:   {result.exploit_value_bb:+.6f} BB/hand")
+    print(
+        f"Exploit gap:          {result.exploit_gap_bb:+.6f} BB/hand "
+        f"({summary['exploit_gap_mbb']:+.1f} mBB/hand)"
+    )
+    print()
+    print(
+        f"Hero BR strategy: {summary['hero_infoset_count']:,} infosets "
+        f"(deterministic one-hot per infoset)."
+    )
+    return 0
 
 
 def _cmd_precompute_abstraction(args: argparse.Namespace) -> int:
@@ -1288,6 +1393,58 @@ def build_parser() -> argparse.ArgumentParser:
         help="DCFR iterations on both engines (default: 2000, matches PR 7).",
     )
     pp.set_defaults(func=_cmd_parity)
+
+    # ---- PR 76: exploitative best-response subcommand ----
+    br = sub.add_parser(
+        "best-response",
+        help=(
+            "Compute hero's deterministic best-response against a fixed "
+            "opponent strategy (PR 76 — exploitative play)."
+        ),
+    )
+    br.add_argument(
+        "--opponent",
+        type=str,
+        required=True,
+        help=(
+            "Path to opponent strategy JSON. Schema per "
+            "docs/pr_proposals/v1_exploitative_play_spec.md §5: top-level "
+            "object containing `strategy: {infoset_key: [probs]}`."
+        ),
+    )
+    br.add_argument(
+        "--hero-position",
+        choices=("SB", "BB"),
+        required=True,
+        help="Hero seat: SB (player 0) or BB (player 1).",
+    )
+    br.add_argument(
+        "--game",
+        choices=sorted(_GAMES.keys()),
+        required=True,
+        help="Which game the strategy is over (kuhn, leduc, hunl).",
+    )
+    # HUNL knobs (mirror `solve` subcommand for ad-hoc postflop spots).
+    br.add_argument("--hunl-mode", choices=("tiny_subgame", "postflop"), default="tiny_subgame")
+    br.add_argument("--board", type=str, default=None)
+    br.add_argument("--stacks", type=int, default=100)
+    br.add_argument("--bet-sizes", type=str, default=None)
+    br.add_argument("--abstraction", type=str, default=None)
+    br.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help=(
+            "When set, write hero's BR strategy + summary as JSON to this "
+            "path. Else only print the summary to stdout."
+        ),
+    )
+    br.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable summary to stdout instead of human-readable.",
+    )
+    br.set_defaults(func=_cmd_best_response)
 
     # ---- PR 11: batch-solve top-level subcommand ----
     bs = sub.add_parser(
