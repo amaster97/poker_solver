@@ -37,23 +37,23 @@ mock mode (see §4).
 
 ## 2. Installing on macOS
 
-### Path A: `.dmg` (recommended for non-developers)
+### Path A: `.dmg` — currently broken (v1.6.0), DO NOT LAUNCH
 
-A codesigned and notarized `.dmg` is the v1.0.0 distribution format.
-A prebuilt `.dmg` is attached to the v1.0.0 GitHub Release; to build
-your own:
+> ⚠️ **CRITICAL — DO NOT LAUNCH v1.6.0 `.dmg` from Finder.** The
+> packaged `.app` spawns processes uncontrollably on macOS launch and
+> can freeze your Mac. Root cause is a missing
+> `multiprocessing.freeze_support()` call in the PyInstaller entry
+> point; fix queued for v1.7.2. Until then, use **Path B** below.
+> Full RCA:
+> [`docs/dmg_spawn_loop_rca_2026-05-26.md`](docs/dmg_spawn_loop_rca_2026-05-26.md).
 
-```bash
-sh scripts/build_macos_dmg.sh
-```
-
-Then double-click the `.dmg` in `dist/`, drag **Poker Solver** to
-**Applications**, launch from there. The first launch triggers
-Gatekeeper's quarantine prompt; because the artifact is signed and
-notarized, click through without `xattr` workarounds.
-
-Primary target: Apple Silicon (M-series). Intel Mac support is present
-but untested in v1.0.0.
+The historical `.dmg` build script (`sh scripts/build_macos_dmg.sh`)
+remains in the repo; once the packaging fix lands and a re-signed v1.7.2
+build is verified, this section will be restored with a working install
+flow. The current artifact is ad-hoc signed (not notarized) and
+arm64-only despite the `universal2` label. When the `.dmg` is safe to
+use again, see
+[`docs/dmg_install_guide.md`](docs/dmg_install_guide.md).
 
 ### Path B: pip + cargo (power users)
 
