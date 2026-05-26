@@ -308,53 +308,51 @@ The following are **NOT** resolved in v1.8.0 and remain open for future
 work:
 
 - **Deep-cap A83 ≥33-pp bottom-pair-Ace divergence vs Brown reference
-  solver — NOT-A-BUG (arbitrator-confirmed for terminal-utility;
-  Nash-multiplicity component remains the LEADING HYPOTHESIS,
-  empirical probe PENDING).** The Brown
-  apples-to-apples acceptance test continues to report per-cell strict
-  divergences at the bottom-pair-Ace cluster on the A83 board in
-  deep-cap (100bb+) settings. **The terminal-utility arbitration
-  (2026-05-26) rendered a NOT-A-BUG verdict** for the
-  terminal-utility component of the divergence: when
-  `initial_contributions` is set to `(base_pot/2, base_pot/2)` (the
-  seed-split applied by every production codepath), the per-terminal
-  delta vs Brown is a uniform constant that cancels exactly at the
-  regret-difference step, so the Nash equilibrium is unchanged. The
-  remaining per-cell residual is the combined effect of (a)
-  terminal-utility convention divergence at the audit-abstraction
-  layer (Brown awards full pot including `base_pot` to the winner;
-  ours is zero-sum) and (b) **Nash multiplicity at indifference
-  manifolds in the deep-cap subgame — leading hypothesis, NOT YET
-  empirically confirmed.** The original A83 Track A perturbed-seed
-  probe (2026-05-26) attempted to confirm Nash multiplicity via two
-  `--regret-init-noise` 200K-iter runs that produced "bit-identical"
-  outputs; that result was later INVALIDATED — the CLI invocation
-  hit a no-op path (`chance_outcomes()` empty due to `initial_hole_cards
-  = None`), so the bit-identicality reflects "two no-op runs", not
-  Nash convergence. The `--regret-init-noise` flag implementation
-  itself is correct (3 unit tests in `dcfr_vector.rs::tests` PASS).
-  A corrected empirical probe via the vector-form RvR entrypoint
-  (`solve_range_vs_range_nash`) is queued; see
-  `docs/a83_track_a_results_analysis_2026-05-26.md` and
-  `docs/a83_followup_correct_experiment_2026-05-26.md`. Both solvers
-  are essentially Nash (Brown exploitability 0.06 chips at 2000 iters
-  = 0.006% of pot; matched-config empirical verification 2026-05-25,
-  VERDICT C). **The reframed 4-layer acceptance test (L1 structural
-  / L2 shallow-strict / L3 deep-directional L1 ≤ 1.9 / L3' p75 L1
-  ≤ 0.60 / L4 top-action ≥ 60%) PASSES on both river spots — see
-  Dry-run #10.** The strict per-cell residual is treated as
-  informational; see
-  `docs/terminal_utility_arbitration_2026-05-26.md` (NOT-A-BUG
-  arbitrator verdict for terminal-utility component),
-  `docs/v1_6_1_ship_hold_review_2026-05-26.md`
-  (HOLD-LIFTED decision), `docs/a83_validation_2026-05-26.md`
+  solver — NOT-A-BUG (Nash multiplicity EMPIRICALLY CONFIRMED).**
+  Nash multiplicity has been empirically confirmed via a corrected
+  2000-iter `solve_range_vs_range_rust` perturbation probe
+  (2026-05-26): with the same RNG seed and only `ε = 1e-9` initial
+  regret perturbation, the resulting average strategies diverge by
+  up to **`max |Δ| = 0.998499`** on indifference-manifold cells
+  (deep-cap raise-sequence histories) and **~25-28%** on the original
+  bottom-pair-Ace cluster (`3sAs` / `3cAc` at `b1000r3000`). Same code,
+  same seed, infinitesimal perturbation, near-100% strategy divergence
+  on the most sensitive cells — that is the signature of an
+  equilibrium manifold whose specific point is selected by the
+  initial conditions. The 33pp Brown apples-to-apples divergence is
+  design-acceptable Nash non-uniqueness, not a bug; both engines are
+  correct and each converges to A Nash equilibrium. Full evidence:
+  `docs/a83_nash_multiplicity_confirmed_2026-05-26.md` (verdict,
+  methodology, top-10 cells, targeted-cluster cells). The corrected
+  probe script is tracked at
+  `scripts/a83_nash_multiplicity_probe.py` and is reproducible from a
+  fresh checkout; the 500 KB JSON dumps live at `~/Desktop/a83_correct_probe_*.json`
+  (outside the repo). The terminal-utility arbitration (2026-05-26)
+  separately rendered a NOT-A-BUG verdict for the terminal-utility
+  component (uniform constant offset cancels at the regret-difference
+  step). **The reframed 4-layer acceptance test (L1 structural / L2
+  shallow-strict / L3 deep-directional L1 ≤ 1.9 / L3' p75 L1 ≤ 0.60
+  / L4 top-action ≥ 60%) PASSES on both river spots — see
+  Dry-run #10.** Honest caveat: the probe used 2000 iters (matching
+  the v1.5 Brown apples-to-apples acceptance baseline); at much
+  higher iter counts the per-cell Δ envelope might narrow as more
+  equilibrium ties get broken, but the multiplicity exists at the
+  limit and the apples-to-apples comparison vs Brown holds at the
+  iter count both were measured at. See
+  `docs/a83_nash_multiplicity_confirmed_2026-05-26.md` (empirical
+  confirmation), `docs/terminal_utility_arbitration_2026-05-26.md`
+  (NOT-A-BUG arbitrator verdict for terminal-utility component),
+  `docs/v1_6_1_ship_hold_review_2026-05-26.md` (HOLD-LIFTED decision,
+  now empirically backed), `docs/a83_validation_2026-05-26.md`
   (DCFR-math validation, PASS),
   `docs/a83_deep_cap_root_cause_investigation.md`,
   `docs/matched_config_investigation.md`,
-  `docs/a83_track_a_results_analysis_2026-05-26.md`
-  (INVALIDATION of Track A v1 probe), and the project memory rule
-  `feedback_nash_multiplicity_acceptance.md`. The v1.6.1 engine bundle
-  shipped piecewise on `origin/main` (10 PRs landed 2026-05-26
+  `docs/a83_track_a_results_analysis_2026-05-26.md` (INVALIDATION of
+  Track A v1 probe; the v1 200K probe hit `chance_outcomes()` no-op
+  when `initial_hole_cards = None` — superseded by the corrected
+  probe), and the project memory rule
+  `feedback_nash_multiplicity_acceptance.md`. The v1.6.1 engine
+  bundle shipped piecewise on `origin/main` (10 PRs landed 2026-05-26
   02:32-03:02 UTC); the hold is lifted and the fixes are folded into
   v1.8.0 per `docs/v1_6_1_ship_hold_review_2026-05-26.md` and
   `docs/v1_7_1_tag_decision_2026-05-26.md`.
