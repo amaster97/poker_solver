@@ -178,14 +178,55 @@ pub struct VectorDCFR {
 }
 
 impl VectorDCFR {
+    /// Construct a `VectorDCFR` with all-zero initial regrets. Equivalent to
+    /// `with_init_noise(tree, …, regret_init_noise = 0.0, rng_seed = 0)`.
+    /// Kept as a binary-API stub for external consumers + the
+    /// `vector_solver_runs_minimum_iters` smoke test; production paths flow
+    /// through `with_init_noise` so the PR 90 noise plumbing is exercised
+    /// on the default (zero) branch as well as the perturbed branch.
+    #[allow(dead_code)]
     pub(crate) fn new(tree: &BettingTree, hand_count_per_player: [usize; 2], alpha: f64, beta: f64, gamma: f64) -> Self {
+        Self::with_init_noise(tree, hand_count_per_player, alpha, beta, gamma, 0.0, 0)
+    }
+
+    /// PR 90 (A83 Track A) — construct with optional initial regret
+    /// perturbation for empirical Nash-multiplicity testing.
+    ///
+    /// When `regret_init_noise > 0.0`, each `regret[h*A+a]` is seeded with
+    /// `noise * rng.next_f64_signed()` instead of `0.0`. The RNG is
+    /// deterministically seeded by `rng_seed` (a `PcsRng` splitmix64
+    /// stream) so the same `(noise, seed)` pair always produces the same
+    /// initial state. `regret_init_noise = 0.0` is bit-identical to the
+    /// prior `VectorInfosetData::new` all-zero initialization, preserving
+    /// the differential-test contract.
+    ///
+    /// Vector-form populates ALL decision-node infosets up front (no lazy
+    /// `or_insert_with` like the scalar `hunl_solver.rs` path) — so the
+    /// perturbation is applied here in the constructor, NOT in the
+    /// per-iteration traverse.
+    pub(crate) fn with_init_noise(
+        tree: &BettingTree,
+        hand_count_per_player: [usize; 2],
+        alpha: f64,
+        beta: f64,
+        gamma: f64,
+        regret_init_noise: f64,
+        rng_seed: u64,
+    ) -> Self {
+        let mut init_rng = crate::pcs::PcsRng::new(rng_seed);
         let mut infosets: Vec<Option<VectorInfosetData>> = Vec::with_capacity(tree.nodes.len());
         for node in &tree.nodes {
             match node {
                 FlatNode::Decision { player, actions, .. } => {
                     let action_count = actions.len();
                     let hand_count = hand_count_per_player[*player as usize];
-                    infosets.push(Some(VectorInfosetData::new(action_count, hand_count)));
+                    let mut info = VectorInfosetData::new(action_count, hand_count);
+                    if regret_init_noise > 0.0 {
+                        for slot in info.regret.iter_mut() {
+                            *slot = regret_init_noise * init_rng.next_f64_signed();
+                        }
+                    }
+                    infosets.push(Some(info));
                 }
                 _ => infosets.push(None),
             }
@@ -735,7 +776,9 @@ pub fn solve_range_vs_range_postflop(
     beta: f64,
     gamma: f64,
 ) -> Result<VectorSolveOutput, String> {
-    solve_range_vs_range_postflop_with_hands(config, None, iterations, alpha, beta, gamma)
+    solve_range_vs_range_postflop_with_hands(
+        config, None, iterations, alpha, beta, gamma, 0.0, 0,
+    )
 }
 
 /// Vector-form DCFR with explicit per-player hand lists.
@@ -749,6 +792,7 @@ pub fn solve_range_vs_range_postflop(
 /// `hand_lists`: `Some(([p0_holes], [p1_holes]))` to specify hands
 /// explicitly; `None` to enumerate the full C(deck minus board, 2)
 /// per player (the production path).
+#[allow(clippy::too_many_arguments)]
 pub fn solve_range_vs_range_postflop_with_hands(
     config: &HUNLConfig,
     hand_lists: Option<[Vec<[u8; 2]>; 2]>,
@@ -756,6 +800,8 @@ pub fn solve_range_vs_range_postflop_with_hands(
     alpha: f64,
     beta: f64,
     gamma: f64,
+    regret_init_noise: f64,
+    rng_seed: u64,
 ) -> Result<VectorSolveOutput, String> {
     if config.initial_hole_cards.is_some() {
         return Err(
@@ -797,7 +843,19 @@ pub fn solve_range_vs_range_postflop_with_hands(
     let placeholder = initial.clone_with_hole_cards([eval_ctx.hole[0][0], eval_ctx.hole[1][0]]);
     let tree = BettingTree::build_from(&placeholder);
 
-    let mut solver = VectorDCFR::new(&tree, eval_ctx.hand_count, alpha, beta, gamma);
+    // PR 90 (A83 Track A) — `regret_init_noise = 0.0` keeps the prior
+    // all-zero initialization (bit-identical to pre-PR 90). Non-zero
+    // values seed each per-(hand, action) regret cell with `noise * U(-1, 1)`
+    // via a deterministic `PcsRng` stream seeded by `rng_seed`.
+    let mut solver = VectorDCFR::with_init_noise(
+        &tree,
+        eval_ctx.hand_count,
+        alpha,
+        beta,
+        gamma,
+        regret_init_noise,
+        rng_seed,
+    );
     solver.solve(&tree, &eval_ctx, iterations);
 
     // Final discount catch-up to mirror `dcfr.rs::DCFRSolver::solve`
@@ -1078,10 +1136,157 @@ mod tests {
             1.5,
             0.0,
             2.0,
+            0.0,
+            0,
         )
         .expect("asymmetric range solve must not panic post-fix");
         assert_eq!(out.hand_count_per_player, [12, 24]);
         assert!(out.decision_node_count > 0, "no decision nodes");
         assert!(out.strategy_entry_count > 0, "no strategy entries");
+    }
+
+    // ------------------------------------------------------------------
+    // PR 90 — A83 Track A: regret-init-noise plumbing tests.
+    // ------------------------------------------------------------------
+
+    /// PR 90 — verifies the `--regret-init-noise` flag's default value
+    /// (`0.0`) is bit-identical to the pre-PR-90 all-zero initialization
+    /// when consumed via the public `solve_range_vs_range_postflop`
+    /// surface. Two calls with `noise=0.0` and identical other parameters
+    /// must produce strategy entries with `f64::EQ` equality across the
+    /// full output map.
+    ///
+    /// The success criterion is: `noise=0` is reproducible (DCFR is
+    /// deterministic under fixed iteration order; no implicit RNG in the
+    /// default path).
+    #[test]
+    fn regret_init_noise_zero_is_reproducible() {
+        let cfg = tiny_river_rvr();
+        let out_a = solve_range_vs_range_postflop_with_hands(
+            &cfg, None, 3, 1.5, 0.0, 2.0, 0.0, 0,
+        )
+        .expect("solve must complete");
+        let out_b = solve_range_vs_range_postflop_with_hands(
+            &cfg, None, 3, 1.5, 0.0, 2.0, 0.0, 0,
+        )
+        .expect("solve must complete");
+        assert_eq!(out_a.average_strategy.len(), out_b.average_strategy.len());
+        for (key, probs_a) in &out_a.average_strategy {
+            let probs_b = out_b
+                .average_strategy
+                .get(key)
+                .expect("noise=0.0 reruns must produce identical key sets");
+            assert_eq!(
+                probs_a, probs_b,
+                "noise=0.0 reruns must be bit-identical at infoset {key:?}"
+            );
+        }
+    }
+
+    /// PR 90 — verifies the `--regret-init-noise` epsilon path engages.
+    /// Two solves with `noise=0.0` vs `noise=1e-9` (same other args, same
+    /// seed) MUST produce regret rows that differ by `O(epsilon)` at
+    /// iteration 1, demonstrating the flag is plumbed end-to-end and
+    /// actually perturbs `regret_sum`. Three iters of solve are enough
+    /// for the perturbation to propagate through strategy_sum.
+    ///
+    /// The test is intentionally weak on convergence — it only asserts
+    /// the noise path engages, not that the resulting strategy is any
+    /// closer to / farther from the noise-free Nash. The Nash-multiplicity
+    /// experiment (A83 Track A) lives in the 200K-iter nohup runs
+    /// downstream of this PR.
+    #[test]
+    fn regret_init_noise_epsilon_perturbs_strategy() {
+        // Use a config with multi-action infosets so the noise CAN
+        // perturb the strategy distribution. `tiny_river_rvr` produces
+        // a single-action degenerate tree (`postflop_raise_cap=1` +
+        // single bet size collapses every decision node to one legal
+        // action) which masks the perturbation — every strategy row is
+        // `[1.0]` regardless of regret state. Boosting the cap + adding
+        // all-in produces 4324 multi-action infosets.
+        let mut cfg = tiny_river_rvr();
+        cfg.postflop_raise_cap = 3;
+        cfg.include_all_in = true;
+        let noise = 1e-9_f64;
+        let out_zero = solve_range_vs_range_postflop_with_hands(
+            &cfg, None, 3, 1.5, 0.0, 2.0, 0.0, 1,
+        )
+        .expect("baseline solve must complete");
+        let out_eps = solve_range_vs_range_postflop_with_hands(
+            &cfg, None, 3, 1.5, 0.0, 2.0, noise, 1,
+        )
+        .expect("perturbed solve must complete");
+        // Same infoset key set (tree shape is identical regardless of
+        // regret state — noise only perturbs values, not topology).
+        assert_eq!(
+            out_zero.average_strategy.len(),
+            out_eps.average_strategy.len(),
+            "noise must not change tree shape"
+        );
+        // Quantify the per-cell drift. With `noise = 1e-9` we expect at
+        // least one cell to differ by *something* — the early iterations
+        // can amplify ε-sized regret deltas into O(1) strategy
+        // differences via regret-matching's `max(r, 0) / Σ max(r, 0)`
+        // step, since `r_i ≈ ε` produces a degenerate normalization
+        // where the sign pattern (rather than magnitude) determines the
+        // strategy. This is precisely the Nash-multiplicity mechanism
+        // the A83 200K-iter runs probe at scale.
+        //
+        // Pre-fix tests asserted an upper bound (`< 1e-3`) which was
+        // theoretically wrong — regret-matching at the boundary
+        // between negative and positive regret IS expected to flip
+        // strategies between corners with ε-sized perturbations at
+        // very low iteration counts.
+        let mut max_diff: f64 = 0.0;
+        for (key, probs_zero) in &out_zero.average_strategy {
+            let probs_eps = out_eps
+                .average_strategy
+                .get(key)
+                .expect("epsilon-perturbed solve must produce same key set");
+            for (a, b) in probs_zero.iter().zip(probs_eps.iter()) {
+                max_diff = max_diff.max((a - b).abs());
+            }
+        }
+        assert!(
+            max_diff > 0.0,
+            "noise=1e-9 must produce non-zero divergence from noise=0.0 \
+             (got max_diff={max_diff})"
+        );
+    }
+
+    /// PR 90 — different `rng_seed` values with the same `noise > 0`
+    /// MUST produce divergent strategies (proves the seed is actually
+    /// consumed; if the seed argument were ignored the two solves would
+    /// be bit-identical).
+    #[test]
+    fn regret_init_noise_seed_changes_outcome() {
+        // Same cap-3 + all-in config as the epsilon test — single-
+        // action infosets mask the seed effect.
+        let mut cfg = tiny_river_rvr();
+        cfg.postflop_raise_cap = 3;
+        cfg.include_all_in = true;
+        let noise = 1e-9_f64;
+        let out_seed1 = solve_range_vs_range_postflop_with_hands(
+            &cfg, None, 3, 1.5, 0.0, 2.0, noise, 1,
+        )
+        .expect("solve must complete");
+        let out_seed2 = solve_range_vs_range_postflop_with_hands(
+            &cfg, None, 3, 1.5, 0.0, 2.0, noise, 2,
+        )
+        .expect("solve must complete");
+        let mut any_diff = false;
+        for (key, probs_1) in &out_seed1.average_strategy {
+            let probs_2 = out_seed2.average_strategy.get(key).unwrap();
+            for (a, b) in probs_1.iter().zip(probs_2.iter()) {
+                if (a - b).abs() > 0.0 {
+                    any_diff = true;
+                    break;
+                }
+            }
+            if any_diff {
+                break;
+            }
+        }
+        assert!(any_diff, "different rng_seeds must produce different strategies");
     }
 }

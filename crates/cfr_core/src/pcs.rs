@@ -99,6 +99,23 @@ impl PcsRng {
         let m = (x as u128).wrapping_mul(n as u128);
         (m >> 64) as u64
     }
+
+    /// Uniform `f64` in `[-1.0, 1.0)`. Used by the PR 90 regret-init-noise
+    /// path (A83 Track A — Nash multiplicity empirical confirmation) to
+    /// seed `regret_sum[h*A+a]` with `epsilon * next_f64_signed()` at first
+    /// infoset visit. Cross-platform deterministic given a fixed `PcsRng`
+    /// seed (u64 wrapping arithmetic, no platform-dependent FP intrinsics).
+    ///
+    /// Implementation: take 53 bits of mantissa from `next_u64`, scale into
+    /// `[0, 1)`, then `2.0 * x - 1.0` lifts to `[-1, 1)`. Matches the
+    /// canonical IEEE 754 double-precision uniform sampler used by
+    /// `rand::distributions::Uniform<f64>` (no crate dep required).
+    #[inline]
+    pub fn next_f64_signed(&mut self) -> f64 {
+        let bits = self.next_u64() >> 11; // 53 high bits.
+        let unit = bits as f64 / (1u64 << 53) as f64; // [0, 1).
+        2.0_f64 * unit - 1.0_f64 // [-1, 1).
+    }
 }
 
 /// Sample one outcome uniformly from `k_outcomes` and return
