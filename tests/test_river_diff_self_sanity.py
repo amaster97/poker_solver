@@ -33,6 +33,9 @@ from poker_solver.parity.noambrown_wrapper import (
     load_spots,
     our_strategy_to_brown_matrix,
 )
+from poker_solver.parity.noambrown_wrapper import (  # noqa: PLC2701
+    _parse_brown_dump,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SPOTS_JSON = REPO_ROOT / "tests" / "data" / "river_spots.json"
@@ -490,4 +493,187 @@ def test_brown_binary_finder_returns_path_or_none() -> None:
     binary2 = find_brown_binary()
     assert binary == binary2, (
         f"find_brown_binary is not idempotent: first={binary!r}, " f"second={binary2!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 9 (PR 55): _parse_brown_dump swaps players[0] / players[1] at the
+# wrapper boundary so callers index Brown's profile in our P0/P1 convention.
+# ---------------------------------------------------------------------------
+
+
+def test_parse_brown_dump_swaps_players_p0_p1() -> None:
+    """PR 55 regression: ``_parse_brown_dump`` swaps Brown's player axis.
+
+    Brown's JSON exposes ``players[0]`` as Brown's tree-internal player 0,
+    which is the **first-to-act on river** (per
+    ``cpp/src/river_game.cpp:10``). Our engine puts the **second-to-act**
+    profile at our P0 (per ``poker_solver/hunl.py:425-429`` and
+    ``hunl.py:789``). So Brown's ``players[0]`` is our P1, and Brown's
+    ``players[1]`` is our P0.
+
+    This test feeds a hand-crafted Brown dump (with marker
+    ``hands``/``weights`` distinct per side) through ``_parse_brown_dump``
+    and asserts that the returned dump indexes the profiles in our
+    convention: ``parsed.players[0]`` contains the input ``players[1]``
+    payload and vice versa. Failure here = silently regressing the swap
+    and re-introducing the K72/A83 cross-role comparison bug
+    (see ``docs/p0_p1_convention_investigation.md``).
+    """
+    # Hand-crafted Brown dump with deliberately distinct payloads per side
+    # so the swap is observable. ``hands`` and ``weights`` are the simplest
+    # to assert on without depending on profile-key canonicalization.
+    raw_dump = {
+        "players": [
+            {
+                # Brown's input players[0] = first-to-act on river (≡ our P1).
+                # Marker hands: AsKs (some "OOP-looking" hand) at weight 1.0.
+                "hands": ["AsKs"],
+                "weights": [1.0],
+                "profile": {
+                    "root": {
+                        "actions": ["c", "f"],
+                        "strategy": [[0.7, 0.3]],
+                    }
+                },
+            },
+            {
+                # Brown's input players[1] = second-to-act on river (≡ our P0).
+                # Marker hands: QdQh (distinct from players[0]) at weight 0.5.
+                "hands": ["QdQh"],
+                "weights": [0.5],
+                "profile": {
+                    "root": {
+                        "actions": ["c", "f"],
+                        "strategy": [[0.4, 0.6]],
+                    }
+                },
+            },
+        ]
+    }
+
+    parsed = _parse_brown_dump(
+        raw_dump,
+        iterations_run=2000,
+        game_value_p0=None,
+        game_value_p1=None,
+        exploitability_chips=None,
+    )
+
+    # ``parsed.players[0]`` (our P0 = second-to-act) MUST receive the
+    # second-to-act payload from Brown — which Brown put at input
+    # ``players[1]``: hands=["QdQh"], weights=[0.5].
+    assert parsed.players[0].hands == ("QdQh",), (
+        f"PR 55 swap regressed: parsed.players[0].hands = "
+        f"{parsed.players[0].hands!r}, expected ('QdQh',) "
+        f"(Brown's players[1] payload, our P0)"
+    )
+    assert parsed.players[0].weights == (0.5,), (
+        f"PR 55 swap regressed: parsed.players[0].weights = "
+        f"{parsed.players[0].weights!r}, expected (0.5,)"
+    )
+    assert parsed.players[0].profile["root"].strategy == ((0.4, 0.6),), (
+        "PR 55 swap regressed: parsed.players[0] is carrying Brown's "
+        "players[0] strategy, not players[1]"
+    )
+
+    # Symmetric assertion: parsed.players[1] = our P1 = first-to-act on
+    # river = Brown's players[0] payload.
+    assert parsed.players[1].hands == ("AsKs",), (
+        f"PR 55 swap regressed: parsed.players[1].hands = "
+        f"{parsed.players[1].hands!r}, expected ('AsKs',) "
+        f"(Brown's players[0] payload, our P1)"
+    )
+    assert parsed.players[1].weights == (1.0,), (
+        f"PR 55 swap regressed: parsed.players[1].weights = "
+        f"{parsed.players[1].weights!r}, expected (1.0,)"
+    )
+    assert parsed.players[1].profile["root"].strategy == ((0.7, 0.3),), (
+        "PR 55 swap regressed: parsed.players[1] is carrying Brown's "
+        "players[1] strategy, not players[0]"
+    )
+
+
+def test_parse_brown_dump_nuts_vs_air_asymmetric_fixture() -> None:
+    """PR 55 sanity: nuts-vs-air asymmetric fixture surfaces the swap.
+
+    Constructs a minimal Brown dump where the two seats are
+    behaviourally distinguishable:
+
+    - Brown's ``players[0]`` (= first-to-act = our P1) is given a pure
+      "nuts" infoset that always bets pot at the root: ``b1000`` weight 1.0.
+    - Brown's ``players[1]`` (= second-to-act = our P0) is given a pure
+      "air" infoset that always folds at a faced bet:
+      ``b1000`` reply ``f`` weight 1.0.
+
+    After PR 55's swap, the post-parse dump must put the FOLD-AT-bet
+    profile at ``parsed.players[0]`` (our P0) and the BET-EVERY-time
+    profile at ``parsed.players[1]`` (our P1). This is the exact
+    asymmetric semantic the investigation flagged in Phase 4 as the
+    minimal nuts-vs-air fixture; if the swap is ever undone, this test
+    is the first to fail.
+    """
+    raw_dump = {
+        "players": [
+            {
+                # Brown's first-to-act (our P1): pure-nuts strategy, bets pot.
+                "hands": ["AcAd"],  # marker
+                "weights": [1.0],
+                "profile": {
+                    "root": {
+                        "actions": ["b1000", "c"],
+                        "strategy": [[1.0, 0.0]],  # always bet pot
+                    }
+                },
+            },
+            {
+                # Brown's second-to-act (our P0): pure-air, folds to bet.
+                "hands": ["2c3d"],  # marker
+                "weights": [1.0],
+                "profile": {
+                    "b1000": {
+                        "actions": ["c", "f"],
+                        "strategy": [[0.0, 1.0]],  # always fold
+                    }
+                },
+            },
+        ]
+    }
+
+    parsed = _parse_brown_dump(
+        raw_dump,
+        iterations_run=2000,
+        game_value_p0=None,
+        game_value_p1=None,
+        exploitability_chips=None,
+    )
+
+    # After swap, parsed.players[0] (our P0) must carry the air/fold
+    # profile (Brown's input players[1]).
+    assert parsed.players[0].hands == ("2c3d",), (
+        "PR 55: parsed.players[0] must carry Brown's players[1] (our P0 = "
+        "second-to-act = air-side in this fixture); "
+        f"got {parsed.players[0].hands!r}"
+    )
+    assert "b1000" in parsed.players[0].profile, (
+        "PR 55: parsed.players[0] (our P0, our second-to-act) must have a "
+        "response to the b1000 facing bet — i.e. the swap put the "
+        "responder's infoset on our P0"
+    )
+    assert parsed.players[0].profile["b1000"].strategy == ((0.0, 1.0),), (
+        "PR 55: post-swap our-P0 strategy at b1000 should be fold-heavy "
+        "(this fixture's air side); regression here means the swap was "
+        "undone or inverted"
+    )
+
+    # And parsed.players[1] (our P1) carries the nuts/bet profile.
+    assert parsed.players[1].hands == ("AcAd",), (
+        "PR 55: parsed.players[1] must carry Brown's players[0] (our P1 = "
+        "first-to-act = nuts-side); "
+        f"got {parsed.players[1].hands!r}"
+    )
+    assert "root" in parsed.players[1].profile
+    assert parsed.players[1].profile["root"].strategy == ((1.0, 0.0),), (
+        "PR 55: post-swap our-P1 strategy at root should be bet-heavy "
+        "(this fixture's nuts side)"
     )

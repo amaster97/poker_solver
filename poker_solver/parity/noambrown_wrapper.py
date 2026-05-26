@@ -139,11 +139,39 @@ class BrownPlayerProfile:
 class BrownStrategyDump:
     """Parsed output from Brown's ``--dump-strategy`` JSON.
 
+    Player-index convention (post-PR 55)
+    ------------------------------------
+    ``players`` is exposed in OUR engine's P0/P1 convention so callers
+    can index it side-by-side with our solver outputs without remapping.
+
+    - **Brown's internal convention** (``cpp/src/river_game.cpp:10``,
+      ``cpp/src/main.cpp:669-675``): ``players[0]`` in Brown's JSON =
+      Brown's tree-internal player 0 = **first-to-act on river**.
+    - **Our convention** (``poker_solver/hunl.py:425-429`` and
+      ``hunl.py:789``): our P0 = ``cur_player=0`` on river open =
+      **second-to-act on river** (our P1 = ``cur_player=1`` acts first).
+    - **This wrapper swaps players at the boundary** (in
+      ``_parse_brown_dump``) so that ``players[0]`` on the returned dump
+      is Brown's player-1 profile (= second-to-act = our P0) and
+      ``players[1]`` is Brown's player-0 profile (= first-to-act = our
+      P1). Downstream diff harnesses can then iterate
+      ``for player in (0, 1): brown_dump.players[player] vs our[player]``
+      without any per-call remap.
+
+    Prior to PR 55, this dataclass exposed Brown's raw indexing; the
+    diff harness was silently comparing Brown's first-actor strategy
+    against our P0 (second-actor) strategy. See
+    ``docs/p0_p1_convention_investigation.md``.
+
     ``game_value_p0`` and ``game_value_p1`` are populated only if Brown's
     stdout exposed them. The current binary (``cpp/src/main.cpp:440-471``)
     prints exploitability, not game value, so these fields are usually
     ``None`` — kept on the dataclass for forward compatibility with later
-    Brown builds.
+    Brown builds. Note that these fields, if/when populated by a future
+    Brown build, would still come from Brown's stdout in Brown's
+    convention; today they are always ``None`` so the unswapped naming is
+    a no-op. If a future Brown build exposes them as non-None, the
+    parser will need a paired rename (out of scope for PR 55).
     """
 
     players: tuple[BrownPlayerProfile, BrownPlayerProfile]
@@ -752,8 +780,24 @@ def _parse_brown_dump(
             )
         )
 
+    # PR 55: swap players[0] / players[1] at the wrapper boundary.
+    #
+    # Brown's JSON puts the first-to-act-on-river profile at
+    # ``players[0]`` (cpp/src/river_game.cpp:10, struct State{int player=0}
+    # is the river-open actor; cpp/src/main.cpp:669-675 loads
+    # subgame.players[i] into config.ranges[i] which RiverGame uses as
+    # hands[i] for player i). Our engine puts the SECOND-to-act profile at
+    # our P0 (hunl.py:425-429 sets postflop_first_actor=1; hunl.py:789
+    # opens the river with cur_player=1). So Brown's players[0] is our P1,
+    # and Brown's players[1] is our P0.
+    #
+    # We swap here so callers (test_river_diff,
+    # test_v1_5_brown_apples_to_apples, and our_strategy_to_brown_matrix
+    # via test plumbing) can iterate ``for player in (0, 1):
+    # brown_dump.players[player] vs our[player]`` and end up comparing
+    # same-role strategies. See docs/p0_p1_convention_investigation.md.
     return BrownStrategyDump(
-        players=(parsed_players[0], parsed_players[1]),
+        players=(parsed_players[1], parsed_players[0]),
         game_value_p0=game_value_p0,
         game_value_p1=game_value_p1,
         iterations_run=iterations_run,
@@ -1090,7 +1134,7 @@ def our_strategy_to_brown_matrix(
     hands_p1: tuple[Combo, ...],
     spot: RiverSpot,
 ) -> dict[str, dict[int, np.ndarray]]:
-    """Flatten our per-infoset strategies into Brown's matrix shape.
+    """Flatten our per-infoset strategies into a per-history matrix shape.
 
     Walks ``result.average_strategy``, parses each infoset key into
     ``(player, hand, canonical_history)``, and groups into a nested
@@ -1112,6 +1156,20 @@ def our_strategy_to_brown_matrix(
     Hand orderings follow ``hands_p0`` / ``hands_p1`` (caller passes the
     same lists used to build ``spot.ranges``); hands not appearing in
     our strategy keys for a given infoset get a zero row.
+
+    Player-index convention (post-PR 55)
+    ------------------------------------
+    The ``player_index`` key in the inner dict is in **our engine's
+    convention**: ``player_index == 0`` means our P0 (hole in
+    ``hands_p0``); ``player_index == 1`` means our P1 (hole in
+    ``hands_p1``). This is unchanged by PR 55. After PR 55,
+    ``BrownStrategyDump.players[player]`` is ALSO in our convention
+    (swapped at the wrapper boundary), so a diff harness can directly
+    iterate ``for player in (0, 1): brown_dump.players[player] vs
+    out[history][player]`` and compare same-role strategies. The
+    historical function name (``..._to_brown_matrix``) reflects the
+    nested-dict shape modeled after Brown's per-history output, not a
+    convention conversion.
 
     Returns:
         A nested dict keyed by canonical_history_str → player int (0 or 1)
