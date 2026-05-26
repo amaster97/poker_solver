@@ -65,6 +65,7 @@ use crate::exploit::{
     enumerate_hole_card_pairs, hole_string, terminal_utility, BettingTree, FlatNode,
 };
 use crate::hunl::{HUNLConfig, HUNLState};
+use crate::simd;
 
 /// Per-decision-node vector-form regret + strategy_sum table.
 ///
@@ -259,10 +260,16 @@ impl VectorDCFR {
     /// DCFR discount catch-up. Same math as the scalar `dcfr.rs::discount_info`
     /// (and as Brown's `Trainer::apply_dcfr_discount` at `trainer.cpp:124-136`,
     /// MIT), applied to the full `hand_count × action_count` regret / strat
-    /// vectors. We do not route through `simd::discount_regrets` here
-    /// because the vector shape is `hand_count × action_count` rather than
-    /// `action_count` and the existing SIMD kernels assume the action-only
-    /// width; a vector-shape SIMD kernel is a follow-up for v1.5.x perf.
+    /// vectors.
+    ///
+    /// PR 61 (v1.8 Phase 1): routes through `simd::discount_regrets` +
+    /// `simd::discount_strategy_sum`. Those kernels operate on flat
+    /// `&mut [f64]` slices and don't care about the row-major
+    /// `hand_count × action_count` layout — they vectorize across whatever
+    /// width the slice has. NEON on aarch64, SSE2 on x86_64, scalar
+    /// fallback elsewhere. Behavior is bit-identical to the previous
+    /// inline scalar loop (the SIMD paths' `_matches_scalar` tests are
+    /// part of the `simd` module's parity gate).
     fn discount(info: &mut VectorInfosetData, t: u32, alpha: f64, beta: f64, gamma: f64) {
         if info.last_discount_iter >= t {
             return;
@@ -274,16 +281,8 @@ impl VectorDCFR {
             let pos_scale = ta / (ta + 1.0);
             let neg_scale = tb / (tb + 1.0);
             let strat_scale = (tt_f / (tt_f + 1.0)).powf(gamma);
-            for r in &mut info.regret {
-                if *r > 0.0 {
-                    *r *= pos_scale;
-                } else if *r < 0.0 {
-                    *r *= neg_scale;
-                }
-            }
-            for s in &mut info.strategy_sum {
-                *s *= strat_scale;
-            }
+            simd::discount_regrets(&mut info.regret, pos_scale, neg_scale);
+            simd::discount_strategy_sum(&mut info.strategy_sum, strat_scale);
         }
         info.last_discount_iter = t;
     }
