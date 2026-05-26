@@ -188,6 +188,8 @@ fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
     target_exploitability=None,
     seed=None,
     locked_strategies=None,
+    regret_init_noise=0.0,
+    rng_seed=0,
 ))]
 #[allow(clippy::too_many_arguments)]
 fn solve_hunl_postflop(
@@ -201,6 +203,8 @@ fn solve_hunl_postflop(
     target_exploitability: Option<f64>,
     seed: Option<u64>,
     locked_strategies: Option<HashMap<String, Vec<f64>>>,
+    regret_init_noise: f64,
+    rng_seed: u64,
 ) -> PyResult<PyObject> {
     // GIL-bound prep (cheap): deserialize config + load abstraction. We can't
     // hold `Option<&AbstractionTables>` across `allow_threads` because the
@@ -230,6 +234,8 @@ fn solve_hunl_postflop(
                 target_exploitability,
                 seed,
                 locked_strategies,
+                regret_init_noise,
+                rng_seed,
             )
         })
     }));
@@ -423,6 +429,8 @@ fn compute_exploitability(
     gamma,
     p0_holes=None,
     p1_holes=None,
+    regret_init_noise=0.0,
+    rng_seed=0,
 ))]
 #[allow(clippy::too_many_arguments)]
 fn solve_range_vs_range_rust(
@@ -434,6 +442,8 @@ fn solve_range_vs_range_rust(
     gamma: f64,
     p0_holes: Option<Vec<[u8; 2]>>,
     p1_holes: Option<Vec<[u8; 2]>>,
+    regret_init_noise: f64,
+    rng_seed: u64,
 ) -> PyResult<PyObject> {
     let config: hunl::HUNLConfig = serde_json::from_str(config_json)
         .map_err(|e| PyValueError::new_err(format!("invalid HUNLConfig JSON: {e}")))?;
@@ -456,7 +466,14 @@ fn solve_range_vs_range_rust(
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         py.allow_threads(|| {
             dcfr_vector::solve_range_vs_range_postflop_with_hands(
-                &config, hand_lists, iterations, alpha, beta, gamma,
+                &config,
+                hand_lists,
+                iterations,
+                alpha,
+                beta,
+                gamma,
+                regret_init_noise,
+                rng_seed,
             )
         })
     }));

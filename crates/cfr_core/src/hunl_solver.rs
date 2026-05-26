@@ -121,14 +121,28 @@ struct HUNLDcfr {
     /// Cache of locked keys validated on first visit (length + non-
     /// negative + sum-to-one).
     validated_locked_keys: std::collections::HashSet<String>,
+    /// PR 90 (A83 Track A) — symmetry-breaking magnitude for the initial
+    /// `regret_sum`. When `regret_init_noise > 0.0`, each new infoset's
+    /// `regret_sum[a]` is seeded with `noise * rng.next_f64_signed()` (∈
+    /// `[-noise, +noise)`) instead of `0.0`. The default `0.0` is
+    /// bit-identical to the prior all-zero initialization. Used to probe
+    /// Nash multiplicity at deep-cap indifference manifolds: two solves
+    /// at `epsilon = 0` vs `epsilon = 1e-9` that converge to materially
+    /// different strategies empirically confirm Nash multiplicity
+    /// (`feedback_nash_multiplicity_acceptance.md`).
+    regret_init_noise: f64,
+    /// PR 90 — deterministic RNG used solely for the regret-init-noise
+    /// path. Independent of the PCS chance-sampling RNG (which lives at
+    /// the outer driver scope) so noise + PCS are seedable separately.
+    init_rng: PcsRng,
 }
 
 impl HUNLDcfr {
-    /// v1.3-compat constructor (no locks). Kept for symmetry with
-    /// `DCFRSolver::new`; the lock-aware variant is `with_locked`.
+    /// v1.3-compat constructor (no locks, no init noise). Kept for symmetry
+    /// with `DCFRSolver::new`; the full-feature variant is `with_locked`.
     #[allow(dead_code)]
     fn new(alpha: f64, beta: f64, gamma: f64) -> Self {
-        Self::with_locked(alpha, beta, gamma, HashMap::new())
+        Self::with_locked(alpha, beta, gamma, HashMap::new(), 0.0, 0)
     }
 
     fn with_locked(
@@ -136,6 +150,8 @@ impl HUNLDcfr {
         beta: f64,
         gamma: f64,
         locked_strategies: HashMap<String, Vec<f64>>,
+        regret_init_noise: f64,
+        init_rng_seed: u64,
     ) -> Self {
         Self {
             alpha,
@@ -145,6 +161,8 @@ impl HUNLDcfr {
             infosets: HashMap::new(),
             locked_strategies,
             validated_locked_keys: std::collections::HashSet::new(),
+            regret_init_noise,
+            init_rng: PcsRng::new(init_rng_seed),
         }
     }
 
@@ -332,11 +350,28 @@ impl HUNLDcfr {
             return node_value;
         }
 
+        // PR 90 (A83 Track A) — when `regret_init_noise > 0`, perturb the
+        // initial `regret_sum` row by `noise * rng.next_f64_signed()` per
+        // action. Allocate the perturbed vector OUTSIDE `or_insert_with`
+        // so the closure stays `FnOnce` without borrowing `&mut self` for
+        // the RNG. The `regret_init_noise == 0.0` fast path returns a
+        // bit-identical all-zero vector, preserving the prior contract.
+        let initial_regret = if self.regret_init_noise > 0.0
+            && !self.infosets.contains_key(&key)
+        {
+            let mut v = vec![0.0_f64; num_actions];
+            for slot in v.iter_mut() {
+                *slot = self.regret_init_noise * self.init_rng.next_f64_signed();
+            }
+            v
+        } else {
+            vec![0.0_f64; num_actions]
+        };
         let info = self
             .infosets
             .entry(key.clone())
             .or_insert_with(|| InfosetData {
-                regret_sum: vec![0.0; num_actions],
+                regret_sum: initial_regret,
                 strategy_sum: vec![0.0; num_actions],
                 num_actions,
                 last_discount_iter: 0,
@@ -447,6 +482,8 @@ pub fn solve_hunl_postflop(
     _target_exploitability: Option<f64>,
     _seed: Option<u64>,
     locked_strategies: Option<HashMap<String, Vec<f64>>>,
+    regret_init_noise: f64,
+    rng_seed: u64,
 ) -> Result<HUNLSolveOutput, HUNLSolveError> {
     validate_config(config)?;
 
@@ -474,7 +511,18 @@ pub fn solve_hunl_postflop(
     // v1.4: route lock map into the solver. Empty/`None` is bit-identical
     // to v1.3 (the lock branch in `cfr` short-circuits on `get` -> None).
     let locked_map = locked_strategies.unwrap_or_default();
-    let mut solver = HUNLDcfr::with_locked(alpha, solver_beta, gamma, locked_map);
+    // PR 90 (A83 Track A) — `regret_init_noise = 0.0` is bit-identical to
+    // the prior behavior (the regret-init branch returns the same
+    // `vec![0.0; num_actions]` it always did). Non-zero values seed
+    // first-visit regret rows with `noise * U(-1, 1)` via `init_rng`.
+    let mut solver = HUNLDcfr::with_locked(
+        alpha,
+        solver_beta,
+        gamma,
+        locked_map,
+        regret_init_noise,
+        rng_seed,
+    );
     // PCS RNG seeded from caller (default 7 if unset). Determinism: fixed
     // seed → fixed outcome trace → fixed `average_strategy` across runs.
     let mut rng = PcsRng::new(_seed.unwrap_or(7));

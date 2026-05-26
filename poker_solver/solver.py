@@ -163,11 +163,19 @@ def solve(
 
         # Sort kwargs into ones the Python solver accepts directly vs ones
         # that need to ride along inside `dcfr_kwargs` (alpha/beta/gamma).
+        # PR 90 (A83 Track A): `regret_init_noise` + `rng_seed` are
+        # Rust-tier-only knobs; the Python reference tier does not consume
+        # them, so we drop them from the remainder forwarded to `DCFRSolver`.
         _DIRECT_KEYS = {"target_exploitability", "memory_budget_gb", "seed"}
+        _RUST_ONLY_KEYS = {"regret_init_noise", "rng_seed"}
         direct_kwargs: dict[str, Any] = {
             k: v for k, v in dcfr_kwargs.items() if k in _DIRECT_KEYS
         }
-        remainder = {k: v for k, v in dcfr_kwargs.items() if k not in _DIRECT_KEYS}
+        remainder = {
+            k: v
+            for k, v in dcfr_kwargs.items()
+            if k not in _DIRECT_KEYS and k not in _RUST_ONLY_KEYS
+        }
         return solve_hunl_postflop(
             game.config,
             iterations=iterations,
@@ -210,11 +218,16 @@ def solve(
             "seed",
             "allow_pushfold_range",
         }
+        # PR 90 — Rust-tier-only knobs ride alongside but never reach the
+        # Python `DCFRSolver` kwargs in the preflop branch.
+        _RUST_ONLY_KEYS_PREFLOP = {"regret_init_noise", "rng_seed"}
         direct_kwargs_pf: dict[str, Any] = {
             k: v for k, v in dcfr_kwargs.items() if k in _DIRECT_KEYS_PREFLOP
         }
         remainder_pf = {
-            k: v for k, v in dcfr_kwargs.items() if k not in _DIRECT_KEYS_PREFLOP
+            k: v
+            for k, v in dcfr_kwargs.items()
+            if k not in _DIRECT_KEYS_PREFLOP and k not in _RUST_ONLY_KEYS_PREFLOP
         }
         return solve_hunl_preflop(
             game.config,
@@ -237,6 +250,12 @@ def solve(
         )
 
     solver_kwargs: dict[str, Any] = dict(dcfr_kwargs)
+    # PR 90 — Rust-tier-only flags. The Python reference `DCFRSolver`
+    # has no equivalent, so we drop them here. The CLI invocation prints
+    # nothing about the elision; the docstring on `--regret-init-noise`
+    # documents that the Python tier silently ignores it.
+    solver_kwargs.pop("regret_init_noise", None)
+    solver_kwargs.pop("rng_seed", None)
     if locked_strategies is not None:
         solver_kwargs["locked_strategies"] = locked_strategies
     solver = DCFRSolver(game, **solver_kwargs)
@@ -715,6 +734,10 @@ def _solve_rust(
             tables = resolve_abstraction_ref(game.config.abstraction)
             if tables.source_path is not None:
                 abstraction_path = str(tables.source_path)
+        # PR 90 (A83 Track A) — `regret_init_noise` + `rng_seed` ride
+        # through `dcfr_kwargs` so the Python `solve()` entry point
+        # stays binary-compatible (no new positional args). Defaults
+        # `0.0` + `0` are bit-identical to the pre-PR-90 binding call.
         raw = _rust_solve_hunl(
             config_json,
             abstraction_path,
@@ -725,6 +748,8 @@ def _solve_rust(
             dcfr_kwargs.get("target_exploitability"),
             dcfr_kwargs.get("seed"),
             locked_wire,
+            float(dcfr_kwargs.get("regret_init_noise", 0.0) or 0.0),
+            int(dcfr_kwargs.get("rng_seed", 0) or 0),
         )
         avg = {k: list(v) for k, v in raw["average_strategy"].items()}
         # PR 15 — recompute exploitability + game_value via the Rust port

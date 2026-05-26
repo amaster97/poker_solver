@@ -351,6 +351,11 @@ def _cmd_solve(args: argparse.Namespace) -> int:
     # Rust branch in ``_solve_rust``. The Python postflop path stays the
     # default per locked decision D10.
     result: object
+    # PR 90 (A83 Track A) — read regret-init-noise / rng-seed off args.
+    # Defaults preserve the prior behavior (noise=0.0 is bit-identical to
+    # the un-perturbed all-zero `regret_sum` initialization).
+    regret_init_noise = float(getattr(args, "regret_init_noise", 0.0) or 0.0)
+    rng_seed = int(getattr(args, "rng_seed", 0) or 0)
     try:
         if (
             args.game == "hunl"
@@ -364,6 +369,8 @@ def _cmd_solve(args: argparse.Namespace) -> int:
                 backend="rust",
                 target_exploitability=args.target_exploitability,
                 seed=args.seed,
+                regret_init_noise=regret_init_noise,
+                rng_seed=rng_seed,
             )
         elif args.game == "hunl" and getattr(args, "hunl_mode", "") == "postflop":
             from poker_solver.hunl_solver import solve_hunl_postflop
@@ -377,6 +384,13 @@ def _cmd_solve(args: argparse.Namespace) -> int:
                 log_every=args.log_every,
                 seed=args.seed,
             )
+            # Note: the Python tier's `solve_hunl_postflop` runs the
+            # Python DCFR reference; PR 90's regret-init-noise plumbing
+            # is Rust-tier-only (the A83 Track A nohup runs use
+            # `--backend rust`). The Python path silently ignores the
+            # `--regret-init-noise` flag — matches the existing
+            # convention that the Python tier is the reference, not a
+            # production target.
         else:
             result = solve(game, iterations=args.iterations, backend=args.backend)
     except MemoryError as exc:
@@ -1164,6 +1178,33 @@ def build_parser() -> argparse.ArgumentParser:
             "Path to an abstraction .npz file. When set, HUNL infoset keys "
             "use the bucketed (b<id>|...) form on postflop streets; preflop "
             "is always lossless. Default: None (PR 3 lossless behavior)."
+        ),
+    )
+    sv.add_argument(
+        "--regret-init-noise",
+        type=float,
+        default=0.0,
+        help=(
+            "PR 90 (A83 Track A) — symmetry-breaking magnitude for the "
+            "initial regret_sum at each infoset. Default 0.0 (bit-"
+            "identical to the prior all-zero initialization). Non-zero "
+            "values seed regret_sum[a] with epsilon * U(-1, 1) via a "
+            "deterministic PRNG seeded by --rng-seed. Used to probe Nash "
+            "multiplicity at deep-cap indifference manifolds: two solves "
+            "at epsilon=0 vs epsilon=1e-9 that converge to materially "
+            "different strategies empirically confirm Nash multiplicity. "
+            "See docs/a83_track_a_setup_2026-05-26.md."
+        ),
+    )
+    sv.add_argument(
+        "--rng-seed",
+        type=int,
+        default=0,
+        help=(
+            "Seed for the deterministic PRNG used by --regret-init-noise. "
+            "Same value across runs reproduces the perturbation pattern "
+            "exactly. Ignored when --regret-init-noise is 0.0 (the "
+            "default)."
         ),
     )
     sv.set_defaults(func=_cmd_solve)
