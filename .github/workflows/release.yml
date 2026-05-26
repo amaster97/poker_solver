@@ -1,0 +1,74 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - 'ship/v*'
+
+permissions:
+  contents: write    # for tag + release create
+
+jobs:
+  release:
+    runs-on: macos-14    # Apple Silicon
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract version from branch name
+        id: version
+        run: |
+          BRANCH="${{ github.ref_name }}"
+          VERSION="${BRANCH#ship/}"
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Releasing ${VERSION}"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install maturin
+        run: pip install maturin
+
+      - name: Build Rust extension (universal2)
+        run: |
+          maturin build --release --target universal2-apple-darwin
+          pip install --force-reinstall target/wheels/*.whl
+
+      - name: Build Brown reference binary
+        run: bash scripts/build_noambrown.sh
+
+      - name: Cargo tests
+        run: cargo test --lib --release
+
+      - name: Pytest smoke matrix
+        env:
+          POKER_SOLVER_REQUIRE_BROWN_PARITY: '1'
+        run: |
+          pytest tests/test_exploit_diff.py -v --timeout=120
+          pytest tests/test_v1_5_brown_apples_to_apples.py -v --timeout=1800
+          pytest -m "not slow" --timeout=120
+
+      - name: Create tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          VERSION="${{ steps.version.outputs.version }}"
+          git tag -a "${VERSION}" -m "Release ${VERSION} via CI"
+          git push origin "${VERSION}"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          gh release create "${VERSION}" \
+            --title "${VERSION}" \
+            --notes-file CHANGELOG.md \
+            --target main

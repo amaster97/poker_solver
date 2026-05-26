@@ -1,0 +1,28 @@
+name: Ship Dry Run
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  bundle-dry-run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Test cherry-pick of all open PRs labeled 'ship-bundle'
+        run: |
+          # If this PR has 'ship-bundle' label, test cherry-pick against latest main
+          if gh pr view ${{ github.event.pull_request.number }} --json labels | jq -e '.labels[] | select(.name == "ship-bundle")' > /dev/null; then
+              git checkout main
+              git checkout -b dry-run-test
+              git cherry-pick origin/${{ github.head_ref }} || (echo "CHERRY-PICK CONFLICT"; exit 1)
+              echo "Bundle dry-run: CLEAN"
+          else
+              echo "Not a ship-bundle PR, skipping dry-run"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
