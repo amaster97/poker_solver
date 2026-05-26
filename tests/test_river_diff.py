@@ -358,8 +358,7 @@ def test_river_parity_vs_brown(spot: Any) -> None:
     # Sanity: Brown actually ran the requested iterations.
     if hasattr(brown_dump, "iterations_run"):
         assert brown_dump.iterations_run == iters, (
-            f"{spot.id}: Brown ran {brown_dump.iterations_run} iters, "
-            f"requested {iters}"
+            f"{spot.id}: Brown ran {brown_dump.iterations_run} iters, requested {iters}"
         )
 
     # --- Canonicalize our strategy into Brown's matrix shape ---

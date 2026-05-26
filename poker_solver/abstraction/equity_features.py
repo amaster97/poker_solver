@@ -488,8 +488,7 @@ def canonicalize_for_suit_iso(
     """
     if len(board) not in (3, 4, 5):
         raise ValueError(
-            f"canonicalize_for_suit_iso: board must have 3/4/5 cards; got "
-            f"{len(board)}"
+            f"canonicalize_for_suit_iso: board must have 3/4/5 cards; got {len(board)}"
         )
     if hand[0] == hand[1]:
         raise ValueError(f"hand has duplicate card: {hand}")

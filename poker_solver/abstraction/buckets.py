@@ -134,8 +134,7 @@ def _validate_board_and_hand(
         return
     if len(board) != required:
         raise ValueError(
-            f"board has {len(board)} cards but street {street.name} requires "
-            f"{required}"
+            f"board has {len(board)} cards but street {street.name} requires {required}"
         )
     board_set = set(board)
     if len(board_set) != len(board):

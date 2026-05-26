@@ -121,8 +121,7 @@ def sign_inside_out(bundle_path: Path, identity: str, entitlements: Path) -> Non
     contents = bundle_path / "Contents"
     if not contents.exists():
         raise FileNotFoundError(
-            f"Bundle has no Contents/ directory: {bundle_path} "
-            f"— is this really a .app?"
+            f"Bundle has no Contents/ directory: {bundle_path} — is this really a .app?"
         )
 
     # 1. Sign every dynamic library, inside-out.

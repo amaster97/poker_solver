@@ -198,13 +198,9 @@ class HUNLConfig:
                     f"HUNLConfig.{name}: expected int, got {type(val).__name__}"
                 )
             if val < 0:
-                raise ValueError(
-                    f"HUNLConfig.{name} must be non-negative; got {val}"
-                )
+                raise ValueError(f"HUNLConfig.{name} must be non-negative; got {val}")
             if must_be_positive and val == 0:
-                raise ValueError(
-                    f"HUNLConfig.{name} must be positive; got {val}"
-                )
+                raise ValueError(f"HUNLConfig.{name} must be positive; got {val}")
 
     def _validate_initial_board(self) -> None:
         """`initial_board` must be tuple/list of Card. Coerce list -> tuple."""
@@ -293,8 +289,7 @@ class HUNLConfig:
                 )
             if x <= 0:
                 raise ValueError(
-                    f"HUNLConfig.bet_size_fractions[{i}] must be positive; "
-                    f"got {x}"
+                    f"HUNLConfig.bet_size_fractions[{i}] must be positive; got {x}"
                 )
         if isinstance(fracs, list):
             object.__setattr__(

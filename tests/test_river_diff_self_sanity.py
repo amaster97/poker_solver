@@ -25,16 +25,14 @@ from pathlib import Path
 import pytest
 
 from poker_solver import HUNLConfig, HUNLPoker, Street, solve_hunl_postflop
-from poker_solver.parity.noambrown_wrapper import (
+from poker_solver.parity.noambrown_wrapper import (  # noqa: PLC2701
     RiverSpot,
+    _parse_brown_dump,
     canonicalize_brown_history,
     canonicalize_our_history,
     find_brown_binary,
     load_spots,
     our_strategy_to_brown_matrix,
-)
-from poker_solver.parity.noambrown_wrapper import (  # noqa: PLC2701
-    _parse_brown_dump,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -153,12 +151,12 @@ def test_each_spot_solver_converges(spot: RiverSpot) -> None:
         f"snapshot any exploitability values"
     )
     final_expl = result.exploitability_history[-1]
-    assert math.isfinite(
-        final_expl
-    ), f"{spot.id}: final exploitability is not finite: {final_expl!r}"
-    assert (
-        final_expl >= 0.0
-    ), f"{spot.id}: exploitability must be non-negative, got {final_expl}"
+    assert math.isfinite(final_expl), (
+        f"{spot.id}: final exploitability is not finite: {final_expl!r}"
+    )
+    assert final_expl >= 0.0, (
+        f"{spot.id}: exploitability must be non-negative, got {final_expl}"
+    )
     # exploitability_history is in BB-units (per PR 5 / solver.exploitability).
     # The 0.02 × pot threshold is in chips; convert by dividing pot by big_blind.
     bb_threshold = 0.02 * spot.pot / cfg.big_blind
@@ -185,9 +183,9 @@ def test_each_spot_game_value_is_finite(spot: RiverSpot) -> None:
     )
     # SolveResult.game_value is in BB-units (per PR 5); convert to chips.
     gv_chips = result.game_value * cfg.big_blind
-    assert math.isfinite(
-        gv_chips
-    ), f"{spot.id}: game_value not finite: {result.game_value!r}"
+    assert math.isfinite(gv_chips), (
+        f"{spot.id}: game_value not finite: {result.game_value!r}"
+    )
     assert not math.isnan(gv_chips), f"{spot.id}: game_value is NaN"
     assert -spot.pot <= gv_chips <= spot.pot, (
         f"{spot.id}: game_value {gv_chips:.4f} chips outside [-pot, pot] "
@@ -259,19 +257,19 @@ def test_canonicalize_history_roundtrip() -> None:
     stack=9500/side), so the canonical amounts here are exactly what the
     production diff test would emit on the equivalent token strings.
     """
-    assert (
-        len(ROUNDTRIP_CASES) == 10
-    ), f"spec §10 Agent C #4 mandates 10 cases; have {len(ROUNDTRIP_CASES)}"
+    assert len(ROUNDTRIP_CASES) == 10, (
+        f"spec §10 Agent C #4 mandates 10 cases; have {len(ROUNDTRIP_CASES)}"
+    )
 
     for brown_form, our_form, expected in ROUNDTRIP_CASES:
         brown_canon = canonicalize_brown_history(brown_form)
-        assert (
-            brown_canon == expected
-        ), f"brown {brown_form!r}: got {brown_canon}, expected {expected}"
+        assert brown_canon == expected, (
+            f"brown {brown_form!r}: got {brown_canon}, expected {expected}"
+        )
         our_canon = canonicalize_our_history(our_form)
-        assert (
-            our_canon == expected
-        ), f"our {our_form!r}: got {our_canon}, expected {expected}"
+        assert our_canon == expected, (
+            f"our {our_form!r}: got {our_canon}, expected {expected}"
+        )
         # Cross-engine identity (the actual round-trip invariant).
         assert canonicalize_our_history(our_form) == canonicalize_brown_history(
             brown_form
@@ -353,8 +351,7 @@ def test_strategy_matrix_shape() -> None:
         )
         for player, arr in player_dict.items():
             assert player in (0, 1), (
-                f"{spot.id}: history {history_key!r} unexpected player "
-                f"index {player}"
+                f"{spot.id}: history {history_key!r} unexpected player index {player}"
             )
             num_hands_expected = len(hands_p0) if player == 0 else len(hands_p1)
             assert arr.shape[0] == num_hands_expected, (
@@ -437,9 +434,9 @@ def test_iterations_override_respected() -> None:
     """
     spot = SPOTS[0]
     overridden = replace(spot, iterations_override=OVERRIDE_ITERS)
-    assert (
-        overridden.iterations_override == OVERRIDE_ITERS
-    ), "dataclasses.replace did not apply iterations_override"
+    assert overridden.iterations_override == OVERRIDE_ITERS, (
+        "dataclasses.replace did not apply iterations_override"
+    )
 
     # End-to-end check: feed the override-derived iter count to the solver
     # and verify the SolveResult.iterations field reports back the same N.
@@ -477,22 +474,22 @@ def test_brown_binary_finder_returns_path_or_none() -> None:
     """
     # First invocation: no setup, must not raise.
     binary = find_brown_binary()
-    assert binary is None or isinstance(
-        binary, Path
-    ), f"expected Path or None, got {type(binary).__name__}: {binary!r}"
+    assert binary is None or isinstance(binary, Path), (
+        f"expected Path or None, got {type(binary).__name__}: {binary!r}"
+    )
     if binary is not None:
-        assert (
-            binary.exists()
-        ), f"find_brown_binary returned {binary} but it doesn't exist"
-        assert (
-            binary.is_file()
-        ), f"find_brown_binary returned {binary} but it's not a file"
+        assert binary.exists(), (
+            f"find_brown_binary returned {binary} but it doesn't exist"
+        )
+        assert binary.is_file(), (
+            f"find_brown_binary returned {binary} but it's not a file"
+        )
 
     # Second invocation: idempotent — repeated calls return the same path
     # (or None) without side effects.
     binary2 = find_brown_binary()
     assert binary == binary2, (
-        f"find_brown_binary is not idempotent: first={binary!r}, " f"second={binary2!r}"
+        f"find_brown_binary is not idempotent: first={binary!r}, second={binary2!r}"
     )
 
 

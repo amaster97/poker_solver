@@ -290,10 +290,7 @@ def _build_street(
 
     # Stage 1c: compute features via Agent A.
     if progress:
-        print(
-            f"[{street.name}] computing equity features "
-            f"({len(flat_hands)} hands)..."
-        )
+        print(f"[{street.name}] computing equity features ({len(flat_hands)} hands)...")
     feature_ckpt = (
         checkpoint_dir / f"features_{street.name.lower()}.npy"
         if checkpoint_dir is not None

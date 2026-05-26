@@ -292,8 +292,7 @@ def _render_stub_rows(container: Any) -> None:
     with container:
         for idx, (title, meta) in enumerate(_STUB_ROWS):
             row = ui.row().classes(
-                "w-full items-center cursor-pointer "
-                "hover:bg-grey-2 rounded px-2 py-1"
+                "w-full items-center cursor-pointer hover:bg-grey-2 rounded px-2 py-1"
             )
             row.mark(f"library-stub-row-{idx}")
             with row:

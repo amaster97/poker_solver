@@ -324,13 +324,13 @@ def test_hunl_rust_strategy_sums_to_one() -> None:
         # Sum ~ 1.0
         assert abs(sum(probs) - 1.0) < 1e-9, f"{key}: probs={probs} sum={sum(probs)}"
         # Range
-        assert all(
-            0.0 <= p <= 1.0 for p in probs
-        ), f"{key}: probs out of [0,1] range: {probs}"
+        assert all(0.0 <= p <= 1.0 for p in probs), (
+            f"{key}: probs out of [0,1] range: {probs}"
+        )
         # Finite
-        assert not any(
-            math.isnan(p) or math.isinf(p) for p in probs
-        ), f"{key}: probs contain NaN or inf: {probs}"
+        assert not any(math.isnan(p) or math.isinf(p) for p in probs), (
+            f"{key}: probs contain NaN or inf: {probs}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -349,9 +349,9 @@ def test_hunl_rust_deterministic_with_seed() -> None:
     game = HUNLPoker(config)
     r1 = solve(game, iterations=100, backend="rust", seed=42, **DCFR_KWARGS)
     r2 = solve(game, iterations=100, backend="rust", seed=42, **DCFR_KWARGS)
-    assert (
-        r1.average_strategy.keys() == r2.average_strategy.keys()
-    ), "Rust strategy keys not deterministic"
+    assert r1.average_strategy.keys() == r2.average_strategy.keys(), (
+        "Rust strategy keys not deterministic"
+    )
     for key in r1.average_strategy:
         a = r1.average_strategy[key]
         b = r2.average_strategy[key]
@@ -389,9 +389,9 @@ def test_hunl_rust_exploitability_matches_python_recompute() -> None:
         seed=42,
         **DCFR_KWARGS,
     )
-    assert (
-        rs.exploitability_history
-    ), "Rust path should populate exploitability_history (Python recompute)"
+    assert rs.exploitability_history, (
+        "Rust path should populate exploitability_history (Python recompute)"
+    )
     rs_exp = rs.exploitability_history[-1]
     py_exp = py.exploitability_history[-1]
     assert rs_exp >= 0.0, f"exploitability must be non-negative, got {rs_exp}"

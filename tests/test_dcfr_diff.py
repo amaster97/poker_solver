@@ -72,18 +72,18 @@ def test_kuhn_python_rust_strategy_agreement(both_results):
 
 def test_kuhn_python_rust_game_value_agreement(both_results):
     py, rs = both_results
-    assert py.game_value == pytest.approx(
-        rs.game_value, abs=VALUE_ATOL
-    ), f"Game value diverges: python={py.game_value!r} rust={rs.game_value!r}"
+    assert py.game_value == pytest.approx(rs.game_value, abs=VALUE_ATOL), (
+        f"Game value diverges: python={py.game_value!r} rust={rs.game_value!r}"
+    )
 
 
 def test_kuhn_python_rust_exploitability_agreement(both_results):
     py, rs = both_results
     py_exp = py.exploitability_history[-1]
     rs_exp = rs.exploitability_history[-1]
-    assert py_exp == pytest.approx(
-        rs_exp, abs=EXPLOIT_ATOL
-    ), f"Final exploitability diverges: python={py_exp!r} rust={rs_exp!r}"
+    assert py_exp == pytest.approx(rs_exp, abs=EXPLOIT_ATOL), (
+        f"Final exploitability diverges: python={py_exp!r} rust={rs_exp!r}"
+    )
 
 
 def test_kuhn_both_backends_reach_nash(both_results):

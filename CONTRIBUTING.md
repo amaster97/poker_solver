@@ -24,7 +24,7 @@ module via `maturin`.
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
 source "$HOME/.cargo/env"
 
-# Build and install with dev tooling (pytest, ruff, black, mypy, maturin):
+# Build and install with dev tooling (pytest, ruff, mypy, maturin):
 pip install -e ".[dev]"
 ```
 
@@ -94,9 +94,11 @@ contaminate.
 
 ## Style
 
-- **Python:** `ruff check` clean, `black --check` clean, `mypy
+- **Python:** `ruff check` clean, `ruff format --check` clean, `mypy
   poker_solver` strict-clean on new code. The check battery enforces
-  all three.
+  all three. (PR 79 replaced `black --check` with `ruff format --check`
+  — single formatter; ruff and black diverge on edge cases at
+  line-length=88.)
 - **Rust:** `cargo clippy --all-targets -- -D warnings` clean. Zero
   warnings.
 - **Reference-first rule:** every non-obvious technical claim in code

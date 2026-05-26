@@ -315,7 +315,7 @@ def build_equity_matrix(
                 equity[i, j] = sum(samples) / len(samples)
     if verbose:
         print(
-            f"  equity matrix complete in {time.time()-start:.1f}s",
+            f"  equity matrix complete in {time.time() - start:.1f}s",
             flush=True,
         )
     return equity
@@ -776,7 +776,7 @@ def main(argv: list[str] | None = None) -> int:
         print("\nNo deviations > 2% vs Sklansky-Chubukov anchors.")
 
     total_runtime = t_equity + t_compat + sum(runtime_by_depth.values())
-    print(f"\nTotal runtime: {total_runtime:.1f}s ({total_runtime/60:.1f} min)")
+    print(f"\nTotal runtime: {total_runtime:.1f}s ({total_runtime / 60:.1f} min)")
     return 0
 
 

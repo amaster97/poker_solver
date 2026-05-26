@@ -37,7 +37,6 @@ from poker_solver import (
     solve_range_vs_range_nash,
 )
 
-
 # ---------------------------------------------------------------------------
 # Skip when the Rust vector-form binding is missing
 # ---------------------------------------------------------------------------
@@ -75,9 +74,7 @@ def _w3_5_config() -> HUNLConfig:
         big_blind=100,
         ante=0,
         starting_street=Street.RIVER,
-        initial_board=tuple(
-            Card.from_str(c) for c in ("Ts", "8s", "6s", "4c", "2d")
-        ),
+        initial_board=tuple(Card.from_str(c) for c in ("Ts", "8s", "6s", "4c", "2d")),
         initial_pot=1000,
         initial_contributions=(500, 500),
         initial_hole_cards=(),
@@ -95,9 +92,7 @@ def _dry_river_config() -> HUNLConfig:
         big_blind=100,
         ante=0,
         starting_street=Street.RIVER,
-        initial_board=tuple(
-            Card.from_str(c) for c in ("As", "7c", "2d", "Kh", "5s")
-        ),
+        initial_board=tuple(Card.from_str(c) for c in ("As", "7c", "2d", "Kh", "5s")),
         initial_pot=1000,
         initial_contributions=(500, 500),
         initial_hole_cards=(),
@@ -137,13 +132,9 @@ def test_smoke_2x2_routes_to_rust_vector() -> None:
     assert len(result.per_history_strategy) > 0
     # Per-history rows are valid probability distributions.
     for key, probs in result.per_history_strategy.items():
-        assert all(p >= 0.0 for p in probs), (
-            f"negative prob in row {key!r}: {probs}"
-        )
+        assert all(p >= 0.0 for p in probs), f"negative prob in row {key!r}: {probs}"
         total = sum(probs)
-        assert abs(total - 1.0) < 1e-6, (
-            f"row {key!r} does not sum to 1.0 (got {total})"
-        )
+        assert abs(total - 1.0) < 1e-6, f"row {key!r} does not sum to 1.0 (got {total})"
 
 
 def test_nash_result_schema_position_aggressor_vs_defender() -> None:
@@ -285,13 +276,10 @@ def test_diverges_from_aggregator_on_same_inputs() -> None:
 
     # Range-aggregate divergence ≥ 5 percentage points on at least one
     # action label that both paths report.
-    common_labels = set(nash.range_aggregate.keys()) & set(
-        agg.range_aggregate.keys()
-    )
+    common_labels = set(nash.range_aggregate.keys()) & set(agg.range_aggregate.keys())
     assert common_labels, "no shared action labels between the two paths"
     max_diff = max(
-        abs(nash.range_aggregate[k] - agg.range_aggregate[k])
-        for k in common_labels
+        abs(nash.range_aggregate[k] - agg.range_aggregate[k]) for k in common_labels
     )
     assert max_diff >= 0.05, (
         f"vector-form Nash and aggregator agree within {max_diff:.4f} on "
@@ -357,7 +345,7 @@ def test_empty_range_raises() -> None:
 
 def test_all_combos_board_blocked_raises() -> None:
     """When every combo in a range is blocked by the board → ValueError."""
-    cfg = _dry_river_config()  # board contains As, Kh
+    _ = _dry_river_config()  # board contains As, Kh (sanity-build; unused)
     # Hero range is only AA (blocked because As is on the board → 3 combos
     # remain, which is non-empty). Use a class whose combos are ALL blocked
     # by the board: build a board with all four kings and ask for KK.
@@ -367,9 +355,7 @@ def test_all_combos_board_blocked_raises() -> None:
         big_blind=100,
         ante=0,
         starting_street=Street.RIVER,
-        initial_board=tuple(
-            Card.from_str(c) for c in ("Ks", "Kh", "Kd", "Kc", "2d")
-        ),
+        initial_board=tuple(Card.from_str(c) for c in ("Ks", "Kh", "Kd", "Kc", "2d")),
         initial_pot=1000,
         initial_contributions=(500, 500),
         initial_hole_cards=(),

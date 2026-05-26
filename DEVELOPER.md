@@ -212,7 +212,7 @@ developer-facing summary:
   branch named `pr-N-<short-title>`. Never commit to `main`.
 - **Check battery.** Run [`sh scripts/check_pr.sh`](scripts/check_pr.sh)
   before opening the PR. It runs the full pytest suite, `cargo test`,
-  `ruff check` + `black --check`, `mypy poker_solver` (strict),
+  `ruff check` + `ruff format --check`, `mypy poker_solver` (strict),
   `cargo clippy --all-targets -- -D warnings`, all diff tests, license
   / dependency audit (catches AGPL strings in build files), a perf
   gate, and references integrity. It writes
@@ -260,8 +260,9 @@ contamination is permanent.
 
 ## 9. Conventions
 
-- **Python:** `ruff check` clean, `black --check` clean, `mypy
-  poker_solver` strict-clean on new code.
+- **Python:** `ruff check` clean, `ruff format --check` clean, `mypy
+  poker_solver` strict-clean on new code. (PR 79 replaced `black
+  --check` with `ruff format --check`; see CONTRIBUTING.)
 - **Rust:** `cargo clippy --all-targets -- -D warnings` clean (zero
   warnings).
 - **No floating-point chip math** anywhere in

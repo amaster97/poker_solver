@@ -788,8 +788,8 @@ pub fn discount_regrets(regrets: &mut [f64], pos_scale: f64, neg_scale: f64) {
 /// Strategy-sum discount — public dispatch.
 ///
 /// Dispatch order matches [`discount_regrets`]: NEON (aarch64, compile-time)
-/// > AVX2 (x86_64, runtime-detected via `is_x86_feature_detected!`) > SSE2
-/// (x86_64 baseline) > scalar.
+/// \> AVX2 (x86_64, runtime-detected via `is_x86_feature_detected!`) \> SSE2
+/// (x86_64 baseline) \> scalar.
 #[inline]
 pub fn discount_strategy_sum(strategy: &mut [f64], strat_scale: f64) {
     #[cfg(all(target_arch = "aarch64", not(feature = "force_scalar")))]
