@@ -911,22 +911,32 @@ def solve_range_vs_range_nash(
     See ``docs/aggregator_vs_true_nash_explainer.md`` for the long-form
     distinction.
 
-    .. warning::
-        **River wall time is multi-hour.** The vector-form solver walks the
-        full 1326-collapsed-by-board hand pair grid each iteration, so cost
-        scales O(hand_count² × decision_nodes). On a river fixture the
-        measured per-iteration cost is ~26 s; the default 500-iter run is
-        ~3.5 h wall time, and even a 200-iter run is ~86 min (1 CPU at 100%).
-        This O(N²) shape matches Brown's MIT reference implementation and is
-        mathematically intrinsic to strict-Nash vector CFR.
+    .. note::
+        **River is now interactively usable** (post-PR-114, currently held
+        for review). The vector-form solver walks the full
+        1326-collapsed-by-board hand pair grid each iteration, with cost
+        scaling O(hand_count² × decision_nodes). PR #114 added a
+        ``TerminalCache`` (precomputed per-player ``Strength`` vectors at
+        each Showdown leaf + constant chip-flow payoffs at each Fold leaf,
+        amortized once per solve) which cut the dominant ``evaluate_7``
+        cost on a constant board. On the same river fixture, measured
+        per-iteration cost dropped from ~28.62 s to ~0.134 s (~213×
+        speedup); a 200-iter run is now ~27 s and the 500-iter default is
+        ~67 s wall time (1 CPU at 100%). ``TerminalCache`` is enabled by
+        default; set ``CFR_VECTOR_NO_TERMINAL_CACHE=1`` to route through
+        the uncached path for parity comparisons.
 
-        **For interactive use,** prefer :func:`solve_range_vs_range`
-        (the Pluribus-blueprint aggregator), which trades strict-Nash
-        bluff-catching for ~10-100× faster wall time on river boards.
-        Reserve :func:`solve_range_vs_range_nash` for offline parity runs,
-        bluff-catching research questions, and other batch workflows where
-        wall time is acceptable. See PR #105 (HIGH-2) for the perf-wall
-        analysis and routing recommendation.
+        **Flop and turn may still be slow.** The cache helps river the
+        most because the board is constant; flop has more chance-tree
+        branching, so per-iter cost is not yet measured at the same
+        precision and the O(N²) hand-pair shape still dominates.
+
+        **For one-shot 13×13 lookups,** :func:`solve_range_vs_range` (the
+        Pluribus-blueprint aggregator) is still faster — the gap is now
+        roughly 5–20× rather than the pre-cache 10–100× — but true Nash
+        via :func:`solve_range_vs_range_nash` is now usable for
+        interactive workflows on river. See PR #105 (HIGH-2 framing) and
+        PR #114 (``TerminalCache`` optimization) for the analysis.
 
     Args:
         config_template: ``HUNLConfig`` with ``starting_street >= FLOP``.

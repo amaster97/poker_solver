@@ -425,23 +425,33 @@ fn compute_exploitability(
 /// rewired to this entrypoint in v1.5.0 — the binding stands alone for
 /// downstream code (and v1.5.1) to wire in.
 ///
-/// # Performance warning (v1.8.2, HIGH-2 per PR #105)
+/// # Performance note (post-PR-114, currently held for review)
 ///
 /// This entrypoint walks the full 1326-collapsed-by-board hand pair grid
-/// each iteration; cost scales O(hand_count² × decision_nodes). On a river
-/// fixture the measured per-iteration cost is ~26 s, so a 200-iter run is
-/// ~86 min and the 500-iter default is multi-hour (1 CPU at 100%). The
-/// O(N²) shape matches Brown's MIT reference implementation and is
-/// mathematically intrinsic to strict-Nash vector CFR — NEON SIMD is
-/// already engaged on the hot kernels (`crates/cfr_core/src/simd.rs`).
+/// each iteration; cost scales O(hand_count² × decision_nodes). PR #114
+/// added a `TerminalCache` that precomputes per-player `Strength` vectors
+/// at each Showdown leaf and constant chip-flow payoffs at each Fold leaf
+/// (amortized once per solve), cutting the dominant `evaluate_7` cost on a
+/// constant board. On the same river fixture used for the original HIGH-2
+/// framing, measured per-iteration cost dropped from ~28.62 s to ~0.134 s
+/// (~213× speedup); a 200-iter run is now ~27 s and the 500-iter default
+/// is ~67 s wall time (1 CPU at 100%). `TerminalCache` is enabled by
+/// default; set `CFR_VECTOR_NO_TERMINAL_CACHE=1` to route through the
+/// uncached path for parity comparisons.
 ///
-/// **For interactive use,** prefer the Python `solve_range_vs_range`
-/// aggregator (Pluribus-blueprint) which trades strict-Nash bluff-catching
-/// for ~10-100× faster wall time on river boards. Reserve this binding for
-/// offline parity runs, bluff-catching research, and other batch workflows
-/// where wall time is acceptable. Direct `_rust` callers must class-trim
-/// before invoking (the GUI, CLI, and `solve_range_vs_range_nash` wrapper
-/// all already do this).
+/// **Flop and turn may still be slow.** The cache helps river the most
+/// because the board is constant; flop has more chance-tree branching,
+/// so the O(N²) hand-pair shape still dominates and per-iter cost is not
+/// yet measured at the same precision.
+///
+/// **For one-shot 13×13 lookups,** the Python `solve_range_vs_range`
+/// aggregator (Pluribus-blueprint) is still faster — the gap is now
+/// roughly 5–20× rather than the pre-cache 10–100× — but true Nash via
+/// this binding is now usable for interactive workflows on river. Direct
+/// `_rust` callers must class-trim before invoking (the GUI, CLI, and
+/// `solve_range_vs_range_nash` wrapper all already do this). See PR #105
+/// (HIGH-2 framing) and PR #114 (`TerminalCache` optimization) for
+/// analysis.
 #[pyfunction]
 #[pyo3(signature = (
     config_json,
