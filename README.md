@@ -11,13 +11,11 @@ locking. Goalpost: PioSolver-class HU local solving on a MacBook.
 
 ## Status
 
-- **Latest tagged release:** v1.7.0 (aggregator→vector wiring + CLI
-  subcommands — PR 43 + PR 44). The v1.0 → v1.7.0 trajectory is
-  documented in [`CHANGELOG.md`](CHANGELOG.md). **Next release:
-  v1.8.0** (cross-platform SIMD + .dmg fork-bomb fix + v1.6.1 engine
-  bundle + v1.7.2 CI hardening, all merged on `main`; tag pending).
-  v1.6.1 engine bundle has shipped piecewise on `origin/main` and is
-  folded into v1.8.0 (see
+- **Latest tagged release:** v1.8.0 (cross-platform SIMD + .dmg
+  fork-bomb fix + v1.6.1 engine bundle + v1.7.2 CI hardening). The
+  v1.0 → v1.8.0 trajectory is documented in
+  [`CHANGELOG.md`](CHANGELOG.md). v1.6.1 engine bundle shipped
+  piecewise on `origin/main` and is folded into v1.8.0 (see
   [`docs/v1_7_1_tag_decision_2026-05-26.md`](docs/v1_7_1_tag_decision_2026-05-26.md)
   for the tag-strategy decision).
 - **License:** MIT.
@@ -107,14 +105,23 @@ form (not a Quick-start; budget time accordingly):
 
 ```bash
 # Postflop ad-hoc subgame — expect minutes on a flop, even with --iterations 500.
-# For fast exploration of the API, use --hunl-mode tiny_subgame above.
+# Python backend only: --backend rust requires fixed hole cards; for
+# range-vs-range Nash on a postflop board use solve_range_vs_range_nash
+# (see Python API + USAGE §5.6). For fast exploration use --hunl-mode
+# tiny_subgame above.
 poker-solver solve --game hunl --hunl-mode postflop \
     --board "As 7c 2d" --stacks 100 --bet-sizes "33,75,150" \
-    --iterations 500 --backend rust
+    --iterations 500 --backend python
 ```
 
-Short-stack push/fold is invoked through the library (no dedicated CLI
-subcommand — see Known issues):
+Short-stack push/fold has both a CLI subcommand (v1.7.0+) and a library
+entry point:
+
+```bash
+# CLI: single cell or full 169-class chart
+poker-solver pushfold --stack 10 --position sb_jam --hand AKs
+poker-solver pushfold --stack 8 --position bb_call_vs_jam --full-range --json
+```
 
 ```python
 from poker_solver import get_pushfold_strategy, get_full_range
@@ -142,14 +149,24 @@ from poker_solver import (
 # Node locking — pin a strategy at one or more infosets. Requires a
 # postflop config (preflop full-tree is still NotImplementedError above
 # 15 BB; see Known issues). Replace "<infoset_key>" with a real key
-# discovered via `result.strategy.keys()`; unmatched keys are silently
-# ignored. See USAGE.md §5.3 and tests/test_node_locking.py for the
-# canonical key format.
+# discovered via `result.average_strategy.keys()`; unmatched keys are
+# silently ignored. See USAGE.md §5.3 and tests/test_node_locking.py for
+# the canonical key format.
+#
+# `initial_hole_cards=()` (full-range chance enum) is NOT practical for
+# interactive use — the post-solve exploitability walk runs for minutes.
+# Pin hero + villain combos for a fast worked example (sub-second on
+# Rust). For range-vs-range node-locking, build per-hand fixed-card
+# configs and aggregate (see §5.2 in USAGE.md).
 board = tuple(Card.from_str(c) for c in ("As", "7c", "2d", "Kh", "5s"))
 cfg = HUNLConfig(
     starting_stack=10_000, starting_street=Street.RIVER,
     initial_board=board, initial_pot=1_000,
     initial_contributions=(500, 500),
+    initial_hole_cards=(
+        (Card.from_str("Ah"), Card.from_str("Kc")),
+        (Card.from_str("Qd"), Card.from_str("Qh")),
+    ),
 )
 locked = {"<infoset_key>": [1.0, 0.0, 0.0, 0.0]}  # 100% fold at that node
 r = solve_hunl_postflop(cfg, iterations=500, locked_strategies=locked)
