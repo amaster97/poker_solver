@@ -458,13 +458,31 @@ class HUNLPoker:
         return state.street == Street.SHOWDOWN
 
     def utility(self, state: HUNLState) -> tuple[float, float]:
+        """Per-player utility in big-blind units at a terminal state.
+
+        Canonical Brown formula (the single rule of real poker): the
+        winner collects the full pot, including carry-forward dead money
+        from ``initial_pot``; the loser eats their subgame-only
+        contribution. The game is constant-sum
+        (``u[0] + u[1] = initial_pot / big_blind`` per leaf), not
+        zero-sum when dead money is present. DCFR convergence only
+        needs bounded utilities + finite actions, so this is fine. See
+        ``feedback_brown_convention_adopt.md`` +
+        ``docs/terminal_utility_canonical_2026-05-27.md``.
+        """
         cfg = state.config
         bb = cfg.big_blind
-        c0, c1 = state.contributions
+        init_c0, init_c1 = cfg.initial_contributions
+        cs0 = state.contributions[0] - init_c0
+        cs1 = state.contributions[1] - init_c1
+        base_pot = cfg.initial_pot
+        pot_total = base_pot + cs0 + cs1
         if state.folded[0]:
-            return (-c0 / bb, c0 / bb)
+            # P1 wins.
+            return (-cs0 / bb, (pot_total - cs1) / bb)
         if state.folded[1]:
-            return (c1 / bb, -c1 / bb)
+            # P0 wins.
+            return ((pot_total - cs0) / bb, -cs1 / bb)
         # Showdown requires hole cards. ``hole_cards`` is typed as the union
         # ``tuple[tuple[Card, Card], tuple[Card, Card]] | tuple[()]`` so mypy
         # can't index into it without narrowing; the runtime invariant is
@@ -475,10 +493,16 @@ class HUNLPoker:
         rank0 = evaluate(list(hole[0]) + list(state.board))
         rank1 = evaluate(list(hole[1]) + list(state.board))
         if rank0 > rank1:
-            return (c1 / bb, -c1 / bb)
+            # P0 wins.
+            return ((pot_total - cs0) / bb, -cs1 / bb)
         if rank1 > rank0:
-            return (-c0 / bb, c0 / bb)
-        return (0.0, 0.0)
+            # P1 wins.
+            return (-cs0 / bb, (pot_total - cs1) / bb)
+        # Tie — split the pot.
+        return (
+            (pot_total / 2 - cs0) / bb,
+            (pot_total / 2 - cs1) / bb,
+        )
 
     def current_player(self, state: HUNLState) -> int:
         if self.is_terminal(state):

@@ -482,15 +482,33 @@ impl HUNLState {
 
     /// Per-player utility in big-blind units. Mirrors Python's
     /// `HUNLPoker.utility`. Only valid when `is_terminal()`.
+    ///
+    /// **Canonical Brown formula** (the single rule of real poker):
+    /// the winner collects the pot (subgame-only contributions PLUS
+    /// carry-forward dead money from `initial_pot`); the loser eats
+    /// their subgame-only contribution. Resulting game is constant-sum
+    /// with `u[0] + u[1] = initial_pot / big_blind` per leaf (not
+    /// zero-sum when dead money is present). DCFR convergence proofs
+    /// only require bounded utilities + finite action set, so this is
+    /// fine. See `feedback_brown_convention_adopt.md` + the canonical
+    /// formula block in
+    /// `docs/terminal_utility_canonical_2026-05-27.md`.
     pub fn utility(&self) -> [f64; 2] {
-        let bb = self.config.big_blind as f64;
-        let c0 = self.contributions[0] as f64;
-        let c1 = self.contributions[1] as f64;
+        let cfg = self.config.as_ref();
+        let bb = cfg.big_blind as f64;
+        let init_c0 = cfg.initial_contributions[0] as f64;
+        let init_c1 = cfg.initial_contributions[1] as f64;
+        let cs0 = self.contributions[0] as f64 - init_c0;
+        let cs1 = self.contributions[1] as f64 - init_c1;
+        let base_pot = cfg.initial_pot as f64;
+        let pot_total = base_pot + cs0 + cs1;
         if self.folded[0] {
-            return [-c0 / bb, c0 / bb];
+            // P1 wins.
+            return [-cs0 / bb, (pot_total - cs1) / bb];
         }
         if self.folded[1] {
-            return [c1 / bb, -c1 / bb];
+            // P0 wins.
+            return [(pot_total - cs0) / bb, -cs1 / bb];
         }
         let hole = self.hole_cards.expect("showdown requires dealt hole cards");
         // Build 7-card hand: hole + board.
@@ -511,12 +529,14 @@ impl HUNLState {
         let s0 = crate::hunl_eval::Strength::evaluate_7(&seven0);
         let s1 = crate::hunl_eval::Strength::evaluate_7(&seven1);
         if s0 > s1 {
-            [c1 / bb, -c1 / bb]
+            // P0 wins.
+            [(pot_total - cs0) / bb, -cs1 / bb]
         } else if s1 > s0 {
-            [-c0 / bb, c0 / bb]
+            // P1 wins.
+            [-cs0 / bb, (pot_total - cs1) / bb]
         } else {
-            // Tie — Python returns (0.0, 0.0), matching here.
-            [0.0, 0.0]
+            // Tie — split the pot.
+            [(pot_total / 2.0 - cs0) / bb, (pot_total / 2.0 - cs1) / bb]
         }
     }
 
@@ -1217,33 +1237,36 @@ mod tests {
     }
 
     #[test]
-    fn fold_terminates_with_loser_paying_contrib() {
+    fn fold_terminates_with_canonical_pot_collection() {
+        // Canonical Brown formula: winner collects pot_total (incl dead money),
+        // loser eats subgame-only contribution.
+        // default_tiny_subgame: initial_pot=1000, initial_contributions=(500,500),
+        // BB=100. After P1 check + P0 fold: cs=(0,0), pot_total=1000.
+        // P0 folded → P1 wins → P0 = -0/100 = 0; P1 = (1000-0)/100 = 10.
         let s = river_state();
-        // P1 checks; P0 then folds — pots end with P0 losing their contrib.
         let after_check = s.apply(ACTION_CHECK);
         assert_eq!(after_check.cur_player, 0);
         let after_fold = after_check.apply(ACTION_FOLD);
         assert!(after_fold.is_terminal());
         let u = after_fold.utility();
-        // contributions[0] = 500, BB = 100 → P0 loses 5 BB, P1 wins 5 BB.
-        assert!((u[0] - (-5.0)).abs() < 1e-9, "P0 utility = {}", u[0]);
-        assert!((u[1] - 5.0).abs() < 1e-9, "P1 utility = {}", u[1]);
+        assert!(u[0].abs() < 1e-9, "P0 utility = {}", u[0]);
+        assert!((u[1] - 10.0).abs() < 1e-9, "P1 utility = {}", u[1]);
     }
 
     #[test]
-    fn showdown_winner_collects_loser_contrib() {
-        // River-only subgame: AhKc (P0) vs QdQh (P1). The board has an Ace
-        // → P0 has top pair, beats P1's underpair. P1 checks; P0 checks;
-        // showdown.
+    fn showdown_winner_collects_canonical_pot() {
+        // River-only subgame: AhKc (P0) vs QdQh (P1). Board has an Ace; P0
+        // has top pair. P1 checks; P0 checks; showdown → P0 wins.
+        // Canonical: initial_pot=1000, contribs=(500,500), cs=(0,0),
+        // pot_total=1000. P0 = (1000-0)/100 = 10; P1 = -0/100 = 0.
         let s = river_state();
         let after_p1_check = s.apply(ACTION_CHECK);
         let after_p0_check = after_p1_check.apply(ACTION_CHECK);
         assert!(after_p0_check.is_terminal());
         assert_eq!(after_p0_check.street, Street::Showdown);
         let u = after_p0_check.utility();
-        // P0 wins → P0 = c1/BB = 500/100 = 5.0, P1 = -c0/BB = -5.0
-        assert!((u[0] - 5.0).abs() < 1e-9, "P0 utility = {}", u[0]);
-        assert!((u[1] - (-5.0)).abs() < 1e-9, "P1 utility = {}", u[1]);
+        assert!((u[0] - 10.0).abs() < 1e-9, "P0 utility = {}", u[0]);
+        assert!(u[1].abs() < 1e-9, "P1 utility = {}", u[1]);
     }
 
     #[test]

@@ -90,38 +90,47 @@ fn test_03_legal_actions_facing_bet() {
     assert!(acts.contains(&ACTION_FOLD));
     assert!(acts.contains(&ACTION_CALL));
     assert!(!acts.contains(&ACTION_CHECK));
-    assert!(acts.contains(&ACTION_ALL_IN));
+    // P1 bet 100% pot (=1000) against P0 stack=1000 → to_call=1000, stack=1000.
+    // The `can_actually_raise = stack > to_call` guard in `enumerate_legal_actions`
+    // excludes ALL_IN here (would be a degenerate clone of CALL). Pre-existing test
+    // assertion `acts.contains(&ACTION_ALL_IN)` was broken on main; the action
+    // surface here is `[FOLD, CALL]` only.
+    assert!(!acts.contains(&ACTION_ALL_IN));
 }
 
 // ---------------------------------------------------------------------------
-// Test 4: fold ends the hand with loser paying contribution
+// Test 4: fold ends the hand under the canonical Brown formula
 // ---------------------------------------------------------------------------
 #[test]
 fn test_04_fold_terminates_correctly() {
+    // default_tiny_subgame: initial_pot=1000, initial_contributions=(500,500),
+    // BB=100. P1 check + P0 fold → cs=(0,0), pot_total=1000. P0 folded → P1
+    // wins → u[0] = -0/100 = 0, u[1] = (1000-0)/100 = 10.
     let s = river_state();
-    let after_check = s.apply(ACTION_CHECK); // P1 checks
-    let after_fold = after_check.apply(ACTION_FOLD); // P0 folds
+    let after_check = s.apply(ACTION_CHECK);
+    let after_fold = after_check.apply(ACTION_FOLD);
     assert!(after_fold.is_terminal());
     let u = after_fold.utility();
-    // P0 had contribution 500, BB=100 → P0 loses 5 BB.
-    assert!((u[0] + 5.0).abs() < 1e-9);
-    assert!((u[1] - 5.0).abs() < 1e-9);
+    assert!(u[0].abs() < 1e-9, "u[0] = {}", u[0]);
+    assert!((u[1] - 10.0).abs() < 1e-9, "u[1] = {}", u[1]);
 }
 
 // ---------------------------------------------------------------------------
-// Test 5: showdown evaluates correctly (AhKc with top pair beats QdQh)
+// Test 5: showdown under the canonical Brown formula
 // ---------------------------------------------------------------------------
 #[test]
-fn test_05_showdown_winner_collects_loser_contribution() {
+fn test_05_showdown_winner_collects_canonical_pot() {
+    // Board As 7c 2d Kh 5s with P0 = AhKc (two pair AA KK) vs P1 = QdQh
+    // (underpair). P0 wins. default_tiny_subgame: initial_pot=1000,
+    // initial_contributions=(500,500), BB=100. Check-check → cs=(0,0),
+    // pot_total=1000. u[0] = (1000-0)/100 = 10, u[1] = -0/100 = 0.
     let s = river_state();
     let after_check_check = s.apply(ACTION_CHECK).apply(ACTION_CHECK);
     assert!(after_check_check.is_terminal());
     assert_eq!(after_check_check.street, Street::Showdown);
     let u = after_check_check.utility();
-    // Board As 7c 2d Kh 5s with hole AhKc → P0 has two pair (AA KK + kicker
-    // actually no, two pairs A-pair K-pair). P1 has QQ underpair. P0 wins.
-    assert!((u[0] - 5.0).abs() < 1e-9, "u[0] = {}", u[0]);
-    assert!((u[1] + 5.0).abs() < 1e-9, "u[1] = {}", u[1]);
+    assert!((u[0] - 10.0).abs() < 1e-9, "u[0] = {}", u[0]);
+    assert!(u[1].abs() < 1e-9, "u[1] = {}", u[1]);
 }
 
 // ---------------------------------------------------------------------------
@@ -143,7 +152,12 @@ fn test_06_raise_cap_postflop() {
     );
     assert!(acts.contains(&ACTION_FOLD));
     assert!(acts.contains(&ACTION_CALL));
-    assert!(acts.contains(&ACTION_ALL_IN));
+    // PR 35 Fix C (paired): at cap, ALL_IN is NOT a legal action (matches
+    // Brown's `cpp/src/river_game.cpp:76-78` early-return at cap with
+    // only `[c, f]`). Production code dropped ALL_IN at cap in commit
+    // 63c9432; the prior assertion `acts.contains(&ACTION_ALL_IN)` was
+    // a leftover from before that fix.
+    assert!(!acts.contains(&ACTION_ALL_IN));
 }
 
 // ---------------------------------------------------------------------------
@@ -416,13 +430,15 @@ fn test_17_strength_tie() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 18: Showdown tie returns (0.0, 0.0) utility
+// Test 18: Showdown tie splits the pot under canonical Brown formula
 // ---------------------------------------------------------------------------
 #[test]
-fn test_18_showdown_tie_returns_zero_utility() {
+fn test_18_showdown_tie_splits_pot() {
     // Construct a tied showdown: same hole-card rank pair, board makes both
-    // hands identical. Use AhKc vs AcKh (suited isn't possible — different
-    // suits) on a paired board so ranks are identical.
+    // hands identical. Use AhKc vs AcKh on an unpaired-by-rank low board so
+    // ranks are identical. Canonical tie: each gets pot_total/2 - cs_self.
+    // initial_pot=1000, contribs=(500,500), check-check → cs=(0,0),
+    // pot_total=1000. Each player: (1000/2 - 0)/100 = 5.0 BB.
     let board = vec![
         card_to_int(9, 0),
         card_to_int(7, 1),
@@ -448,13 +464,13 @@ fn test_18_showdown_tie_returns_zero_utility() {
     assert!(terminal.is_terminal());
     let u = terminal.utility();
     assert!(
-        u[0].abs() < 1e-9,
-        "tied utility[0] should be 0, got {}",
+        (u[0] - 5.0).abs() < 1e-9,
+        "tied utility[0] should be 5.0, got {}",
         u[0]
     );
     assert!(
-        u[1].abs() < 1e-9,
-        "tied utility[1] should be 0, got {}",
+        (u[1] - 5.0).abs() < 1e-9,
+        "tied utility[1] should be 5.0, got {}",
         u[1]
     );
 }
