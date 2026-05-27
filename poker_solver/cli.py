@@ -12,6 +12,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import IO, Union
 
+from poker_solver import __version__
 from poker_solver.card import Card, parse_board, parse_hand
 from poker_solver.equity import equity
 from poker_solver.games import Game, KuhnPoker, LeducPoker
@@ -1064,6 +1065,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="poker-solver",
         description="Texas Hold'em equity + GTO solver",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"poker-solver {__version__}",
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
