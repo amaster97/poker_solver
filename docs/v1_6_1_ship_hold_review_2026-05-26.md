@@ -1,3 +1,5 @@
+> ⚠️ **PARTIALLY SUPERSEDED 2026-05-27.** The hold-lift recommendation (A) stands operationally, but the rationale was incomplete: "33pp gap = design-acceptable Nash non-uniqueness" missed that the prior "rust" convention was itself wrong. Brown's convention is now being adopted as the canonical (and only) terminal utility per `feedback_brown_convention_adopt.md`. v1.8.0 will ship with the corrected convention; residual deep-cap divergence (post-convention) is genuine Nash multiplicity testable via EV-of-action invariance, not strategy-prob diff.
+
 # v1.6.1 Engine Bundle — Ship-or-Hold Review (2026-05-26)
 
 **Author:** v1.6.1 ship-hold review agent (read-only audit; ~25 min budget)

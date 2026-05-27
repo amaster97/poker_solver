@@ -14,6 +14,8 @@
 > - `docs/a83_validation_2026-05-26.md` (DCFR math PASS, 3rd audit)
 > - `docs/v1_6_1_ship_hold_review_2026-05-26.md` (HOLD lifted)
 
+> **2026-05-27 ADDENDUM:** §2 Candidate (d)'s observation that "Brown's convention differs from Rust's at the win-leaf" was empirically VALIDATED by PR #93 ablation (12-50pp strategy shift). The previous "math error" supersede banner correctly identified the per-leaf-offset algebra was sound but missed the reach-weighted aggregation. The conclusion now: Brown's convention is the canonical real-poker rule; the "rust" convention is being purged in PR #75.
+
 **Date:** 2026-05-23 (late)
 **Mode:** READ-ONLY investigation, no code modified.
 **Trigger:** v1.6.1 dry-run failed acceptance on `dry_A83_rainbow` with 33pp
