@@ -37,6 +37,29 @@
 #       ONLY; will produce a non-canonical release if used at real ship
 #       time; the wrapper prints a loud WARN line).
 #
+# POST-v1.8.0 HARDENING (4 hazard checks, each with a per-check skip env var):
+#   - Hazard guard 0 (top of script): bash 3.2 + nounset + empty-array
+#     footgun. Refuses to run if the unsafe ARR-at-form-with-default pattern
+#     is present in this script body. Bypass: SKIP_BASH_VERSION_CHECK=1.
+#     Rule: feedback_bash3_2_empty_array.md
+#   - Phase C.2 (tightened): release-notes substantive '<TBD-NAME>' marker
+#     audit (was bare 'TBD' grep — false-flagged meta-text on v1.8.0 ship).
+#     Bypass: SKIP_PHASE_C_2=1. Rule: feedback_release_check_specificity.md
+#   - Phase C.6: PR-citation collision audit — every 'PR #N' in release
+#     notes is checked against `gh pr view N` to detect citations that
+#     resolve to an unrelated GitHub PR (local pr-N-* branches drift from
+#     gh-assigned PR numbers). Bypass: SKIP_PHASE_C_6=1.
+#     Rule: feedback_pr_naming_collision.md
+#   - Phase C.7: cited-doc tree-tracking audit — every path-like reference
+#     in release notes is verified against `git ls-tree -r HEAD`; untracked
+#     files would 404 in the tag tree. Bypass: SKIP_PHASE_C_7=1.
+#     Rule: feedback_release_cited_doc_tracking.md
+#
+# SMOKE TEST: SMOKE_TEST=1 REPO=<worktree-path> bash <script> --dry-run
+#   Bypasses Phase A (branch=main) + Phase B (origin sync) so the hazard
+#   checks can be exercised from a feature-branch worktree. NEVER use for a
+#   real ship.
+#
 # WHEN TO RUN:
 #   - After the terminal-utility convention purge PR has merged to
 #     `origin/main`.
@@ -65,12 +88,118 @@
 
 set -euo pipefail
 
+# =============================================================================
+# Hazard guard 0 (top-of-script): bash 3.2 + nounset + empty-array footgun.
+# =============================================================================
+# macOS ships /bin/bash 3.2 (license-frozen). Under `set -u`:
+#   1. The "@" form on an empty array raises 'unbound variable'.
+#   2. The "@" form with ":-" default emits a SINGLE EMPTY POSITIONAL ARG,
+#      which downstream getopt-style parsers reject as "unknown flag" —
+#      silently breaking the ship. Both forms fail. The correct pattern is
+#      an explicit length check:
+#          if [[ #ARR-length -gt 0 ]]; then cmd "ARR-at-form"; else cmd; fi
+#
+# Cost: 30 min + 2 PRs (#88, #90) on the 2026-05-27 v1.8.0 ship burst.
+#
+# Memory rule:
+#   ~/.claude/projects/-Users-ashen-Desktop-poker-solver/memory/
+#     feedback_bash3_2_empty_array.md
+#
+# Bypass for emergencies: SKIP_BASH_VERSION_CHECK=1 bash <script>
+# =============================================================================
+# The static-grep below scans for the unsafe pattern. To keep this guard
+# function self-consistent (its own error/doc strings must not match the
+# pattern they describe), the offending sequence is reconstructed at runtime
+# from harmless fragments.
+hazard_guard_0_bash_version() {
+    if [[ "${SKIP_BASH_VERSION_CHECK:-0}" == "1" ]]; then
+        echo "[trigger-v1.8.0] WARN: hazard-guard 0 (bash version) SKIPPED via SKIP_BASH_VERSION_CHECK=1." >&2
+        echo "[trigger-v1.8.0] WARN: empty-array footgun is in play — see feedback_bash3_2_empty_array.md" >&2
+        return 0
+    fi
+
+    # bash 3.2 has BASH_VERSINFO[0]=3. We require >= 4 OR a successful
+    # self-test of the length-check pattern.
+    local major="${BASH_VERSINFO[0]:-0}"
+    if [[ "$major" -ge 4 ]]; then
+        # bash 4+: array semantics are forgiving; still run a fast self-test.
+        :
+    fi
+
+    # Self-test: build an empty array and verify the length-check pattern
+    # correctly skips the would-be expansion.
+    local _empty_arr=()
+    local _self_test_arg_count=0
+    if [[ ${#_empty_arr[@]} -gt 0 ]]; then
+        # Should never be reached on an empty array.
+        _self_test_arg_count=$(( ${#_empty_arr[@]} ))
+    fi
+    if [[ "$_self_test_arg_count" -ne 0 ]]; then
+        echo "[trigger-v1.8.0] FATAL: hazard-guard 0 self-test failed (bash array semantics broken)." >&2
+        echo "       Expected empty-array length-check to skip the branch; got count=$_self_test_arg_count." >&2
+        echo "       See feedback_bash3_2_empty_array.md." >&2
+        exit 1
+    fi
+
+    # Static grep: refuse to run if any "ARR@-form with :- default" pattern
+    # survives in this script (the unsafe form that emits an empty positional
+    # arg under set -u). The length-check pattern is the only safe one on
+    # bash 3.2.
+    # Reconstruct the regex at runtime so the source of THIS function does
+    # not itself match. Pattern: dollar-brace-NAME-LB-@-RB-colon-dash-RBR.
+    local LB='\['
+    local RB='\]'
+    local AT='@'
+    local DEFAULT=':-'
+    local unsafe_re="\\\$\\{[A-Za-z_][A-Za-z0-9_]*${LB}${AT}${RB}${DEFAULT}\\}"
+    # Skip the lines from "hazard_guard_0_bash_version()" through the
+    # function's closing brace so the guard's own machinery doesn't
+    # self-flag; check everything else.
+    local script_path="$0"
+    local body
+    body=$(awk '
+        /^hazard_guard_0_bash_version\(\) \{$/ { in_guard=1; next }
+        in_guard && /^}$/ { in_guard=0; next }
+        !in_guard { print }
+    ' "$script_path")
+    if printf '%s\n' "$body" | grep -qE "$unsafe_re"; then
+        echo "[trigger-v1.8.0] FATAL: hazard-guard 0 — script contains the unsafe ARR-at-default pattern:" >&2
+        printf '%s\n' "$body" | grep -nE "$unsafe_re" >&2 || true
+        echo "       This emits a SINGLE EMPTY POSITIONAL ARG under bash 3.2 + set -u." >&2
+        echo "       Replace with: if [[ length-check -gt 0 ]]; then cmd \"ARR-at-form\"; else cmd; fi" >&2
+        echo "       See feedback_bash3_2_empty_array.md." >&2
+        exit 1
+    fi
+
+    return 0
+}
+hazard_guard_0_bash_version
+
 # -----------------------------------------------------------------------------
 # Constants
 # -----------------------------------------------------------------------------
-REPO=/Users/ashen/Desktop/poker_solver
+# REPO defaults to the canonical checkout but can be overridden for
+# worktree-based dry-runs / smoke tests via the REPO env var.
+REPO="${REPO:-/Users/ashen/Desktop/poker_solver}"
 INNER_SCRIPT="scripts/release_v1_8_0.sh"
 STASH_MSG="pre-v1.8.0-release-stash-2026-05-27"
+RELEASE_NOTES="docs/v1_8_0_release_notes_DRAFT.md"
+
+# -----------------------------------------------------------------------------
+# Hazard-check skip flags (post-v1.8.0 hardening; default 0 = enabled).
+# Each is keyed to a memory rule under
+#   ~/.claude/projects/-Users-ashen-Desktop-poker-solver/memory/
+# Set the env var to 1 to bypass that specific check (emergencies only).
+# -----------------------------------------------------------------------------
+SKIP_BASH_VERSION_CHECK="${SKIP_BASH_VERSION_CHECK:-0}"   # feedback_bash3_2_empty_array
+SKIP_PHASE_C_2="${SKIP_PHASE_C_2:-0}"                     # feedback_release_check_specificity
+SKIP_PHASE_C_6="${SKIP_PHASE_C_6:-0}"                     # feedback_pr_naming_collision
+SKIP_PHASE_C_7="${SKIP_PHASE_C_7:-0}"                     # feedback_release_cited_doc_tracking
+
+# Smoke-test escape hatch: bypass Phase A (branch=main) + Phase B (origin sync)
+# checks. ONLY for testing the hazard guards in a worktree / feature branch.
+# A real ship MUST run on main with a clean origin sync.
+SMOKE_TEST="${SMOKE_TEST:-0}"
 
 # -----------------------------------------------------------------------------
 # Flag parsing
@@ -99,7 +228,7 @@ while [[ $# -gt 0 ]]; do
             exit 2
             ;;
         -h|--help)
-            sed -n '2,60p' "$0"
+            sed -n '2,90p' "$0"
             exit 0
             ;;
         *)
@@ -192,34 +321,45 @@ log "inner script: $INNER_SCRIPT (ok)"
 # -----------------------------------------------------------------------------
 # Phase A: branch must be main
 # -----------------------------------------------------------------------------
-log "=== Phase A: branch check ==="
-CURRENT_BRANCH=$(git branch --show-current)
-if [[ "$CURRENT_BRANCH" != "main" ]]; then
-    fail "must be on 'main' branch (currently on: $CURRENT_BRANCH). \
+if [[ "$SMOKE_TEST" == "1" ]]; then
+    log "=== Phase A: SKIPPED (SMOKE_TEST=1) ==="
+    warn "SMOKE_TEST=1 bypasses Phase A + Phase B; NEVER use for a real ship."
+else
+    log "=== Phase A: branch check ==="
+    CURRENT_BRANCH=$(git branch --show-current)
+    if [[ "$CURRENT_BRANCH" != "main" ]]; then
+        fail "must be on 'main' branch (currently on: $CURRENT_BRANCH). \
 Switch with: git checkout main"
+    fi
+    log "branch: main"
 fi
-log "branch: main"
 
 # -----------------------------------------------------------------------------
 # Phase B: fetch + capture current origin/main HEAD SHA dynamically
 # -----------------------------------------------------------------------------
-log "=== Phase B: dynamic SHA resolution ==="
-git fetch origin main >/dev/null 2>&1 || fail "git fetch origin main failed; check network + auth"
-EXPECTED_SHA=$(git rev-parse origin/main)
-log "origin/main HEAD: $EXPECTED_SHA"
+if [[ "$SMOKE_TEST" == "1" ]]; then
+    log "=== Phase B: SKIPPED (SMOKE_TEST=1) ==="
+    EXPECTED_SHA=$(git rev-parse HEAD)
+    log "(smoke) using local HEAD as EXPECTED_SHA: $EXPECTED_SHA"
+else
+    log "=== Phase B: dynamic SHA resolution ==="
+    git fetch origin main >/dev/null 2>&1 || fail "git fetch origin main failed; check network + auth"
+    EXPECTED_SHA=$(git rev-parse origin/main)
+    log "origin/main HEAD: $EXPECTED_SHA"
 
-# Verify local main is fast-forward-able to origin/main (or already at it).
-LOCAL_SHA=$(git rev-parse HEAD)
-if [[ "$LOCAL_SHA" != "$EXPECTED_SHA" ]]; then
-    # Allow auto-FF if local is strictly behind (no divergent commits).
-    if git merge-base --is-ancestor "$LOCAL_SHA" "$EXPECTED_SHA"; then
-        log "local main ($LOCAL_SHA) is behind origin/main; fast-forwarding..."
-        git pull --ff-only origin main >/dev/null 2>&1 || fail "fast-forward failed"
-        LOCAL_SHA=$(git rev-parse HEAD)
-        log "local main now at: $LOCAL_SHA"
-    else
-        fail "local main ($LOCAL_SHA) has diverged from origin/main ($EXPECTED_SHA). \
+    # Verify local main is fast-forward-able to origin/main (or already at it).
+    LOCAL_SHA=$(git rev-parse HEAD)
+    if [[ "$LOCAL_SHA" != "$EXPECTED_SHA" ]]; then
+        # Allow auto-FF if local is strictly behind (no divergent commits).
+        if git merge-base --is-ancestor "$LOCAL_SHA" "$EXPECTED_SHA"; then
+            log "local main ($LOCAL_SHA) is behind origin/main; fast-forwarding..."
+            git pull --ff-only origin main >/dev/null 2>&1 || fail "fast-forward failed"
+            LOCAL_SHA=$(git rev-parse HEAD)
+            log "local main now at: $LOCAL_SHA"
+        else
+            fail "local main ($LOCAL_SHA) has diverged from origin/main ($EXPECTED_SHA). \
 Resolve manually before running this wrapper."
+        fi
     fi
 fi
 
@@ -272,24 +412,37 @@ Convention purge must merge before this wrapper is run for a real ship. \
     fi
     log "Phase C.1 — utility() uses canonical formula (heuristic): OK"
 
-    # C.2: release notes draft no longer has TBD placeholders (the purge PR
-    # is expected to substitute these).
-    NOTES_FILE="docs/v1_8_0_release_notes_DRAFT.md"
-    if [[ ! -f "$NOTES_FILE" ]]; then
+    # C.2: release notes draft no longer has substantive TBD placeholders.
+    # Hazard: bare `grep -c "TBD"` over-counts — it flags META-TEXT (doc
+    # header sentences explaining placeholder convention) equally with real
+    # unfilled fields. PR #87 (2026-05-27) surfaced when meta-text containing
+    # "TBD" tripped the ship blocker. Tightened to the substantive sentinel
+    # form `<TBD-NAME>` per feedback_release_check_specificity.md.
+    NOTES_FILE="${RELEASE_NOTES:-docs/v1_8_0_release_notes_DRAFT.md}"
+    if [[ "$SKIP_PHASE_C_2" == "1" ]]; then
+        warn "Phase C.2 SKIPPED via SKIP_PHASE_C_2=1 — see feedback_release_check_specificity.md"
+    elif [[ ! -f "$NOTES_FILE" ]]; then
         fail "Phase C.2 — release notes file missing: $NOTES_FILE"
-    fi
-    TBD_COUNT=$(grep -c "TBD" "$NOTES_FILE" 2>/dev/null || echo 0)
-    if [[ "$TBD_COUNT" -gt 0 ]]; then
-        warn "Phase C.2 — release notes contain $TBD_COUNT 'TBD' marker(s)."
-        warn "These should be substituted before tagging:"
-        # `|| true` guards against pipefail+SIGPIPE when head closes early.
-        grep -nE "<TBD-[A-Z0-9_-]+>" "$NOTES_FILE" | head -5 || true
-        if [[ "$DRY_RUN" != "1" ]]; then
-            fail "Phase C.2 — refusing to ship with TBD placeholders in release notes. \
-Substitute the placeholders, then re-run. (--dry-run will allow this for inspection.)"
-        fi
     else
-        log "Phase C.2 — release notes have no TBD placeholders: OK"
+        # Anchored regex: only the structured sentinel form <TBD-ALPHA_NUM-DASH>
+        # is a substantive placeholder. Bare "TBD" in prose is ignored.
+        TBD_COUNT=$(grep -cE '<TBD-[A-Z0-9_-]+>' "$NOTES_FILE" 2>/dev/null || echo 0)
+        # Coerce to single integer (grep -c with `|| echo 0` can leave a
+        # trailing newline; arithmetic context tolerates but be explicit).
+        TBD_COUNT=$(printf '%s' "$TBD_COUNT" | tr -d '[:space:]')
+        : "${TBD_COUNT:=0}"
+        if [[ "$TBD_COUNT" -gt 0 ]]; then
+            warn "Phase C.2 — release notes contain $TBD_COUNT substantive '<TBD-...>' marker(s):"
+            # `|| true` guards against pipefail+SIGPIPE when head closes early.
+            grep -nE '<TBD-[A-Z0-9_-]+>' "$NOTES_FILE" | head -10 || true
+            if [[ "$DRY_RUN" != "1" ]]; then
+                fail "Phase C.2 — refusing to ship with <TBD-...> placeholders in release notes. \
+Substitute the placeholders, then re-run. (--dry-run will allow this for inspection.) \
+See feedback_release_check_specificity.md."
+            fi
+        else
+            log "Phase C.2 — release notes have no substantive <TBD-...> placeholders: OK"
+        fi
     fi
 
     # C.3: v1.5 Brown apples-to-apples PASS — full pytest is multi-minute; we
@@ -307,6 +460,149 @@ Substitute the placeholders, then re-run. (--dry-run will allow this for inspect
     fi
     log "Phase C.3 — v1.5 Brown test present ($BROWN_LINES lines); \
 authoritative PASS gated by inner-script CI check (Phase 0.5)"
+
+    # -------------------------------------------------------------------------
+    # Phase C.6: PR-citation collision audit (feedback_pr_naming_collision)
+    # -------------------------------------------------------------------------
+    # Hazard: local branch `pr-N-<topic>` is independent from GitHub PR #N.
+    # Release notes citing bare "PR #N" may resolve to an UNRELATED GitHub
+    # PR (e.g., v1.8.0 cited "PR #93 ablation" but GitHub PR #93 = WAKEUP
+    # doc; PR #96 had to ship a v1.8.1 docs patch). Scan release notes for
+    # `PR #N` mentions and verify each refers to a real GitHub PR via
+    # `gh pr view`.
+    #
+    # Memory rule:
+    #   ~/.claude/projects/-Users-ashen-Desktop-poker-solver/memory/
+    #     feedback_pr_naming_collision.md
+    # Bypass: SKIP_PHASE_C_6=1
+    # -------------------------------------------------------------------------
+    if [[ "$SKIP_PHASE_C_6" == "1" ]]; then
+        warn "Phase C.6 SKIPPED via SKIP_PHASE_C_6=1 — see feedback_pr_naming_collision.md"
+    else
+        log "=== Phase C.6: PR-citation collision audit ==="
+        NOTES_FILE_C6="${RELEASE_NOTES:-docs/v1_8_0_release_notes_DRAFT.md}"
+        if [[ ! -f "$NOTES_FILE_C6" ]]; then
+            warn "Phase C.6 — release notes file missing ($NOTES_FILE_C6); skipping."
+        elif ! command -v gh >/dev/null 2>&1; then
+            warn "Phase C.6 — 'gh' CLI not available; cannot validate PR citations."
+            if [[ "$DRY_RUN" != "1" ]]; then
+                fail "Phase C.6 — 'gh' required for ship-time PR citation audit. \
+Install gh or set SKIP_PHASE_C_6=1 to bypass. \
+See feedback_pr_naming_collision.md."
+            fi
+        else
+            # Extract unique "PR #N" mentions (N = 1+ digits).
+            PR_NUMS_RAW=$(grep -oE 'PR #[0-9]+' "$NOTES_FILE_C6" 2>/dev/null | \
+                          sort -u | awk -F'#' '{print $2}')
+            if [[ -z "$PR_NUMS_RAW" ]]; then
+                log "Phase C.6 — no 'PR #N' mentions in release notes: OK"
+            else
+                PR_COUNT=$(printf '%s\n' "$PR_NUMS_RAW" | wc -l | tr -d ' ')
+                log "Phase C.6 — auditing $PR_COUNT unique 'PR #N' citation(s)..."
+                C6_DANGLING=()
+                C6_FOUND=0
+                # Read into array via while-loop (bash 3.2 has no `mapfile`).
+                while IFS= read -r n; do
+                    [[ -z "$n" ]] && continue
+                    if pr_title=$(gh pr view "$n" --json title --jq '.title' 2>/dev/null); then
+                        if [[ -n "$pr_title" ]]; then
+                            C6_FOUND=$(( C6_FOUND + 1 ))
+                            log "    PR #$n -> $pr_title"
+                        else
+                            C6_DANGLING+=("$n (empty title)")
+                        fi
+                    else
+                        C6_DANGLING+=("$n (gh pr view failed — likely no such GitHub PR)")
+                    fi
+                done <<< "$PR_NUMS_RAW"
+
+                if [[ ${#C6_DANGLING[@]} -gt 0 ]]; then
+                    warn "Phase C.6 — ${#C6_DANGLING[@]} dangling 'PR #N' citation(s):"
+                    # bash 3.2 safe: explicit length check before "@" expansion.
+                    if [[ ${#C6_DANGLING[@]} -gt 0 ]]; then
+                        for d in "${C6_DANGLING[@]}"; do
+                            warn "    - PR #$d"
+                        done
+                    fi
+                    warn "Each citation must resolve to a GENUINE GitHub PR (not a"
+                    warn "local branch named 'pr-N-...'). Use 'commit <SHA>' or"
+                    warn "'branch <name> @ <SHA>' for work without a GitHub PR."
+                    if [[ "$DRY_RUN" != "1" ]]; then
+                        fail "Phase C.6 — refusing to ship with dangling PR-citation(s). \
+See feedback_pr_naming_collision.md."
+                    fi
+                else
+                    log "Phase C.6 — all $C6_FOUND 'PR #N' citation(s) resolve to genuine GitHub PRs: OK"
+                fi
+            fi
+        fi
+    fi
+
+    # -------------------------------------------------------------------------
+    # Phase C.7: cited-doc tree-tracking audit (feedback_release_cited_doc_tracking)
+    # -------------------------------------------------------------------------
+    # Hazard: release notes cite docs/tests/sources by path. Those paths
+    # must be in the tag's tree (`git ls-tree -r HEAD`), not just in the
+    # working directory. Untracked files vanish from the user's view of the
+    # tag, leaving dangling references in the published release page.
+    # v1.8.0 tag had 4 untracked docs + 2 untracked tests cited; PR #96
+    # had to add them post-tag.
+    #
+    # Memory rule:
+    #   ~/.claude/projects/-Users-ashen-Desktop-poker-solver/memory/
+    #     feedback_release_cited_doc_tracking.md
+    # Bypass: SKIP_PHASE_C_7=1
+    # -------------------------------------------------------------------------
+    if [[ "$SKIP_PHASE_C_7" == "1" ]]; then
+        warn "Phase C.7 SKIPPED via SKIP_PHASE_C_7=1 — see feedback_release_cited_doc_tracking.md"
+    else
+        log "=== Phase C.7: cited-doc tree-tracking audit ==="
+        NOTES_FILE_C7="${RELEASE_NOTES:-docs/v1_8_0_release_notes_DRAFT.md}"
+        if [[ ! -f "$NOTES_FILE_C7" ]]; then
+            warn "Phase C.7 — release notes file missing ($NOTES_FILE_C7); skipping."
+        else
+            # Extract path-like references from release notes (docs/, tests/,
+            # scripts/, crates/, poker_solver/ with .md/.py/.rs/.sh/.yml/.toml).
+            CITED_PATHS=$(grep -oE '(docs|tests|scripts|crates|poker_solver)/[A-Za-z0-9_./-]+\.(md|py|rs|sh|yml|toml)' \
+                          "$NOTES_FILE_C7" 2>/dev/null | sort -u)
+            if [[ -z "$CITED_PATHS" ]]; then
+                log "Phase C.7 — no path-like citations in release notes: OK"
+            else
+                CITED_COUNT=$(printf '%s\n' "$CITED_PATHS" | wc -l | tr -d ' ')
+                log "Phase C.7 — auditing $CITED_COUNT cited path(s) against git ls-tree -r HEAD..."
+                # Snapshot the tracked-tree once for O(N) checks (instead of
+                # running ls-tree N times).
+                TREE_SNAPSHOT=$(git ls-tree -r HEAD --name-only)
+                C7_DANGLING=()
+                C7_OK=0
+                while IFS= read -r p; do
+                    [[ -z "$p" ]] && continue
+                    if printf '%s\n' "$TREE_SNAPSHOT" | grep -qFx "$p"; then
+                        C7_OK=$(( C7_OK + 1 ))
+                    else
+                        C7_DANGLING+=("$p")
+                    fi
+                done <<< "$CITED_PATHS"
+
+                if [[ ${#C7_DANGLING[@]} -gt 0 ]]; then
+                    warn "Phase C.7 — ${#C7_DANGLING[@]} cited path(s) NOT in git ls-tree -r HEAD:"
+                    if [[ ${#C7_DANGLING[@]} -gt 0 ]]; then
+                        for d in "${C7_DANGLING[@]}"; do
+                            warn "    DANGLING: $d"
+                        done
+                    fi
+                    warn "These will fatal-404 on 'git show <tag>:<path>' after tagging."
+                    warn "Either 'git add' them before tagging or remove the citation."
+                    if [[ "$DRY_RUN" != "1" ]]; then
+                        fail "Phase C.7 — refusing to ship with dangling doc citation(s). \
+See feedback_release_cited_doc_tracking.md."
+                    fi
+                else
+                    log "Phase C.7 — all $C7_OK cited path(s) are tracked in HEAD: OK"
+                fi
+            fi
+        fi
+    fi
 fi
 
 # -----------------------------------------------------------------------------
