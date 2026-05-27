@@ -77,6 +77,34 @@ if ! command -v c++ >/dev/null 2>&1 && ! command -v g++ >/dev/null 2>&1 && ! com
     exit 0
 fi
 
+# --- Upstream-portability patch (GCC 11.x compat) ----------------------------
+# Brown's subgame_config.cpp uses `std::unordered_map<std::string, JsonValue>`
+# inside the JsonValue struct definition (recursive incomplete-type member).
+# libc++ (Apple Clang) accepts this; libstdc++ in GCC 11.4 (Ubuntu 22.04 CI)
+# rejects it because `std::unordered_map` historically requires a complete
+# value type. `std::map` is specified to permit incomplete value types (C++17,
+# N4371) and exposes the same `.find` / `.end` / `.emplace` API used by this
+# file — drop-in swap.
+#
+# Idempotent: detects the already-patched signature before touching the file
+# so re-runs are no-ops. Upstream-compatible: pure portability fix, zero
+# behavior change (object-member lookup is by-key in all call sites here;
+# iteration order is never observed).
+SUBGAME_CPP="$SRC/src/subgame_config.cpp"
+if [[ -f "$SUBGAME_CPP" ]]; then
+    if grep -q 'std::unordered_map<std::string, JsonValue>' "$SUBGAME_CPP"; then
+        echo "Patching $SUBGAME_CPP: unordered_map -> map (GCC 11 incomplete-type fix)"
+        # Portable two-arg sed: write to temp then mv, avoiding `-i ''` vs `-i`
+        # differences between macOS BSD sed and GNU sed.
+        TMP_CPP="$SUBGAME_CPP.tmp.$$"
+        sed -e 's|#include <unordered_map>|#include <map>|' \
+            -e 's|std::unordered_map<std::string, JsonValue>|std::map<std::string, JsonValue>|' \
+            "$SUBGAME_CPP" > "$TMP_CPP"
+        mv "$TMP_CPP" "$SUBGAME_CPP"
+    fi
+fi
+# -----------------------------------------------------------------------------
+
 echo "Building Brown's river_solver_optimized in $BUILD"
 cmake -S "$SRC" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release
 cmake --build "$BUILD" -j
