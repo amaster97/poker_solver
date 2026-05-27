@@ -39,7 +39,7 @@ required** at production scale).
 | **W2.2** Sarah Range.diff per-combo | PARTIAL | **PARTIAL** | = | 0.25 ms | `Range.diff()` set-membership returns 56 combos (works); no per-combo frequency methods on Range. B10 (Range fractional refactor) still blocker. v1.8 unrelated. |
 | **W2.3** Sarah deep-stack turn RvR | BLOCKED | **BLOCKED (Type D)** | = | >1200 (kill) | 8-class symmetric turn fixture (Qs7h2d5c, 200BB, iter=500) per `post_v1_8_0_W2_3_retest_prompt.md`. Wall > 20 min kill switch (Sarah 5-min gate exceeded by 4×). v1.8 SIMD ~1.0× refutation confirmed. **Release-narrative-revision trigger** per pre-stage prompt line 117-118. |
 | **W2.4** Sarah batch-solve CSV | PARTIAL | **PARTIAL or BLOCKED** | (= or ↓) | TBD | CLI `batch-solve` run on 3-row CSV (river spots, iter=100). Result pending. Library-direct path already PASSes; CLI path was INCONCLUSIVE-SLOW pre-v1.8. v1.8 SIMD ~1.0× — perf likely unchanged. |
-| **W3.5** Daniel monotone polarization | FAIL (Type B-DOC) | **FAIL (Type B reaffirmed)** | = | 70.7 | **AA check = 0.1434 at 10-class (target ≥0.99)**. AA max single bet = 0.854 (>0.50 aggregator-misroute guard). Range aggregate check = 0.7805 (<0.85). 6-class control reproduces v1.7 PASS (AA check 0.92). **Class-expansion semantics bug surfaces at production scale**: 6-class smoke masks the bug; 10-class production scale exposes it. Same Type B wrapper hazard the prior status doc flagged. |
+| **W3.5** Daniel monotone polarization | FAIL (Type B-DOC) | **FAIL (root cause TBD)** | = | 70.7 | At 10-class @ 500 iter: AA check = 0.1434 (target ≥0.99 PASS, ≥0.90 PARTIAL). AA max single bet = 0.854. Range aggregate check = 0.7805. 6-class control @ 500 iter: AA check = 0.92 (PASS at lower bound). 15-class @ 500 iter: AA check = 0.33. **Root cause TBD** — could be Hypothesis A (convergence/iter-scaling at large class counts; PoC reported 1.0000 @ 3000 iter) or Hypothesis B (class-expansion wrapper bug). Convergence test running at 3000 iter to distinguish. See `docs/v1_8_1_candidate_findings_2026-05-27.md`. |
 | **W4.2** Priya limp-or-fold action menu | PARTIAL | **PARTIAL** | = | 0.7 | `ActionAbstractionConfig(bet_size_fractions=(), include_all_in=False)` produces clean check-only action menu at 10-class river RvR. Range aggregate check=1.0, no bet keys leak. Wiring + action restriction PASS confirmed at production scale. Heuristic mis-alignment (Type A DEVELOPER.md doc add) unchanged. |
 
 ### Marcus 30s budget validation (W1.2 production-scale)
@@ -78,25 +78,34 @@ status doc flagged but had only smoke-confirmed.
 
 ## Key empirical findings
 
-### W3.5 class-expansion semantics bug — reproducible at production scale
+### W3.5 monotone polarization — class-count × iter-count interaction at production scale
 
-Per `scripts_retest/w3_5_6class_check.py`:
+Per `scripts_retest/w3_5_6class_check.py` and `scripts_retest/w3_5_15class_poc_check.py`:
 
-| Range size | AA check | AA bet_33 | Verdict |
-|---|---|---|---|
-| 6-class `{AA,KK,QQ,JJ,TT,99}` | **0.9194** | 0.0792 | PARTIAL (close to PASS at ≥0.90 lower bound, below ≥0.99 PASS threshold) |
-| 10-class `{AA,KK,QQ,JJ,TT,99,88,AKs,AQs,KQs}` | **0.1434** | **0.8542** | FAIL (AA check < 0.90; AA max single bet > 0.50; aggregator-misroute pattern) |
+| Range size | iter | AA check | AA bet_33 | Verdict |
+|---|---|---|---|---|
+| 6-class `{AA,KK,QQ,JJ,TT,99}` | 500 | **0.9194** | 0.0792 | PARTIAL (close to PASS at ≥0.90 lower bound; below ≥0.99 PASS threshold) |
+| 10-class `{AA-99,88,AKs,AQs,KQs}` (value-heavy) | 500 | **0.1434** | 0.8542 | FAIL on AA check ≥0.90 |
+| 15-class `{AA-88,AKs,AQs,AJs,KQs,KJs,JTs,98s,87s}` (full PoC range) | 500 | **0.3288** | 0.6204 | FAIL on AA check ≥0.90 |
+| 15-class (same PoC range) | 3000 | TBD | TBD | Convergence test running |
 
-Same board (`Ts 8s 6s 4c 2d`), same iter (500), same backend (`rust_vector`),
-same v1.8.0 build. **Only class-count differs.** AA's strategy flips from
-near-pure-check to near-pure-bet when the villain range adds 4 more classes.
+Same board (`Ts 8s 6s 4c 2d`), same backend (`rust_vector`), same v1.8.0 build,
+same SPR (~50, single-bet pot). The PoC at `W3_5_TRUE_nash_v1_5_1.md` reports
+AA check = 1.0000 on the 15-class range — but at **3000 iter** (not 500).
 
-**This is exactly the W3.5 wrapper-bug pattern** documented in
-`docs/v1_7_1_wrapper_fix_spec.md`: per-combo Nash strategies from the inner
-`solve_range_vs_range_rust` are class-expanded into the aggregator slot by
-the wrapper, and the expansion's correctness depends on class-count-derived
-indexing. At smaller class counts the misroute happens to coincide; at
-larger counts it diverges.
+**Root cause distinction — Hypothesis A vs B:**
+- **Hypothesis A (convergence):** Larger class counts need more DCFR sweeps to
+  converge. If 15-class @ 3000 iter reproduces AA check ≈ 1.0, this is a
+  convergence issue, not a code bug. The persona acceptance spec's ≥0.99
+  threshold needs an iter-scaling caveat.
+- **Hypothesis B (wrapper bug):** Per `v1_7_1_wrapper_fix_spec.md` §3, the
+  per-combo-to-per-class aggregator has a class-count-dependent index error.
+  At 6-class the misroute happens to coincide; at 10/15-class it diverges.
+
+The W3.4 retest (15-class, different board, 3-bet pot) PASSes with AA check =
+0.9827 @ iter=500, which **disfavors Hypothesis B** (a clean wrapper bug
+would also fail W3.4). The convergence test at 3000 iter on the 15-class W3.5
+range will distinguish definitively.
 
 ### W2.3 Type D timeout re-confirms v1.8 SIMD ~1.0×
 
@@ -179,6 +188,8 @@ co-blocked with W2.3 perf wall).
   - `/Users/ashen/Desktop/poker_solver/scripts_retest/w2_1_retest.py`
   - `/Users/ashen/Desktop/poker_solver/scripts_retest/w2_4_retest.py`
   - `/Users/ashen/Desktop/poker_solver/scripts_retest/w3_5_6class_check.py`
+  - `/Users/ashen/Desktop/poker_solver/scripts_retest/w3_5_15class_poc_check.py`
+  - `/Users/ashen/Desktop/poker_solver/scripts_retest/w3_5_convergence_test.py`
   - `/Users/ashen/Desktop/poker_solver/scripts_retest/marcus_w1_2_retest.py`
   - `/tmp/persona_retests/w1_5_retest.py`, `w2_2_retest.py`, `w2_3_retest.py`, `w3_4_retest.py`, `w3_5_retest.py`, `w4_2_retest.py`
 - Retest result JSONs: `/tmp/persona_retests/*_result.json`

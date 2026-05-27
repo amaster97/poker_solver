@@ -9,52 +9,58 @@
 
 ## Summary
 
-**One candidate identified:** W3.5 monotone-board polarization, class-expansion
-semantics bug. The pattern was previously documented as a "Type B-DOC" /
-wrapper-class-expansion hazard but had only been smoke-confirmed at the
-6-class size; the post-v1.8.0 production-scale retest provides a clean
-**reproducible production-scale demo** at v1.8.0 tip.
+**One candidate under investigation:** W3.5 monotone-board polarization shows
+a class-count × iter-count interaction at production scale (10-15 class @ 500
+iter gives AA check 0.14-0.33, vs PoC's 1.0000 @ 3000 iter on 15-class).
+
+Root cause is **TBD between two hypotheses**:
+- **A. Convergence/iter-scaling issue** (no code bug; iter budget needs scaling
+  with class count for the W3.5 specific equilibrium structure).
+- **B. Class-expansion wrapper bug** (per `v1_7_1_wrapper_fix_spec.md`).
+
+A convergence test at 3000 iter on 15-class is in flight to distinguish.
 
 **No new regressions.** No persona that was PASS pre-v1.8.0 has regressed.
 
 ---
 
-## W3.5 — Monotone polarization, class-expansion bug
+## W3.5 — Monotone polarization, class-count × iter-count interaction
 
 ### Empirical observation
 
-Same board (`Ts 8s 6s 4c 2d`), same backend (`rust_vector`),
-same iter (500), same v1.8.0 build. Only the symmetric class count differs:
+Same board (`Ts 8s 6s 4c 2d`), same backend (`rust_vector`), same v1.8.0 build,
+same SPR (~50 from single-bet pot, initial_pot=200). Class count and iter
+count vary:
 
-| Range | Classes | AA check | AA bet_33 | AA bet_75 | AA bet_150 | Verdict |
-|---|---|---|---|---|---|---|
-| 6-class | `AA,KK,QQ,JJ,TT,99` | **0.9194** | 0.0792 | 0.0013 | <1e-4 | Polarized (close to spec; PASS at ≥0.90 lower bound) |
-| 10-class | `AA,KK,QQ,JJ,TT,99,88,AKs,AQs,KQs` | **0.1434** | **0.8542** | 0.0024 | <1e-5 | **Inverted** (FAIL on AA check ≥0.90, AA max bet <0.50) |
+| Range | iter | AA check | AA bet_33 | Verdict |
+|---|---|---|---|---|
+| 6-class `{AA,KK,QQ,JJ,TT,99}` | 500 | **0.9194** | 0.0792 | PARTIAL (close to PASS at ≥0.90 lower bound; below ≥0.99 PASS) |
+| 10-class `{AA-99,88,AKs,AQs,KQs}` (value-heavy) | 500 | **0.1434** | 0.8542 | FAIL on AA check ≥0.90 |
+| 15-class `{AA-88,AKs,AQs,AJs,KQs,KJs,JTs,98s,87s}` (full PoC range) | 500 | **0.3288** | 0.6204 | FAIL on AA check ≥0.90 |
+| 15-class (same) | 3000 | TBD | TBD | Convergence test running |
 
-Across the 6 → 10 class expansion:
-- AA check drops 0.92 → 0.14 (−0.78 absolute)
-- AA bet_33 rises 0.08 → 0.85 (+0.77 absolute)
-- AA flips from "pure bluff-catcher" to "pure value bet"
+PoC reference (`W3_5_TRUE_nash_v1_5_1.md`): AA check = **1.0000** on 15-class
+range @ **3000 iter** (v1.5.1 build). At 500 iter, the 15-class range has not
+converged to the PoC equilibrium.
 
-### Why this is a Type B (wrapper) bug, not a Nash result
+### Diagnostic — wrapper bug or convergence issue?
 
-Per the persona acceptance spec and `W3_5_TRUE_nash_v1_5_1.md` PoC:
-- AA on `Ts 8s 6s 4c 2d` with no nut flush is a **bluff-catcher**. Every flush
-  beats AA; AA's only "value" is against under-pairs that fold to any bet.
-  Pure check at Nash equilibrium is the empirical PoC result (1.0000 @ 3000 iter
-  on 15x15 symmetric).
-- AA's equity against a 10-class symmetric range that adds `{88, AKs, AQs, KQs}`
-  is **lower** than against 6-class `{AA-99}`. (AKs / AQs / KQs all carry the
-  As-of-the-suited which makes AA's blockers thinner; 88 is another set that
-  beats AA. Equity strictly decreases.)
-- A pure value-bet from a bluff-catcher whose equity dropped is **NOT** a
-  Nash result — it's a strategy-route artifact.
+Two pieces of evidence **disfavor** a clean wrapper bug:
 
-The aggregator-misroute pattern (`v1_7_1_wrapper_fix_spec.md` §3) describes
-exactly this: per-combo Nash strategies from the inner CFR are class-expanded
-into the wrapper's aggregator slot via a class-count-derived index; the index
-arithmetic is silent-no-op at one class count and silently-routes-wrong at
-another.
+1. **The W3.4 retest** (same v1.8.0 build, 15-class symmetric range, 4-spade
+   monotone river `Ts 8s 6s 4s 2c`, 3-bet pot SPR≈5.5) PASSES with AA check
+   = 0.9827 @ iter=500. If W3.5's failure were purely a class-count wrapper
+   misroute triggered at ≥10 classes, W3.4 would fail identically. It doesn't.
+
+2. **The canonical W3.5 regression test** (`tests/test_range_vs_range_nash.py:test_w3_5_monotone_aa_pure_check`)
+   uses 3-class @ 200 iter with the looser ≥0.90 check bound, explicitly
+   documenting that convergence at low iter counts is class-size-dependent:
+   > the smaller range has fewer bluff-catch opportunities for villain so the
+   > same qualitative effect holds with looser convergence.
+
+This pattern is more consistent with **convergence/iter scaling** than with a
+clean wrapper index error. The 3000-iter convergence test on the 15-class
+range will distinguish definitively.
 
 ### Reproducer
 
