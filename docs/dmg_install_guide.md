@@ -109,18 +109,10 @@ entirely. The same arm64-only and feature-set caveats below still apply.
 
 - Launches a local NiceGUI web app at `http://127.0.0.1:8080`.
 - Your default browser auto-opens to that URL.
+- Same equity / solver engine as the Python CLI tier
+  (`pip install -e .`).
 - Closing the browser tab does **not** stop the app — quit it from the
   Dock or via `Cmd+Q` in the app's menu.
-
-> **GUI is in MOCK MODE in v1.8.0.** The bundled GUI exposes the full
-> workflow (Solve / Pause / Stop / Library / Iterations) but solve
-> outputs are hand-crafted fixtures, not live DCFR computations. A
-> yellow banner at the top of the app makes this explicit: *"Mock mode:
-> solver outputs are hand-crafted fixtures (PR 10a). Switches to real
-> solver in PR 10b."* Real-solver wiring lands in a future PR (10b).
-> **For real solver outputs today, use the Python API or CLI per
-> [`../USAGE.md`](../USAGE.md) (source install: `pip install -e .`).**
-> The .dmg ships as a UX preview against the locked layout.
 
 ## Known limitations
 

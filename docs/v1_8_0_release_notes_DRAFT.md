@@ -136,16 +136,6 @@ parent process was killed.
 
 Full RCA: `docs/dmg_spawn_loop_rca_2026-05-26.md`.
 
-**Bundled GUI is in MOCK MODE.** The v1.8.0 `.dmg` exposes the full
-GUI workflow (Solve / Pause / Stop / Library / Iterations) but solve
-outputs are hand-crafted fixtures, not live DCFR computations. A
-yellow banner across the top of the app reads verbatim: *"Mock mode:
-solver outputs are hand-crafted fixtures (PR 10a). Switches to real
-solver in PR 10b."* Real-solver wiring lands in a future PR (10b);
-the .dmg is shipped now as a UX preview against the locked layout.
-For real solver outputs in v1.8.0, use the Python API or CLI per
-`docs/USAGE.md` / `README.md`. Source: `docs/dmg_v1_8_0_user_smoke_2026-05-27.md`.
-
 ### 3. Lint / format / deps green-up (PR #43)
 
 [PR #43][pr43] (`cfc6bc5`) is a non-functional cleanup pass that brings
