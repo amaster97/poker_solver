@@ -50,7 +50,6 @@ logger = logging.getLogger(__name__)
 
 
 # ElementFilter markers (Agent C asserts on these):
-#   'mock-mode-banner', 'mock-mode-banner-dismiss',
 #   'app-header', 'header-spot-label', 'header-status',
 #   'library-button', 'theme-toggle', 'hamburger-menu',
 #   'matrix-region', 'sidebar-spot-expansion', 'sidebar-run-expansion',
@@ -74,32 +73,13 @@ def build_page() -> None:
 
     state = get_state()
 
-    # ----- Yellow Mock-mode banner (Q7 LOCKED) -----
-    if not state.prefs.mock_banner_dismissed:
-        banner_row = (
-            ui.row()
-            .classes("w-full bg-yellow-200 dark:bg-yellow-800 p-2 items-center")
-            .mark("mock-mode-banner")
-        )
-        with banner_row:
-            ui.icon("warning", color="amber-9")
-            ui.label(
-                "Mock mode: solver outputs are hand-crafted fixtures (PR 10a). "
-                "Switches to real solver in PR 10b."
-            ).classes("text-sm")
-            ui.space()
-
-            def _dismiss_banner() -> None:
-                state.prefs.mock_banner_dismissed = True
-                save_state()
-                # Banner removal requires page refresh; in NiceGUI 2.x we
-                # cheap-trick this by hiding the row inline.
-                banner_row.visible = False
-
-            ui.button(
-                "Dismiss",
-                on_click=_dismiss_banner,
-            ).props("flat").mark("mock-mode-banner-dismiss")
+    # The legacy "Mock mode" banner was removed once the real-solver
+    # bindings shipped (v1.2.0). Production runs always route to the real
+    # solver via ``SolveRunner._dispatch_solve``; the mock path is reserved
+    # for smoke-test failure-mode injection (``mock_failure_mode='oom'``
+    # etc.) and is unreachable from the UI. The ``mock_banner_dismissed``
+    # pref field is retained on ``UIPrefs`` to keep legacy state.json files
+    # backwards-compatible.
 
     # ----- Header -----
     with ui.row().classes("w-full items-center p-2 border-b").mark("app-header"):

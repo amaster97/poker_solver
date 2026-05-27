@@ -129,8 +129,9 @@ async def test_page_renders_without_exception(
     # Agent B markers (matrix + tree browser).
     assert user.find(marker="range-matrix-display").elements
     assert user.find(marker="tree-browser").elements
-    # Q7 lock: yellow Mock mode banner.
-    assert user.find(marker="mock-mode-banner").elements
+    # The legacy yellow "Mock mode" banner (Q7) was removed once the
+    # real-solver bindings shipped (v1.2.0); production runs always route
+    # to the real solver and the banner text was misleading.
 
 
 async def test_board_picker_accepts_three_cards(
