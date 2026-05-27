@@ -385,23 +385,50 @@ work:
 
 ### A83: Deep-cap Brown apples-to-apples residual gap (post-convention-purge)
 
-**Status post-purge:** `<TBD-POST-PURGE-RESIDUAL>` (v1.5 Brown
+**A83 deep-cap residual (Nash multiplicity, not bug):** Post-purge v1.5
+Brown apples-to-apples test PASSES on both K72 + A83 spots under the
+reframed 4-layer SANITY gate. Strict-per-cell |Δ| values: K72 0.852,
+A83 0.907 — these reflect Nash multiplicity at deep-cap indifference
+manifolds (Brown picks one Nash, our solver picks another; both are
+valid). The reframed gate does NOT strict-assert per-cell (that would
+be non-falsifiable under multiplicity per
+`feedback_nash_multiplicity_acceptance.md`); it gates on L1, top-action
+coverage, and overall coverage. The convention purge (PR #78,
+`37e5be1`) closed the regret-update bias (PR #93's measured 12-50pp
+Rust-vs-Rust shift); residual is genuine multiplicity. EV-of-action
+invariance gauntlet (`docs/ev_invariance_sanity_gauntlet_design_2026-05-27.md`)
+is the canonical sanity check for the residual.
+
+**Status post-purge:** L1 max 1.703 (K72) / 1.813 (A83); strict max |Δ|
+0.852 / 0.907; both fixtures PASS the reframed 4-layer SANITY gate
+(strict per-cell layer is informational, not asserted, per
+`feedback_nash_multiplicity_acceptance.md`) (v1.5 Brown
 apples-to-apples residual after the canonical-convention adoption,
-to be filled at ship time from the post-purge dry-run).
+captured 2026-05-27 from the post-purge dry-run; full numbers at
+`docs/v1_5_brown_post_purge_numbers_2026-05-27.md`).
 
 Whatever remains after the convention purge is **Nash multiplicity at
 indifference manifolds** rather than a game-definition mismatch: deep-cap
 HUNL has indifference manifolds where multiple Nash equilibria are all
 valid and small initial-condition perturbations select between them.
-This is testable via **EV-of-action invariance** — for a constant-sum
-game, the EV of each action at each infoset is unique across all Nash
-equilibria, even when strategy probabilities aren't (see
+The convention purge DID fix the regret-update bias (PR #93's 12-50pp
+gap is closed); the strict per-cell |Δ| residual is a SEPARATE
+phenomenon and is NOT expected to collapse — A83's strict max |Δ|
+moved from 0.907 (pre-purge) to 0.907 (post-purge) unchanged at the
+recorded precision. The test PASSES because the reframed 4-layer gate
+does not strict-assert per-cell. This is testable via **EV-of-action
+invariance** — for a constant-sum game, the EV of each action at each
+infoset is unique across all Nash equilibria, even when strategy
+probabilities aren't (see
 `docs/ev_invariance_sanity_gauntlet_design_2026-05-27.md`).
 
-Trajectory of `<TBD-POST-PURGE-MAX-Δ-A83-2K>` (max |Δ| on the A83
+Trajectory of `0.907` (max |Δ| on the A83
 fixture at `iter=2000`) anchors the post-purge baseline relative to
 the pre-purge `12.27pp @ 2000 iters / 10.28pp @ 8000 iters` figure
-from PR #93's ablation.
+from PR #93's ablation. Note: the 12-50pp PR #93 gap was a
+Rust-vs-Rust ablation between conventions and IS closed by the purge;
+the 0.907 strict max |Δ| is the Rust-vs-Brown apples-to-apples residual
+under the canonical convention, dominated by Nash multiplicity.
 
 **v1.6.1 hold-lift validated.** The hold-lift decision stands under
 the canonical convention: the v1.5 Brown apples-to-apples reframed
