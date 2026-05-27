@@ -2,7 +2,7 @@
 
 **Status: DRAFT (post-purge framed) — Phases 1-4 + AVX2 all merged to
 `main` as of `77e751c` (PR #32, 2026-05-26). The terminal-utility
-convention purge lands as PR `<TBD-PR-NUMBER>` (`<TBD-MERGE-SHA>`)
+convention purge lands as PR `78` (`37e5be1`)
 and is the engine correctness fix in v1.8.0 — see "Engine fixes" §5
 and "Migration / breaking changes" below. Engine + parity fixes from
 the v1.7.1 bundle and v1.7.2 (.dmg fork-bomb fix + CI hardening) are
@@ -15,8 +15,8 @@ A83 entry). Final ship step is SHA substitution for the
 **Release date:** 2026-05-XX (TBD at ship time)
 **Tag:** `v1.8.0` (to be created at ship time)
 **Baseline commit on `origin/main`:** `eb74fb3` (PR #60, 2026-05-26),
-plus the terminal-utility convention purge at `<TBD-MERGE-SHA>`
-(PR `<TBD-PR-NUMBER>`).
+plus the terminal-utility convention purge at `37e5be1`
+(PR `78`).
 Final tag SHA will be set at `git tag` time.
 
 ---
@@ -184,7 +184,7 @@ lifted per `docs/v1_6_1_ship_hold_review_2026-05-26.md`.
 
 **Engine correctness:**
 
-- **PR <TBD-PR-NUMBER> (`<TBD-MERGE-SHA>`) — Terminal-utility
+- **PR 78 (`37e5be1`) — Terminal-utility
   convention purge (canonical real-poker convention).** Prior versions
   used a "rust" terminal-utility formula that treated
   `initial_contributions` as recoverable by the player who folded; this
@@ -259,7 +259,7 @@ The bundle resolves the 22-42pp Brown apples-to-apples deep-cap
 divergence reported in v1.5.0 / v1.5.1 / v1.6.0 dry-runs as a
 combination of test-side wrapper bugs (R8/R9/R10), one engine-side
 mechanical guard (R6, PR 50), the **terminal-utility convention
-purge** (PR `<TBD-PR-NUMBER>`, the engine correctness fix; see the
+purge** (PR `78`, the engine correctness fix; see the
 first bullet under "Engine correctness" above), and Nash multiplicity
 on the residual at deep-cap indifference manifolds (see "Known issues
 remaining" below). Pre-purge framings that treated the convention as
@@ -615,7 +615,7 @@ All PRs that ship in v1.8.0, in merge order:
 - [#43][pr43] `cfc6bc5` — chore: green up lint/clippy/format/deps gates on main
 - [#44][pr44] `a6b89f7` — docs: fix executable code bugs in README + USAGE
 - [#45][pr45] `dbfc8d0` — docs: drift cleanup v2 (USAGE header, CHANGELOG `.dmg`, supersede banners)
-- [#`<TBD-PR-NUMBER>`][pr-purge] `<TBD-MERGE-SHA>` — fix(engine): terminal-utility convention purge (canonical real-poker convention; single `utility()` function; deletes "rust" convention path)
+- [#`78`][pr-purge] `37e5be1` — fix(engine): terminal-utility convention purge (canonical real-poker convention; single `utility()` function; deletes "rust" convention path)
 
 Plus the CI-hardening prerequisites that landed earlier in the v1.7.x
 sequence but enable the cross-platform SIMD CI matrix:
@@ -683,4 +683,4 @@ performance and a ~2-month-old critical packaging bug. Thanks to:
 [pr58]: https://github.com/amaster97/poker_solver/pull/58
 [pr59-persona]: https://github.com/amaster97/poker_solver/pull/59
 [pr60-orphan]: https://github.com/amaster97/poker_solver/pull/60
-[pr-purge]: https://github.com/amaster97/poker_solver/pull/<TBD-PR-NUMBER>
+[pr-purge]: https://github.com/amaster97/poker_solver/pull/78
