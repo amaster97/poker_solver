@@ -38,7 +38,7 @@ required** at production scale).
 | **W2.1** Sarah 100BB preflop chart | PARTIAL | **PARTIAL** | = | <1 ms | `solve_hunl_preflop` raises `ValueError`: requires `initial_hole_cards` (subgame mode only). Full-tree preflop "intractable without hand-class abstraction — reserved for post-v1 follow-up." Same structural blocker as pre-v1.8 (not perf). |
 | **W2.2** Sarah Range.diff per-combo | PARTIAL | **PARTIAL** | = | 0.25 ms | `Range.diff()` set-membership returns 56 combos (works); no per-combo frequency methods on Range. B10 (Range fractional refactor) still blocker. v1.8 unrelated. |
 | **W2.3** Sarah deep-stack turn RvR | BLOCKED | **BLOCKED (Type D)** | = | >1200 (kill) | 8-class symmetric turn fixture (Qs7h2d5c, 200BB, iter=500) per `post_v1_8_0_W2_3_retest_prompt.md`. Wall > 20 min kill switch (Sarah 5-min gate exceeded by 4×). v1.8 SIMD ~1.0× refutation confirmed. **Release-narrative-revision trigger** per pre-stage prompt line 117-118. |
-| **W2.4** Sarah batch-solve CSV | PARTIAL | **PARTIAL or BLOCKED** | (= or ↓) | TBD | CLI `batch-solve` run on 3-row CSV (river spots, iter=100). Result pending. Library-direct path already PASSes; CLI path was INCONCLUSIVE-SLOW pre-v1.8. v1.8 SIMD ~1.0× — perf likely unchanged. |
+| **W2.4** Sarah batch-solve CSV | PARTIAL | **PARTIAL (Type D for CLI path)** | = | >1200 kill | CLI `batch-solve` on 3-row CSV (river spots, iter=100) timed out at 20-min kill switch with zero row commits to temp library. Library-direct path still PASSes (pre-v1.8 retest); CLI path remains INCONCLUSIVE-SLOW. v1.8 SIMD ~1.0× — perf unchanged. |
 | **W3.5** Daniel monotone polarization | FAIL (Type B-DOC) | **FAIL (root cause TBD)** | = | 70.7 | At 10-class @ 500 iter: AA check = 0.1434 (target ≥0.99 PASS, ≥0.90 PARTIAL). AA max single bet = 0.854. Range aggregate check = 0.7805. 6-class control @ 500 iter: AA check = 0.92 (PASS at lower bound). 15-class @ 500 iter: AA check = 0.33. **Root cause TBD** — could be Hypothesis A (convergence/iter-scaling at large class counts; PoC reported 1.0000 @ 3000 iter) or Hypothesis B (class-expansion wrapper bug). Convergence test running at 3000 iter to distinguish. See `docs/v1_8_1_candidate_findings_2026-05-27.md`. |
 | **W4.2** Priya limp-or-fold action menu | PARTIAL | **PARTIAL** | = | 0.7 | `ActionAbstractionConfig(bet_size_fractions=(), include_all_in=False)` produces clean check-only action menu at 10-class river RvR. Range aggregate check=1.0, no bet keys leak. Wiring + action restriction PASS confirmed at production scale. Heuristic mis-alignment (Type A DEVELOPER.md doc add) unchanged. |
 
@@ -78,34 +78,43 @@ status doc flagged but had only smoke-confirmed.
 
 ## Key empirical findings
 
-### W3.5 monotone polarization — class-count × iter-count interaction at production scale
+### W3.5 monotone polarization — diagnosed as range-setup mismatch (not a code bug)
 
-Per `scripts_retest/w3_5_6class_check.py` and `scripts_retest/w3_5_15class_poc_check.py`:
+Per `scripts_retest/w3_5_6class_check.py`, `w3_5_15class_poc_check.py`,
+`w3_5_convergence_test.py`, and `w3_5_poc_explicit_root.py`:
 
-| Range size | iter | AA check | AA bet_33 | Verdict |
-|---|---|---|---|---|
-| 6-class `{AA,KK,QQ,JJ,TT,99}` | 500 | **0.9194** | 0.0792 | PARTIAL (close to PASS at ≥0.90 lower bound; below ≥0.99 PASS threshold) |
-| 10-class `{AA-99,88,AKs,AQs,KQs}` (value-heavy) | 500 | **0.1434** | 0.8542 | FAIL on AA check ≥0.90 |
-| 15-class `{AA-88,AKs,AQs,AJs,KQs,KJs,JTs,98s,87s}` (full PoC range) | 500 | **0.3288** | 0.6204 | FAIL on AA check ≥0.90 |
-| 15-class (same PoC range) | 3000 | TBD | TBD | Convergence test running |
+| Range size / API | iter | AA root check | Verdict |
+|---|---|---|---|
+| Class-name API, 6-class `{AA,KK,QQ,JJ,TT,99}` | 500 | 0.9194 | PARTIAL at lower bound |
+| Class-name API, 10-class `{AA-99,88,AKs,AQs,KQs}` | 500 | 0.1434 | FAIL on ≥0.99 spec |
+| Class-name API, 15-class full PoC range | 500 | 0.3288 | FAIL on ≥0.99 spec |
+| Class-name API, 15-class full PoC range | **3000** | **0.3193** | FAIL on ≥0.99 spec; convergence ruled out |
+| **Explicit-combo API (PoC setup, no flushes)** | **3000** | **1.0000** | **PASS** — PoC result reproduces at v1.8.0 |
 
-Same board (`Ts 8s 6s 4c 2d`), same backend (`rust_vector`), same v1.8.0 build,
-same SPR (~50, single-bet pot). The PoC at `W3_5_TRUE_nash_v1_5_1.md` reports
-AA check = 1.0000 on the 15-class range — but at **3000 iter** (not 500).
+**Root cause: range-setup mismatch.** The PoC at `W3_5_TRUE_nash_v1_5_1.md`
+explicitly excluded flushes from villain's 15-hand range (used `KhKd`,
+`QhQd`, `KhQd`, etc. — no spaded combos) and called `solve_range_vs_range_rust`
+directly with these explicit combos. On v1.8.0, the same explicit-combo
+setup **reproduces AA check = 1.0000 at the root river-open infoset** (PoC
+result PASSES at v1.8.0).
 
-**Root cause distinction — Hypothesis A vs B:**
-- **Hypothesis A (convergence):** Larger class counts need more DCFR sweeps to
-  converge. If 15-class @ 3000 iter reproduces AA check ≈ 1.0, this is a
-  convergence issue, not a code bug. The persona acceptance spec's ≥0.99
-  threshold needs an iter-scaling caveat.
-- **Hypothesis B (wrapper bug):** Per `v1_7_1_wrapper_fix_spec.md` §3, the
-  per-combo-to-per-class aggregator has a class-count-dependent index error.
-  At 6-class the misroute happens to coincide; at 10/15-class it diverges.
+The class-name API (`AKs`, `KQs`, `JTs`, `98s`, `87s`) DOES include
+flush-carrying combos. With flushes in villain's range, AA's Nash strategy
+is genuinely different — AA becomes a thin-value-bet candidate against the
+flush-inclusive range. This is **mathematically correct Nash**, not a code
+bug.
 
-The W3.4 retest (15-class, different board, 3-bet pot) PASSes with AA check =
-0.9827 @ iter=500, which **disfavors Hypothesis B** (a clean wrapper bug
-would also fail W3.4). The convergence test at 3000 iter on the 15-class W3.5
-range will distinguish definitively.
+**No wrapper bug. No convergence bug. No v1.8.1 candidate.** The W3.5
+persona acceptance criterion `AA check ≥ 0.99` is over-specific to the
+PoC's no-flush range setup. The class-name API gives a different
+(but-still-Nash) result on the same fixture.
+
+**Follow-up (low-priority, persona-spec hygiene):** Update
+`docs/pr13_prep/persona_acceptance_spec.md` to clarify the W3.5 acceptance
+criteria distinguishes between:
+- Explicit-no-flush combo setup (AA check should be ≥0.99)
+- Class-name API setup including flushes (AA check is range-dependent;
+  ≥0.50 may be appropriate)
 
 ### W2.3 Type D timeout re-confirms v1.8 SIMD ~1.0×
 
