@@ -1,3 +1,5 @@
+> ⚠️ **RETRACTED 2026-05-27.** This arbitration's "NOT-A-BUG, two conventions both valid" verdict was WRONG. The "rust" convention is being purged; Brown's convention is the only canonical terminal utility (winner collects pot including dead money — real poker chip flow). See `feedback_brown_convention_adopt.md` in memory + `docs/terminal_utility_canonical_2026-05-27.md` (will land via the convention-purge PR). The algebraic argument in this doc (uniform per-leaf offset) is correct as far as it goes but missed the reach-weighted aggregation in regret update; PR #93 ablation confirmed convention shifts strategies 12-50pp on identical seeds.
+
 # Terminal-Utility Arbitration — 2026-05-26
 
 **Mode:** ARBITRATION between Position A (the empirical audit at

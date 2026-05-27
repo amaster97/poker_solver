@@ -1,3 +1,5 @@
+> ⚠️ **PARTIALLY SUPERSEDED 2026-05-27.** This finding is empirically real — same convention + different init regrets DOES produce ~100% strategy divergence on indifference cells. BUT: it was measured under the prior "rust" convention which is now being purged (per `feedback_brown_convention_adopt.md`). The 33pp Brown apples-to-apples gap is NOT purely Nash multiplicity — PR #93 ablation showed terminal-utility convention shifts strategies 12-50pp on identical seeds. The full breakdown of the 33pp into (convention contribution + multiplicity residual) requires re-running the probe AFTER convention purge lands.
+
 # A83 Nash multiplicity — EMPIRICALLY CONFIRMED (2026-05-26)
 
 **Status:** CONFIRMED via a corrected `solve_range_vs_range_rust` probe
