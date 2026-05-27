@@ -561,11 +561,14 @@ def test_parse_brown_dump_swaps_players_p0_p1() -> None:
 
     # ``parsed.players[0]`` (our P0 = second-to-act) MUST receive the
     # second-to-act payload from Brown — which Brown put at input
-    # ``players[1]``: hands=["QdQh"], weights=[0.5].
-    assert parsed.players[0].hands == ("QdQh",), (
+    # ``players[1]``: hands=["QdQh"], weights=[0.5]. Note PR #78's
+    # ``_canonicalize_hand_pair`` re-sorts the suit order to our
+    # convention (s=0, h=1, d=2, c=3); "QdQh" → "QhQd" since
+    # (Q,h)=(12,1) sorts ahead of (Q,d)=(12,2).
+    assert parsed.players[0].hands == ("QhQd",), (
         f"PR 55 swap regressed: parsed.players[0].hands = "
-        f"{parsed.players[0].hands!r}, expected ('QdQh',) "
-        f"(Brown's players[1] payload, our P0)"
+        f"{parsed.players[0].hands!r}, expected ('QhQd',) "
+        f"(Brown's players[1] payload, our P0, canonicalized)"
     )
     assert parsed.players[0].weights == (0.5,), (
         f"PR 55 swap regressed: parsed.players[0].weights = "
@@ -577,11 +580,12 @@ def test_parse_brown_dump_swaps_players_p0_p1() -> None:
     )
 
     # Symmetric assertion: parsed.players[1] = our P1 = first-to-act on
-    # river = Brown's players[0] payload.
-    assert parsed.players[1].hands == ("AsKs",), (
+    # river = Brown's players[0] payload. ``_canonicalize_hand_pair``
+    # re-sorts "AsKs" → "KsAs" (rank-asc: K=13 before A=14, same suit).
+    assert parsed.players[1].hands == ("KsAs",), (
         f"PR 55 swap regressed: parsed.players[1].hands = "
-        f"{parsed.players[1].hands!r}, expected ('AsKs',) "
-        f"(Brown's players[0] payload, our P1)"
+        f"{parsed.players[1].hands!r}, expected ('KsAs',) "
+        f"(Brown's players[0] payload, our P1, canonicalized)"
     )
     assert parsed.players[1].weights == (1.0,), (
         f"PR 55 swap regressed: parsed.players[1].weights = "
@@ -666,9 +670,12 @@ def test_parse_brown_dump_nuts_vs_air_asymmetric_fixture() -> None:
     )
 
     # And parsed.players[1] (our P1) carries the nuts/bet profile.
-    assert parsed.players[1].hands == ("AcAd",), (
+    # ``_canonicalize_hand_pair`` re-sorts "AcAd" → "AdAc" since
+    # (A,d)=(14,2) sorts ahead of (A,c)=(14,3) under our suit order
+    # (s=0, h=1, d=2, c=3).
+    assert parsed.players[1].hands == ("AdAc",), (
         "PR 55: parsed.players[1] must carry Brown's players[0] (our P1 = "
-        "first-to-act = nuts-side); "
+        "first-to-act = nuts-side, canonicalized); "
         f"got {parsed.players[1].hands!r}"
     )
     assert "root" in parsed.players[1].profile
