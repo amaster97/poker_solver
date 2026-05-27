@@ -1,0 +1,4 @@
+name,starting_street,initial_board,stacks_bb,bet_sizes,abstraction_path,iterations
+test_river_AsKdQh,river,AsKdQh3c2s,100,"0.5,1.0",,100
+test_river_Qs7h2d,river,Qs7h2d5c9h,100,"0.5,1.0",,100
+test_river_Ts8s6s,river,Ts8s6s4c2d,100,"0.33,0.75",,100
