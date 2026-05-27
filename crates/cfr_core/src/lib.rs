@@ -420,6 +420,24 @@ fn compute_exploitability(
 /// Q3 default (spec §8): Python's `solve_range_vs_range` aggregator is NOT
 /// rewired to this entrypoint in v1.5.0 — the binding stands alone for
 /// downstream code (and v1.5.1) to wire in.
+///
+/// # Performance warning (v1.8.2, HIGH-2 per PR #105)
+///
+/// This entrypoint walks the full 1326-collapsed-by-board hand pair grid
+/// each iteration; cost scales O(hand_count² × decision_nodes). On a river
+/// fixture the measured per-iteration cost is ~26 s, so a 200-iter run is
+/// ~86 min and the 500-iter default is multi-hour (1 CPU at 100%). The
+/// O(N²) shape matches Brown's MIT reference implementation and is
+/// mathematically intrinsic to strict-Nash vector CFR — NEON SIMD is
+/// already engaged on the hot kernels (`crates/cfr_core/src/simd.rs`).
+///
+/// **For interactive use,** prefer the Python `solve_range_vs_range`
+/// aggregator (Pluribus-blueprint) which trades strict-Nash bluff-catching
+/// for ~10-100× faster wall time on river boards. Reserve this binding for
+/// offline parity runs, bluff-catching research, and other batch workflows
+/// where wall time is acceptable. Direct `_rust` callers must class-trim
+/// before invoking (the GUI, CLI, and `solve_range_vs_range_nash` wrapper
+/// all already do this).
 #[pyfunction]
 #[pyo3(signature = (
     config_json,
