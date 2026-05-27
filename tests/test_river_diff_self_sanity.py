@@ -316,6 +316,7 @@ def test_canonicalize_history_is_idempotent() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 def test_strategy_matrix_shape() -> None:
     """our_strategy_to_brown_matrix produces correctly-shaped arrays.
 
@@ -421,6 +422,7 @@ def test_no_overlap_in_fixture_ranges() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 def test_iterations_override_respected() -> None:
     """A spot with iterations_override=N drives the solver to N iterations.
 
