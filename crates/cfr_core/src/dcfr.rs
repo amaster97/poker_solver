@@ -36,6 +36,46 @@ use std::collections::HashMap;
 use crate::game::Game;
 use crate::simd;
 
+/// Validate the DCFR α (positive-regret discount exponent).
+///
+/// v1.8.1 (HIGH-1 fix per PR #99 Option B):
+///
+/// - α ≤ 0 (and non-finite α): **panic** with a clear message. α = 0 silently
+///   stalls convergence — the positive-regret discount reduces to
+///   `t^0 / (t^0 + 1) = 0.5` for every iteration, halving accumulated positive
+///   regrets every step regardless of progress. On Kuhn at 10k iter, α = 0
+///   stays at exploitability ~8.6e-2 vs ~1.27e-3 at α = 1.5 (see
+///   `docs/perpetual_qa_findings_2026-05-27.md` HIGH-1). α < 0 has no
+///   theoretical or empirical support.
+/// - 0 < α < 0.5: **warn** via `eprintln!`. Brown & Sandholm 2019 §"Regret
+///   Discounting" experimentally validates α = 3/2 only; the locked production
+///   value is α = 1.5 (`docs/a83_validation_2026-05-26.md:42-48`). The
+///   suspicious-low band (α < 0.5) prints a one-line stderr warning so
+///   reasonable-but-untested experiments don't pass silently.
+/// - α ≥ 0.5: silent OK.
+///
+/// PyO3 binding sites (`crates/cfr_core/src/lib.rs`) wrap solver invocations in
+/// `std::panic::catch_unwind` so the panic surfaces as `PyValueError` at the
+/// Python boundary rather than aborting the interpreter.
+pub fn validate_alpha(alpha: f64) {
+    if !alpha.is_finite() || alpha <= 0.0 {
+        panic!(
+            "DCFR α must be > 0 and finite; got {alpha}. α=0 silently stalls \
+             convergence (positive regrets halved every iter regardless of \
+             progress); α<0 has no theoretical or empirical support. Locked \
+             production value is α=1.5 (Brown & Sandholm 2019; \
+             docs/a83_validation_2026-05-26.md)."
+        );
+    }
+    if alpha < 0.5 {
+        eprintln!(
+            "[dcfr] WARNING: α={alpha} is below the paper's analyzed range \
+             (Brown 2019 validates α=3/2 only; convergence below α≈1.0 is \
+             empirically much slower). Locked production value is α=1.5."
+        );
+    }
+}
+
 /// Per-infoset cumulative regret and strategy-sum vectors.
 #[derive(Clone, Debug)]
 pub struct InfosetData {
@@ -94,6 +134,9 @@ impl<G: Game> DCFRSolver<G> {
         gamma: f64,
         locked_strategies: HashMap<String, Vec<f64>>,
     ) -> Self {
+        // v1.8.1 (HIGH-1): HARD-FAIL on α ≤ 0, WARN on α < 0.5. See
+        // `validate_alpha` for full rationale.
+        validate_alpha(alpha);
         Self {
             alpha,
             beta,

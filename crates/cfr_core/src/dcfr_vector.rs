@@ -213,6 +213,8 @@ impl VectorDCFR {
         regret_init_noise: f64,
         rng_seed: u64,
     ) -> Self {
+        // v1.8.1 (HIGH-1): HARD-FAIL on α ≤ 0, WARN on α < 0.5.
+        crate::dcfr::validate_alpha(alpha);
         let mut init_rng = crate::pcs::PcsRng::new(rng_seed);
         let mut infosets: Vec<Option<VectorInfosetData>> = Vec::with_capacity(tree.nodes.len());
         for node in &tree.nodes {

@@ -977,6 +977,12 @@ def solve_range_vs_range_nash(
             "solve_hunl_preflop directly."
         )
 
+    # v1.8.1 (HIGH-1): HARD-FAIL on alpha <= 0, WARN on alpha < 0.5. See
+    # `poker_solver.dcfr._validate_alpha` for full rationale.
+    from poker_solver.dcfr import _validate_alpha
+
+    _validate_alpha(float(alpha))
+
     hero_classes = _normalize_range(hero_range)
     villain_classes = _normalize_range(villain_range)
     if not hero_classes:

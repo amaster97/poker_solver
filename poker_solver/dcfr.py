@@ -20,6 +20,8 @@ This is the Python reference implementation. Each iteration t:
 
 from __future__ import annotations
 
+import math
+import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -28,6 +30,43 @@ from typing import Any
 import numpy as np
 
 from poker_solver.games import Game
+
+
+def _validate_alpha(alpha: float) -> None:
+    """Validate the DCFR alpha (positive-regret discount exponent).
+
+    v1.8.1 (HIGH-1 fix per PR #99 Option B):
+
+    - alpha <= 0 (and non-finite alpha): raises ``ValueError``. alpha = 0
+      silently stalls convergence — the positive-regret discount reduces to
+      ``t**0 / (t**0 + 1) = 0.5`` every iteration, halving accumulated positive
+      regrets regardless of progress. On Kuhn at 10k iter, alpha = 0 stays at
+      exploitability ~8.6e-2 vs ~1.27e-3 at alpha = 1.5
+      (``docs/perpetual_qa_findings_2026-05-27.md`` HIGH-1). alpha < 0 has no
+      theoretical or empirical support.
+    - 0 < alpha < 0.5: emits ``UserWarning`` via ``warnings.warn``. Brown &
+      Sandholm 2019 §"Regret Discounting" experimentally validates alpha = 3/2
+      only; the locked production value is alpha = 1.5
+      (``docs/a83_validation_2026-05-26.md``).
+    - alpha >= 0.5: silent OK.
+    """
+    if not math.isfinite(alpha) or alpha <= 0.0:
+        raise ValueError(
+            f"DCFR alpha must be > 0 and finite; got {alpha}. alpha=0 silently "
+            "stalls convergence (positive regrets halved every iter regardless "
+            "of progress); alpha<0 has no theoretical or empirical support. "
+            "Locked production value is alpha=1.5 (Brown & Sandholm 2019; "
+            "docs/a83_validation_2026-05-26.md)."
+        )
+    if alpha < 0.5:
+        warnings.warn(
+            f"DCFR alpha={alpha} is below the paper's analyzed range "
+            "(Brown 2019 validates alpha=3/2 only; convergence below "
+            "alpha~1.0 is empirically much slower). Locked production value "
+            "is alpha=1.5.",
+            UserWarning,
+            stacklevel=3,
+        )
 
 
 @dataclass
@@ -72,6 +111,9 @@ class DCFRSolver:
         seed: int | None = None,
         locked_strategies: Mapping[str, list[float]] | None = None,
     ) -> None:
+        # v1.8.1 (HIGH-1): HARD-FAIL on alpha <= 0, WARN on alpha < 0.5.
+        # See `_validate_alpha` for full rationale.
+        _validate_alpha(float(alpha))
         self.game = game
         self.alpha = float(alpha)
         self.beta = float(beta)
