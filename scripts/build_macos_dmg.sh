@@ -259,6 +259,22 @@ if [[ ! -d "$APP_PATH" ]]; then
     err "PyInstaller did not produce $APP_PATH"
 fi
 
+# Resolve APP_PATH to an ABSOLUTE path before any subsequent `defaults read`
+# invocations.  macOS `defaults read` treats a RELATIVE path argument as a
+# DOMAIN NAME (not a filesystem path) and silently returns whatever lives in
+# the (likely-empty) default-domain database — NOT the bundle's Info.plist.
+# Symptom: CFBundleShortVersionString comes back empty/"MISSING" and the
+# step-5.5 hardening check then fails with a confusing drift error even
+# though the Info.plist on disk is correct.  Discovered during the v1.8.0
+# .dmg build (agent aa1c9874) when the script was run with the default
+# relative OUTPUT_DIR="dist".  Use `cd … && pwd` rather than `realpath`
+# because BSD `realpath` (stock macOS) lacks the GNU `-e`/`-m` flags and
+# behavior on missing components differs across versions.
+APP_PATH_ABS="$(cd "$(dirname "$APP_PATH")" && pwd)/$(basename "$APP_PATH")"
+if [[ ! -d "$APP_PATH_ABS" ]]; then
+    err "internal: APP_PATH_ABS resolved to non-existent dir: $APP_PATH_ABS"
+fi
+
 # ---------------------------------------------------------------------------
 # Step 4: In-bundle _rust smoke test (TOP RISK mitigation; spec §12.1)
 # ---------------------------------------------------------------------------
@@ -321,10 +337,25 @@ fi
 # from pyproject.toml via the step-1 derivation).  PR 44 made the spec
 # read __version__ dynamically; PR 86 enforces that what we read is what
 # we shipped.
-PLIST_SHORT="$(defaults read "$APP_PATH/Contents/Info.plist" CFBundleShortVersionString 2>/dev/null || echo MISSING)"
-PLIST_FULL="$(defaults read "$APP_PATH/Contents/Info.plist" CFBundleVersion 2>/dev/null || echo MISSING)"
+# IMPORTANT: pass an ABSOLUTE path to `defaults read`.  A relative path
+# (e.g., "dist/Poker Solver.app/Contents/Info.plist") is interpreted as a
+# DOMAIN name by `defaults` and silently returns empty/garbage — see the
+# block above where APP_PATH_ABS is computed.
+PLIST_SHORT="$(defaults read "$APP_PATH_ABS/Contents/Info.plist" CFBundleShortVersionString 2>/dev/null || echo MISSING)"
+PLIST_FULL="$(defaults read "$APP_PATH_ABS/Contents/Info.plist" CFBundleVersion 2>/dev/null || echo MISSING)"
 echo "[verify] Info.plist CFBundleShortVersionString: $PLIST_SHORT"
 echo "[verify] Info.plist CFBundleVersion:            $PLIST_FULL"
+# HARD-FAIL on empty/MISSING rather than letting the drift comparison below
+# generate a misleading error (per feedback_silent_skip_hazard.md: empty
+# returns from probing commands must surface, not silently pass downstream).
+# If we got here with empty values, either the Info.plist is genuinely
+# malformed OR `defaults read` was given a path it couldn't resolve.
+if [[ -z "$PLIST_SHORT" || "$PLIST_SHORT" == "MISSING" ]]; then
+    err "Info.plist CFBundleShortVersionString is empty/MISSING for $APP_PATH_ABS/Contents/Info.plist.  Either the plist is malformed, or \`defaults read\` mis-parsed the path (it requires an ABSOLUTE path — relative paths are treated as domain names)."
+fi
+if [[ -z "$PLIST_FULL" || "$PLIST_FULL" == "MISSING" ]]; then
+    err "Info.plist CFBundleVersion is empty/MISSING for $APP_PATH_ABS/Contents/Info.plist.  Either the plist is malformed, or \`defaults read\` mis-parsed the path (it requires an ABSOLUTE path — relative paths are treated as domain names)."
+fi
 if [[ "$PLIST_SHORT" != "$APP_VERSION" ]]; then
     err "Info.plist CFBundleShortVersionString ($PLIST_SHORT) does not match APP_VERSION ($APP_VERSION).  Spec/__init__/pyproject drift?"
 fi
