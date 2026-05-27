@@ -394,7 +394,11 @@ log "command: bash $INNER_SCRIPT --expected-sha $EXPECTED_SHA ${INNER_FLAGS[*]:-
 log ""
 
 INNER_EXIT=0
-bash "$INNER_SCRIPT" --expected-sha "$EXPECTED_SHA" "${INNER_FLAGS[@]:-}" || INNER_EXIT=$?
+if [[ ${#INNER_FLAGS[@]} -gt 0 ]]; then
+    bash "$INNER_SCRIPT" --expected-sha "$EXPECTED_SHA" "${INNER_FLAGS[@]}" || INNER_EXIT=$?
+else
+    bash "$INNER_SCRIPT" --expected-sha "$EXPECTED_SHA" || INNER_EXIT=$?
+fi
 
 # -----------------------------------------------------------------------------
 # Phase G: stash restore on success, leave-in-place on failure
