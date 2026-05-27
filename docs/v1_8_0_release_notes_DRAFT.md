@@ -189,8 +189,11 @@ lifted per `docs/v1_6_1_ship_hold_review_2026-05-26.md`.
   used a "rust" terminal-utility formula that treated
   `initial_contributions` as recoverable by the player who folded; this
   produced a per-action regret bias that diverged 12-50pp from the
-  reference Brown solver at deep cap (PR #93 ablation,
-  `docs/a83_terminal_utility_ablation_results_2026-05-26.md`). v1.8.0
+  reference Brown solver at deep cap (internal terminal-utility ablation,
+  branch `pr-93-terminal-utility-ablation` @ `986f48d` — NOT a merged
+  GitHub PR; results archived at
+  `docs/a83_terminal_utility_ablation_results_2026-05-26_archived.md`).
+  v1.8.0
   deletes that path and ships a single canonical `utility()` function.
 
   **Canonical formula** (per `feedback_brown_convention_adopt.md`):
@@ -394,8 +397,10 @@ valid). The reframed gate does NOT strict-assert per-cell (that would
 be non-falsifiable under multiplicity per
 `feedback_nash_multiplicity_acceptance.md`); it gates on L1, top-action
 coverage, and overall coverage. The convention purge (PR #78,
-`37e5be1`) closed the regret-update bias (PR #93's measured 12-50pp
-Rust-vs-Rust shift); residual is genuine multiplicity. EV-of-action
+`37e5be1`) closed the regret-update bias (the internal terminal-utility
+ablation on branch `pr-93-terminal-utility-ablation` @ `986f48d`
+measured a 12-50pp Rust-vs-Rust shift between conventions; NOT a merged
+GitHub PR); residual is genuine multiplicity. EV-of-action
 invariance gauntlet (`docs/ev_invariance_sanity_gauntlet_design_2026-05-27.md`)
 is the canonical sanity check for the residual.
 
@@ -411,8 +416,9 @@ Whatever remains after the convention purge is **Nash multiplicity at
 indifference manifolds** rather than a game-definition mismatch: deep-cap
 HUNL has indifference manifolds where multiple Nash equilibria are all
 valid and small initial-condition perturbations select between them.
-The convention purge DID fix the regret-update bias (PR #93's 12-50pp
-gap is closed); the strict per-cell |Δ| residual is a SEPARATE
+The convention purge DID fix the regret-update bias (the
+`pr-93-terminal-utility-ablation` branch's measured 12-50pp gap is
+closed); the strict per-cell |Δ| residual is a SEPARATE
 phenomenon and is NOT expected to collapse — A83's strict max |Δ|
 moved from 0.907 (pre-purge) to 0.907 (post-purge) unchanged at the
 recorded precision. The test PASSES because the reframed 4-layer gate
@@ -425,8 +431,9 @@ probabilities aren't (see
 Trajectory of `0.907` (max |Δ| on the A83
 fixture at `iter=2000`) anchors the post-purge baseline relative to
 the pre-purge `12.27pp @ 2000 iters / 10.28pp @ 8000 iters` figure
-from PR #93's ablation. Note: the 12-50pp PR #93 gap was a
-Rust-vs-Rust ablation between conventions and IS closed by the purge;
+from the internal `pr-93-terminal-utility-ablation` branch's run.
+Note: the 12-50pp gap from that internal ablation was a Rust-vs-Rust
+ablation between conventions and IS closed by the purge;
 the 0.907 strict max |Δ| is the Rust-vs-Brown apples-to-apples residual
 under the canonical convention, dominated by Nash multiplicity.
 
@@ -518,8 +525,10 @@ as recoverable by the player who folded; the canonical convention does
 not. The two conventions produce **different strategy probabilities
 even on identical seeds + identical action menus** — the per-action
 regret bias measured between conventions was 12-50pp at deep cap
-(PR #93 ablation,
-`docs/a83_terminal_utility_ablation_results_2026-05-26.md`).
+(internal terminal-utility ablation, branch
+`pr-93-terminal-utility-ablation` @ `986f48d` — NOT a merged GitHub
+PR; results archived at
+`docs/a83_terminal_utility_ablation_results_2026-05-26_archived.md`).
 
 **Justification:** per `feedback_brown_convention_adopt.md`, there is
 exactly one correct terminal-utility convention — the rule of real
