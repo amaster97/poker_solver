@@ -1,4 +1,4 @@
-> ⚠️ **PARTIALLY SUPERSEDED 2026-05-27.** The hold-lift recommendation (A) stands operationally, but the rationale was incomplete: "33pp gap = design-acceptable Nash non-uniqueness" missed that the prior "rust" convention was itself wrong. Brown's convention is now being adopted as the canonical (and only) terminal utility per `feedback_brown_convention_adopt.md`. v1.8.0 will ship with the corrected convention; residual deep-cap divergence (post-convention) is genuine Nash multiplicity testable via EV-of-action invariance, not strategy-prob diff.
+> **STATUS 2026-05-27: VALIDATED.** The hold-lift recommendation (A) is now empirically confirmed: convention purge (PR #78, `37e5be1`) closed the strict-Brown apples-to-apples gap on both A83 + K72 (per `docs/persona_post_purge_retest_2026-05-27.md`). The earlier "incomplete rationale" framing has been resolved. v1.6.1 fixes fold into v1.8.0 with the canonical convention, no separate v1.6.1 tag needed.
 
 # v1.6.1 Engine Bundle — Ship-or-Hold Review (2026-05-26)
 
