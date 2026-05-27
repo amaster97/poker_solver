@@ -65,7 +65,249 @@ use crate::exploit::{
     enumerate_hole_card_pairs, hole_string, terminal_utility, BettingTree, FlatNode,
 };
 use crate::hunl::{HUNLConfig, HUNLState};
+use crate::hunl_eval::Strength;
 use crate::simd;
+
+// ---------------------------------------------------------------------------
+// HIGH-2 follow-up: terminal-leaf precomputation cache.
+//
+// Profile data on full-deck river (1081 board-disjoint hands per player,
+// 4 terminal leaves) showed `terminal_value_vector` consuming ~100% of
+// inner-kernel time. Root cause: `terminal_utility` calls `evaluate_7`
+// twice per (hp, ho) pair at every Showdown leaf, every iteration —
+// `~1.1M pairs × 2 evals × N leaves × 2N iters` of repeated O(N²)
+// `evaluate_7` work for a constant board.
+//
+// This cache precomputes once per solve:
+//   - For Showdown leaves: per-player `Strength` vector. The per-pair
+//     utility becomes a single `Strength` cmp (u64 cmp) + a branch on
+//     {win, lose, tie} payoff. No `evaluate_7` in the inner loop.
+//   - For Fold leaves: utility is constant in the holes (just chip flow);
+//     stored as a single scalar per (leaf, update_player).
+//
+// Bit-exactness with the un-cached path is preserved because:
+//   - `Strength::evaluate_7` is deterministic, so caching the result and
+//     comparing cached `u64`s yields the same `>`/`<`/`==` outcome.
+//   - The payoff branches use the same chip arithmetic as `terminal_utility`,
+//     verified by the unit test `terminal_value_vector_matches_uncached`.
+// ---------------------------------------------------------------------------
+
+/// Precomputed per-leaf utility data, keyed by `tree.nodes` index.
+///
+/// One entry per terminal leaf (Fold or Showdown). Non-terminal nodes
+/// (Chance, Decision) get `LeafKind::NonTerminal` placeholders so we can
+/// index by `node_idx` directly without a side-map.
+pub(crate) struct TerminalCache {
+    pub(crate) leaves: Vec<LeafCacheEntry>,
+}
+
+pub(crate) enum LeafCacheEntry {
+    /// Non-terminal node (Chance or Decision) — no cache content.
+    NonTerminal,
+    /// Fold leaf — utility is constant in hole cards.
+    /// `payoff[update_player]` is the BB-normalized chip flow.
+    Fold { payoff: [f64; 2] },
+    /// Showdown leaf — precomputed per-player strength vectors plus the
+    /// constant chip-flow factors. The per-pair utility is:
+    ///   if s0 > s1: P0 wins → `(pot/2 + cs_loser0)/bb` for winner,
+    ///               `-cs0/bb` for loser. Etc.
+    Showdown {
+        /// `strength[p][h] = Strength::evaluate_7(hole[p][h] ++ board)`.
+        strength: [Vec<Strength>; 2],
+        /// Per-(winning_player, update_player) payoff. `win_payoff[winner][update]`.
+        /// e.g. `win_payoff[0][0] = (pot_total - cs0) / bb` (P0 wins, payoff to P0).
+        win_payoff: [[f64; 2]; 2],
+        /// Per-update_player tie payoff (split pot).
+        tie_payoff: [f64; 2],
+    },
+}
+
+impl TerminalCache {
+    /// Build a per-leaf cache for every terminal in `tree`. Showdown
+    /// leaves are evaluated once per player; Fold leaves only need their
+    /// chip-flow precomputed (no per-hand evaluation needed).
+    pub(crate) fn build(tree: &BettingTree, ctx: &EvalContext) -> Self {
+        let mut leaves: Vec<LeafCacheEntry> = Vec::with_capacity(tree.nodes.len());
+        for node in &tree.nodes {
+            match node {
+                FlatNode::Fold {
+                    contributions,
+                    big_blind,
+                    folded_player,
+                    initial_pot,
+                    initial_contributions,
+                } => {
+                    let bb = *big_blind as f64;
+                    let cs0 = contributions[0] as f64 - initial_contributions[0] as f64;
+                    let cs1 = contributions[1] as f64 - initial_contributions[1] as f64;
+                    let pot_total = *initial_pot as f64 + cs0 + cs1;
+                    let payoff = if *folded_player == 0 {
+                        // P1 wins.
+                        [-cs0 / bb, (pot_total - cs1) / bb]
+                    } else {
+                        // P0 wins.
+                        [(pot_total - cs0) / bb, -cs1 / bb]
+                    };
+                    leaves.push(LeafCacheEntry::Fold { payoff });
+                }
+                FlatNode::Showdown {
+                    contributions,
+                    big_blind,
+                    board,
+                    initial_pot,
+                    initial_contributions,
+                } => {
+                    let bb = *big_blind as f64;
+                    let cs0 = contributions[0] as f64 - initial_contributions[0] as f64;
+                    let cs1 = contributions[1] as f64 - initial_contributions[1] as f64;
+                    let pot_total = *initial_pot as f64 + cs0 + cs1;
+                    // win_payoff[winner][update_player]:
+                    //   winner = 0: P0 collects (pot - cs0)/bb, P1 pays -cs1/bb
+                    //   winner = 1: P0 pays   -cs0/bb,         P1 collects (pot - cs1)/bb
+                    let win_payoff = [
+                        [(pot_total - cs0) / bb, -cs1 / bb],
+                        [-cs0 / bb, (pot_total - cs1) / bb],
+                    ];
+                    let tie_payoff = [
+                        (pot_total / 2.0 - cs0) / bb,
+                        (pot_total / 2.0 - cs1) / bb,
+                    ];
+                    // Per-player strength vectors. Each evaluation is a
+                    // single `evaluate_7(hole ++ board)` call.
+                    let mut strength_p: [Vec<Strength>; 2] = [
+                        Vec::with_capacity(ctx.hand_count[0]),
+                        Vec::with_capacity(ctx.hand_count[1]),
+                    ];
+                    for p in 0..2 {
+                        for h in 0..ctx.hand_count[p] {
+                            let hole = ctx.hole[p][h];
+                            let mut seven = [0u8; 7];
+                            seven[0] = hole[0];
+                            seven[1] = hole[1];
+                            seven[2..7].copy_from_slice(board);
+                            strength_p[p].push(Strength::evaluate_7(&seven));
+                        }
+                    }
+                    leaves.push(LeafCacheEntry::Showdown {
+                        strength: strength_p,
+                        win_payoff,
+                        tie_payoff,
+                    });
+                }
+                _ => leaves.push(LeafCacheEntry::NonTerminal),
+            }
+        }
+        Self { leaves }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HIGH-2 follow-up profiling instrumentation (feature `profile_rvr`).
+//
+// When the `profile_rvr` feature is enabled, each labeled phase inside
+// `traverse` accumulates its wall-clock cost into a thread-local counter
+// reported by the `rvr_profile` bench. Without the feature, `prof_start`
+// returns `()` and `prof_end` is a no-op — the compiler folds both away
+// so the production hot path pays zero overhead.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "profile_rvr")]
+pub mod profile {
+    use std::cell::RefCell;
+    use std::time::{Duration, Instant};
+
+    #[derive(Default, Clone, Debug)]
+    pub struct PhaseCounters {
+        pub terminal_eval_ns: u128,
+        pub compute_strategy_ns: u128,
+        pub discount_ns: u128,
+        pub opp_next_reach_ns: u128,
+        pub own_next_reach_ns: u128,
+        pub node_values_ns: u128,
+        pub update_regret_ns: u128,
+        pub update_strategy_sum_ns: u128,
+        pub alloc_action_values_ns: u128,
+        pub alloc_strategy_buf_ns: u128,
+        pub chance_accumulate_ns: u128,
+    }
+
+    thread_local! {
+        static COUNTERS: RefCell<PhaseCounters> = RefCell::new(PhaseCounters::default());
+    }
+
+    pub fn reset() {
+        COUNTERS.with(|c| *c.borrow_mut() = PhaseCounters::default());
+    }
+
+    pub fn snapshot() -> PhaseCounters {
+        COUNTERS.with(|c| c.borrow().clone())
+    }
+
+    #[inline(always)]
+    pub fn start() -> Instant {
+        Instant::now()
+    }
+
+    #[inline(always)]
+    pub fn add(field: PhaseField, t: Instant) {
+        let dur: Duration = t.elapsed();
+        let ns = dur.as_nanos();
+        COUNTERS.with(|c| {
+            let mut cnt = c.borrow_mut();
+            match field {
+                PhaseField::TerminalEval => cnt.terminal_eval_ns += ns,
+                PhaseField::ComputeStrategy => cnt.compute_strategy_ns += ns,
+                PhaseField::Discount => cnt.discount_ns += ns,
+                PhaseField::OppNextReach => cnt.opp_next_reach_ns += ns,
+                PhaseField::OwnNextReach => cnt.own_next_reach_ns += ns,
+                PhaseField::NodeValues => cnt.node_values_ns += ns,
+                PhaseField::UpdateRegret => cnt.update_regret_ns += ns,
+                PhaseField::UpdateStrategySum => cnt.update_strategy_sum_ns += ns,
+                PhaseField::AllocActionValues => cnt.alloc_action_values_ns += ns,
+                PhaseField::AllocStrategyBuf => cnt.alloc_strategy_buf_ns += ns,
+                PhaseField::ChanceAccumulate => cnt.chance_accumulate_ns += ns,
+            }
+        });
+    }
+
+    #[derive(Copy, Clone)]
+    pub enum PhaseField {
+        TerminalEval,
+        ComputeStrategy,
+        Discount,
+        OppNextReach,
+        OwnNextReach,
+        NodeValues,
+        UpdateRegret,
+        UpdateStrategySum,
+        AllocActionValues,
+        AllocStrategyBuf,
+        ChanceAccumulate,
+    }
+}
+
+#[cfg(feature = "profile_rvr")]
+macro_rules! prof_start {
+    () => { Some($crate::dcfr_vector::profile::start()) };
+}
+#[cfg(feature = "profile_rvr")]
+macro_rules! prof_end {
+    ($t:expr, $field:ident) => {
+        if let Some(t) = $t {
+            $crate::dcfr_vector::profile::add(
+                $crate::dcfr_vector::profile::PhaseField::$field, t);
+        }
+    };
+}
+
+#[cfg(not(feature = "profile_rvr"))]
+macro_rules! prof_start {
+    () => { () };
+}
+#[cfg(not(feature = "profile_rvr"))]
+macro_rules! prof_end {
+    ($t:expr, $field:ident) => { let _ = $t; };
+}
 
 /// Per-decision-node vector-form regret + strategy_sum table.
 ///
@@ -334,6 +576,7 @@ impl VectorDCFR {
         &mut self,
         tree: &BettingTree,
         eval_ctx: &EvalContext,
+        terminal_cache: &TerminalCache,
         node_idx: usize,
         update_player: usize,
         reach_p: &[f64],
@@ -350,7 +593,24 @@ impl VectorDCFR {
                 // `update_player` is the cf-utility, i.e. sum over
                 // opponent hands of `opp_reach * value_per_pair`.
                 let opp_player = 1 - update_player;
-                terminal_value_vector(node, eval_ctx, update_player, opp_player, reach_opp)
+                let _t = prof_start!();
+                let r = if std::env::var("CFR_VECTOR_NO_TERMINAL_CACHE").is_ok() {
+                    // HIGH-2 follow-up: profile-comparison knob. When the
+                    // env var is set we route through the uncached path
+                    // (calls `evaluate_7` per pair, every iter) for
+                    // baseline measurement. Production has it unset.
+                    terminal_value_vector(node, eval_ctx, update_player, opp_player, reach_opp)
+                } else {
+                    terminal_value_vector_cached(
+                        &terminal_cache.leaves[node_idx],
+                        eval_ctx,
+                        update_player,
+                        opp_player,
+                        reach_opp,
+                    )
+                };
+                prof_end!(_t, TerminalEval);
+                r
             }
             FlatNode::Chance { prob, children } => {
                 // Board-card chance node (postflop run-out). Per Brown's
@@ -358,11 +618,20 @@ impl VectorDCFR {
                 // weight-summed: value = Σ_c prob * traverse(c, ...).
                 let mut values = vec![0.0_f64; update_hands];
                 for &c in children {
-                    let child_values =
-                        self.traverse(tree, eval_ctx, c, update_player, reach_p, reach_opp);
+                    let child_values = self.traverse(
+                        tree,
+                        eval_ctx,
+                        terminal_cache,
+                        c,
+                        update_player,
+                        reach_p,
+                        reach_opp,
+                    );
+                    let _t = prof_start!();
                     for (i, v) in child_values.iter().enumerate() {
                         values[i] += *prob * v;
                     }
+                    prof_end!(_t, ChanceAccumulate);
                 }
                 values
             }
@@ -372,17 +641,23 @@ impl VectorDCFR {
 
                 // Compute the per-hand current strategy from regret-matching.
                 let player_hands = eval_ctx.hand_count[player];
+                let _ta = prof_start!();
                 let mut strategy = vec![0.0_f64; player_hands * action_count];
+                prof_end!(_ta, AllocStrategyBuf);
                 {
                     let info = self.infosets[node_idx]
                         .as_ref()
                         .expect("decision node must have an infoset slot");
+                    let _t = prof_start!();
                     Self::compute_strategy(info, &mut strategy);
+                    prof_end!(_t, ComputeStrategy);
                 }
 
                 if player != update_player {
                     // Opponent node — propagate their reach via current
-                    // strategy and accumulate update_player values.
+                    // strategy and accumulate update_player values. Pass
+                    // `terminal_cache` down so terminal children use the
+                    // precomputed strengths.
                     // Mirrors `trainer.cpp:166-181` (MIT).
                     //
                     // Sizing note: at this branch the current-node player
@@ -399,20 +674,25 @@ impl VectorDCFR {
                     let mut next_reach = vec![0.0_f64; player_hands];
                     for (a, &child_idx) in children.iter().enumerate() {
                         // next_reach[h] = reach_opp[h] * strategy[h, a]
+                        let _t = prof_start!();
                         for h in 0..player_hands {
                             next_reach[h] = reach_opp[h] * strategy[h * action_count + a];
                         }
+                        prof_end!(_t, OppNextReach);
                         let child_values = self.traverse(
                             tree,
                             eval_ctx,
+                            terminal_cache,
                             child_idx,
                             update_player,
                             reach_p,
                             &next_reach,
                         );
+                        let _t = prof_start!();
                         for h in 0..update_hands {
                             values[h] += child_values[h];
                         }
+                        prof_end!(_t, ChanceAccumulate);
                     }
                     return values;
                 }
@@ -425,7 +705,9 @@ impl VectorDCFR {
                     let info = self.infosets[node_idx]
                         .as_mut()
                         .expect("decision node must have an infoset slot");
+                    let _t = prof_start!();
                     Self::discount(info, self.iteration, self.alpha, self.beta, self.gamma);
+                    prof_end!(_t, Discount);
                 }
                 // Recompute strategy after the discount (the prior
                 // `strategy` was based on pre-discount regrets — Brown's
@@ -434,19 +716,26 @@ impl VectorDCFR {
                     let info = self.infosets[node_idx]
                         .as_ref()
                         .expect("decision node must have an infoset slot");
+                    let _t = prof_start!();
                     Self::compute_strategy(info, &mut strategy);
+                    prof_end!(_t, ComputeStrategy);
                 }
 
+                let _ta = prof_start!();
                 let mut action_values = vec![0.0_f64; action_count * update_hands];
                 let mut next_reach = vec![0.0_f64; player_hands];
+                prof_end!(_ta, AllocActionValues);
                 for (a, &child_idx) in children.iter().enumerate() {
                     // next_reach[h] = reach_p[h] * strategy[h, a]
+                    let _t = prof_start!();
                     for h in 0..player_hands {
                         next_reach[h] = reach_p[h] * strategy[h * action_count + a];
                     }
+                    prof_end!(_t, OwnNextReach);
                     let child_values = self.traverse(
                         tree,
                         eval_ctx,
+                        terminal_cache,
                         child_idx,
                         update_player,
                         &next_reach,
@@ -457,6 +746,7 @@ impl VectorDCFR {
                 }
 
                 // node_values[h] = Σ_a strategy[h,a] * action_values[a,h]
+                let _t = prof_start!();
                 let mut node_values = vec![0.0_f64; update_hands];
                 for h in 0..update_hands {
                     let mut value = 0.0_f64;
@@ -466,6 +756,7 @@ impl VectorDCFR {
                     }
                     node_values[h] = value;
                 }
+                prof_end!(_t, NodeValues);
 
                 // Update regret + strategy_sum. Brown's update is
                 // `regret[h,a] += (action_value[a,h] - node_value[h])`
@@ -487,6 +778,7 @@ impl VectorDCFR {
                     // (covered by `simd::tests::update_regret_sum_vector_*`).
                     // Shape: `info.regret` is hand-major (`[h][a]`),
                     // `action_values` is action-major (`[a][h]`).
+                    let _t = prof_start!();
                     simd::update_regret_sum_vector(
                         &mut info.regret,
                         &action_values,
@@ -494,6 +786,7 @@ impl VectorDCFR {
                         update_hands,
                         action_count,
                     );
+                    prof_end!(_t, UpdateRegret);
                     // strategy_sum[h,a] += reach_p[h] * avg_weight * strategy[h,a]
                     // Mirrors `trainer.cpp:226-237` (MIT).
                     //
@@ -503,6 +796,7 @@ impl VectorDCFR {
                     // runtime-detected) / SSE2 (x86_64 baseline) / scalar.
                     // The kernel is bit-identical to the prior scalar inner
                     // loop on each lane (two roundings, no FMA).
+                    let _t = prof_start!();
                     for h in 0..update_hands {
                         let weight = reach_p[h] * avg_weight;
                         if weight == 0.0 {
@@ -516,6 +810,7 @@ impl VectorDCFR {
                             weight,
                         );
                     }
+                    prof_end!(_t, UpdateStrategySum);
                 }
 
                 node_values
@@ -526,6 +821,10 @@ impl VectorDCFR {
     /// Drive `iterations` iterations of vector-form DCFR. Alternates
     /// player updates per iteration to match Brown's `Trainer::run`
     /// (`trainer.cpp:343-369`, MIT).
+    ///
+    /// HIGH-2 follow-up: builds a `TerminalCache` once before iteration
+    /// so per-pair `evaluate_7` work happens only once per leaf for the
+    /// whole solve, not per iter.
     pub(crate) fn solve(
         &mut self,
         tree: &BettingTree,
@@ -540,12 +839,13 @@ impl VectorDCFR {
         // same vector.
         let reach_p0: Vec<f64> = vec![1.0; eval_ctx.hand_count[0]];
         let reach_p1: Vec<f64> = vec![1.0; eval_ctx.hand_count[1]];
+        let terminal_cache = TerminalCache::build(tree, eval_ctx);
         for _ in 0..iterations {
             self.iteration += 1;
             // Update player 0.
-            self.traverse(tree, eval_ctx, 0, 0, &reach_p0, &reach_p1);
+            self.traverse(tree, eval_ctx, &terminal_cache, 0, 0, &reach_p0, &reach_p1);
             // Update player 1.
-            self.traverse(tree, eval_ctx, 0, 1, &reach_p1, &reach_p0);
+            self.traverse(tree, eval_ctx, &terminal_cache, 0, 1, &reach_p1, &reach_p0);
         }
     }
 }
@@ -659,7 +959,15 @@ impl EvalContext {
     }
 }
 
-/// Terminal-leaf value vector for `update_player`.
+/// **Reference (uncached) terminal-leaf value vector.**
+///
+/// Retained as the parity reference for the cached path
+/// (`terminal_value_vector_cached`) — the unit test
+/// `cached_matches_uncached_terminal_value` asserts bit-identical output
+/// between the two on a small fixture. Production callers go through
+/// the cached version; this implementation is selected at the
+/// `traverse` call-site when the `CFR_VECTOR_NO_TERMINAL_CACHE` env var
+/// is set (used by the `rvr_profile` bench for baseline measurement).
 ///
 /// For each `update_player` hand `hp`, sum over `opp_player` hands `ho`:
 ///   value[hp] += reach_opp[ho] * utility(hp, ho)   [if disjoint]
@@ -706,6 +1014,102 @@ fn terminal_value_vector(
             total += reach_opp[ho] * utility;
         }
         out[hp] = total;
+    }
+    out
+}
+
+/// **Cached terminal-leaf value vector (HIGH-2 follow-up).**
+///
+/// Same math as [`terminal_value_vector`] (kept above as the parity
+/// reference) but reads precomputed `Strength` vectors and chip-flow
+/// payoffs from `TerminalCache`. No `evaluate_7` calls in the inner
+/// loop — they happened once at `TerminalCache::build` time, before
+/// any iteration. For a 1081-hand river with 4 terminal leaves this
+/// hoists ~17M evaluate_7 calls per iter out to a one-time ~8.6K-call
+/// build cost.
+///
+/// Bit-exactness vs [`terminal_value_vector`]: cached `Strength` values
+/// are the unmodified output of `evaluate_7`, so the `>`/`<`/`==` branch
+/// on them is identical to the uncached path's comparison. The chip-flow
+/// constants come from the same formulas in `terminal_utility`.
+fn terminal_value_vector_cached(
+    leaf: &LeafCacheEntry,
+    ctx: &EvalContext,
+    update_player: usize,
+    opp_player: usize,
+    reach_opp: &[f64],
+) -> Vec<f64> {
+    let update_hands = ctx.hand_count[update_player];
+    let opp_hands = ctx.hand_count[opp_player];
+    let mut out = vec![0.0_f64; update_hands];
+
+    match leaf {
+        LeafCacheEntry::Fold { payoff } => {
+            // Fold leaf: utility is constant in holes. Inner loop is
+            // just a blocker-filter + reach accumulation.
+            let util = payoff[update_player];
+            for hp in 0..update_hands {
+                let hole_p = ctx.hole[update_player][hp];
+                let mut total = 0.0_f64;
+                // SAFETY: indexed-for loop into `ctx.hole[opp]` and
+                // `reach_opp` with bounds known equal to `opp_hands`
+                // (precondition of the EvalContext build).
+                for ho in 0..opp_hands {
+                    let hole_o = ctx.hole[opp_player][ho];
+                    if hole_p[0] == hole_o[0]
+                        || hole_p[0] == hole_o[1]
+                        || hole_p[1] == hole_o[0]
+                        || hole_p[1] == hole_o[1]
+                    {
+                        continue;
+                    }
+                    total += reach_opp[ho] * util;
+                }
+                out[hp] = total;
+            }
+        }
+        LeafCacheEntry::Showdown {
+            strength,
+            win_payoff,
+            tie_payoff,
+        } => {
+            // Showdown leaf: per-pair outcome from precomputed `Strength`
+            // comparison. Branch on `s_p` vs `s_o` and pick the right
+            // payoff (winner-perspective × update_player's payoff slot).
+            let s_self = &strength[update_player];
+            let s_opp = &strength[opp_player];
+            let win_self = win_payoff[update_player][update_player];
+            let win_opp = win_payoff[opp_player][update_player];
+            let tie = tie_payoff[update_player];
+            for hp in 0..update_hands {
+                let hole_p = ctx.hole[update_player][hp];
+                let sp = s_self[hp];
+                let mut total = 0.0_f64;
+                for ho in 0..opp_hands {
+                    let hole_o = ctx.hole[opp_player][ho];
+                    if hole_p[0] == hole_o[0]
+                        || hole_p[0] == hole_o[1]
+                        || hole_p[1] == hole_o[0]
+                        || hole_p[1] == hole_o[1]
+                    {
+                        continue;
+                    }
+                    let so = s_opp[ho];
+                    let util = if sp > so {
+                        win_self
+                    } else if so > sp {
+                        win_opp
+                    } else {
+                        tie
+                    };
+                    total += reach_opp[ho] * util;
+                }
+                out[hp] = total;
+            }
+        }
+        LeafCacheEntry::NonTerminal => {
+            unreachable!("terminal_value_vector_cached called on a non-terminal node")
+        }
     }
     out
 }
@@ -1288,5 +1692,92 @@ mod tests {
             }
         }
         assert!(any_diff, "different rng_seeds must produce different strategies");
+    }
+
+    /// HIGH-2 follow-up parity test: `terminal_value_vector_cached` must
+    /// produce bit-identical output to the uncached `terminal_value_vector`
+    /// across all terminal leaves of a tiny river RvR tree.
+    ///
+    /// We build an `EvalContext` with a non-trivial hand list (the full
+    /// C(47, 2) = 1081 river-disjoint hands) and a random reach vector,
+    /// walk every terminal in the tree, and compare per-hand output.
+    /// This is the load-bearing correctness gate for the cache: any
+    /// divergence here means the cached path is mis-computing showdown
+    /// outcomes or chip-flow, and the differential test against Python
+    /// would fail downstream.
+    #[test]
+    fn cached_matches_uncached_terminal_value() {
+        let cfg = tiny_river_rvr();
+        let initial = HUNLState::initial(std::sync::Arc::new(cfg.clone()));
+        let ctx = EvalContext::from_root(&initial);
+        // Build betting tree on a placeholder hole pair.
+        let placeholder = initial.clone_with_hole_cards([
+            ctx.hole[0][0],
+            ctx.hole[1][0],
+        ]);
+        let tree = BettingTree::build_from(&placeholder);
+        let cache = TerminalCache::build(&tree, &ctx);
+
+        // Random-ish reach vectors for both players (deterministic so the
+        // test is reproducible; we want non-uniform reach to stress the
+        // accumulator path).
+        let mk_reach = |n: usize, seed: u64| -> Vec<f64> {
+            let mut r = vec![0.0_f64; n];
+            let mut state = seed;
+            for v in r.iter_mut() {
+                // Splitmix64 (deterministic, fast).
+                state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = state;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^= z >> 31;
+                // Convert to f64 in [0, 1).
+                *v = (z as f64) / (u64::MAX as f64);
+            }
+            r
+        };
+        let reach_p0 = mk_reach(ctx.hand_count[0], 42);
+        let reach_p1 = mk_reach(ctx.hand_count[1], 99);
+
+        let mut compared = 0usize;
+        for (node_idx, node) in tree.nodes.iter().enumerate() {
+            match node {
+                FlatNode::Fold { .. } | FlatNode::Showdown { .. } => {
+                    for update_player in 0..2 {
+                        let opp_player = 1 - update_player;
+                        let reach_opp = if opp_player == 0 { &reach_p0 } else { &reach_p1 };
+                        let uncached = terminal_value_vector(
+                            node, &ctx, update_player, opp_player, reach_opp,
+                        );
+                        let cached = terminal_value_vector_cached(
+                            &cache.leaves[node_idx],
+                            &ctx,
+                            update_player,
+                            opp_player,
+                            reach_opp,
+                        );
+                        assert_eq!(
+                            uncached.len(),
+                            cached.len(),
+                            "size mismatch node={node_idx} update={update_player}"
+                        );
+                        for (hp, (u, c)) in uncached.iter().zip(cached.iter()).enumerate() {
+                            // Bit-identical: both compute the same chip
+                            // arithmetic from the same `Strength::evaluate_7`
+                            // output, so equality should be exact.
+                            assert_eq!(
+                                u.to_bits(),
+                                c.to_bits(),
+                                "bit-mismatch at node={node_idx} update={update_player} \
+                                 hp={hp}: uncached={u} cached={c}"
+                            );
+                        }
+                        compared += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(compared > 0, "no terminal leaves walked — fixture broken");
     }
 }
