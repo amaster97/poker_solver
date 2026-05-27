@@ -39,7 +39,7 @@ required** at production scale).
 | **W2.2** Sarah Range.diff per-combo | PARTIAL | **PARTIAL** | = | 0.25 ms | `Range.diff()` set-membership returns 56 combos (works); no per-combo frequency methods on Range. B10 (Range fractional refactor) still blocker. v1.8 unrelated. |
 | **W2.3** Sarah deep-stack turn RvR | BLOCKED | **BLOCKED (Type D)** | = | >1200 (kill) | 8-class symmetric turn fixture (Qs7h2d5c, 200BB, iter=500) per `post_v1_8_0_W2_3_retest_prompt.md`. Wall > 20 min kill switch (Sarah 5-min gate exceeded by 4×). v1.8 SIMD ~1.0× refutation confirmed. **Release-narrative-revision trigger** per pre-stage prompt line 117-118. |
 | **W2.4** Sarah batch-solve CSV | PARTIAL | **PARTIAL (Type D for CLI path)** | = | >1200 kill | CLI `batch-solve` on 3-row CSV (river spots, iter=100) timed out at 20-min kill switch with zero row commits to temp library. Library-direct path still PASSes (pre-v1.8 retest); CLI path remains INCONCLUSIVE-SLOW. v1.8 SIMD ~1.0× — perf unchanged. |
-| **W3.5** Daniel monotone polarization | FAIL (Type B-DOC) | **FAIL (root cause TBD)** | = | 70.7 | At 10-class @ 500 iter: AA check = 0.1434 (target ≥0.99 PASS, ≥0.90 PARTIAL). AA max single bet = 0.854. Range aggregate check = 0.7805. 6-class control @ 500 iter: AA check = 0.92 (PASS at lower bound). 15-class @ 500 iter: AA check = 0.33. **Root cause TBD** — could be Hypothesis A (convergence/iter-scaling at large class counts; PoC reported 1.0000 @ 3000 iter) or Hypothesis B (class-expansion wrapper bug). Convergence test running at 3000 iter to distinguish. See `docs/v1_8_1_candidate_findings_2026-05-27.md`. |
+| **W3.5** Daniel monotone polarization | FAIL (Type B-DOC) | **FAIL → DIAGNOSED (range-setup mismatch, not code bug)** | = | 70.7 / 11.3 | At class-name API: AA check = 0.14 (10-class) / 0.33 (15-class) / 0.32 (15-class @ 3000 iter; convergence ruled out). **At PoC explicit-no-flush-combo setup via `solve_range_vs_range_rust` directly @ 3000 iter: AA check = 1.0000** — PoC reproduces bit-clean at v1.8.0. Root cause: PoC excluded flushes from villain range; class-name API includes flush combos via classes like `AKs`, `KQs`, `JTs`, `98s`, `87s`, giving a different but correct Nash. **Not a code bug.** See `docs/v1_8_1_candidate_findings_2026-05-27.md` for full diagnostic chain. |
 | **W4.2** Priya limp-or-fold action menu | PARTIAL | **PARTIAL** | = | 0.7 | `ActionAbstractionConfig(bet_size_fractions=(), include_all_in=False)` produces clean check-only action menu at 10-class river RvR. Range aggregate check=1.0, no bet keys leak. Wiring + action restriction PASS confirmed at production scale. Heuristic mis-alignment (Type A DEVELOPER.md doc add) unchanged. |
 
 ### Marcus 30s budget validation (W1.2 production-scale)
@@ -66,13 +66,17 @@ result: 9.19s at smaller fixture; 14.7s at 10-class production scale).
 - PASS: 10 (unchanged)
 - PARTIAL: 5 (unchanged — W1.5, W2.1, W2.2, W2.4, W4.2)
 - BLOCKED: 1 (unchanged — W2.3 still Type D timeout; v1.8 SIMD refutation re-confirmed)
-- FAIL: 1 (unchanged — W3.5 still Type B; class-expansion bug now empirically confirmed at production scale, not just on prior 6-class smoke)
+- FAIL: 1 (unchanged label — W3.5 still labeled FAIL pending persona-spec update; **diagnosed as range-setup mismatch, NOT a code bug**)
 
-**No reclassifications.** The retests confirm the prior status. **Empirical
-strengthening on W3.5**: the wrapper-bug pattern (AA flips from 0.92 → 0.14
-when class count expands 6 → 10) is now reproducible at production scale
-under v1.8.0 + convention purge. This is the same hazard pattern the prior
-status doc flagged but had only smoke-confirmed.
+**No reclassifications, no regressions, no v1.8.1 code candidates.**
+
+The retests confirm prior status. **W3.5 finding resolved at the diagnostic
+level:** initial 10-class FAIL looked like a wrapper bug, but the 3000-iter
+convergence test ruled out convergence, and replicating the PoC's exact
+explicit-no-flush-combo setup via `solve_range_vs_range_rust` on v1.8.0
+reproduces the PoC's **AA check = 1.0000** result bit-clean. The class-name
+API result differs because it includes flush-carrying combos (genuine Nash
+on a different range), not because of a code bug.
 
 ---
 
@@ -130,10 +134,10 @@ Same fixture as post-purge retest (`docs/persona_post_purge_retest_2026-05-27.md
 - Post-purge: 80.62s, AA check 0.9827
 - Post-ship retest: 84.19s, AA check 0.9827 (bit-identical)
 
-W3.4 (15-class river polarization) is a **stable PASS-caveated** result at
-production scale. The W3.5 class-expansion bug does NOT surface here — the
-river fixture has different infoset structure and the 15-class symmetric
-range is the "high" end where the bug recurs in the W3.5 cluster.
+W3.4 (15-class river polarization on 4-spade `Ts 8s 6s 4s 2c`, 3-bet pot
+SPR≈5.5) is a **stable PASS-caveated** result at production scale. The
+W3.5 range-setup mismatch is fixture-specific (W3.5 uses single-bet pot,
+SPR≈50, 3-spade board — equilibrium structure differs).
 
 ### Marcus 30s budget — preserved at production scale
 
@@ -146,13 +150,26 @@ v1.8.0 build, well within Marcus's 30s gate. No regression observed; SIMD
 
 ## v1.8.1 candidate findings
 
-**W3.5 production-scale class-expansion bug** (see `docs/v1_8_1_candidate_findings_2026-05-27.md`).
+**None identified.** Initial W3.5 finding (10-class class-name API giving
+AA check 0.14) was investigated through:
 
-The empirical reproducibility of the 6→10 class AA-check inversion is new
-since v1.8.0 ship. While the pattern is the same hazard prior status docs
-flagged, having a **reproducible production-scale demo at v1.8.0 tip** is
-new — and meets the threshold for a v1.8.1 patch candidate per
-`feedback_persona_test_rectification` Type B routing.
+1. **Convergence test** at 3000 iter on 15-class class-name range —
+   essentially unchanged (AA check 0.32 → 0.32). Convergence ruled out.
+2. **PoC explicit-no-flush-combo replication** via
+   `solve_range_vs_range_rust` direct call at 3000 iter — reproduces
+   PoC's **AA check = 1.0000** at root river-open infoset bit-clean on
+   v1.8.0.
+
+The class-name API result differs from the PoC because it includes
+flush-carrying combos (e.g., `AKs`, `KQs`, `JTs`, `98s`, `87s` all have
+a spaded variant on this monotone-spade board). With flushes in villain's
+range, AA's Nash strategy is genuinely different — and mathematically
+correct, not a wrapper bug.
+
+**Follow-up (persona-spec hygiene, not v1.8.1 code):** Update
+`docs/pr13_prep/persona_acceptance_spec.md` §2 W3.5 to distinguish the
+PoC's no-flush range setup (AA check ≥0.99) from class-name API setups
+that include flush combos (AA check ≥0.50 may be appropriate).
 
 The other retested personas (W1.5, W2.1, W2.2, W2.4, W4.2) are unchanged
 structural blockers; v1.8.1 cannot resolve these without separate feature work
