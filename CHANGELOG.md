@@ -13,7 +13,7 @@ In-flight on feature branches; not yet merged to `main`.
 - v1.5/v2 follow-ups (Q3 exploitability slider reframe; range-based
   dealing; Rust callbacks; full-tree preflop).
 
-## [1.8.0] - Unreleased
+## [1.8.0] - 2026-05-27
 
 The v1.8.0 release folds in the v1.6.1 engine bundle (shipped piecewise
 on `main`), v1.7.2 CI hardening, the cross-platform SIMD work, and the

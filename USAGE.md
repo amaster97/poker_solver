@@ -1,4 +1,4 @@
-# Using poker_solver — End-User Guide (v1.7.x)
+# Using poker_solver — End-User Guide (v1.8.x)
 
 For people who want to **use** the solver to improve their poker game,
 not develop it. You should be comfortable in a terminal and editing a
@@ -6,10 +6,12 @@ config file; you do not need to read Python or Rust source. The README
 is the developer-facing overview; this is the "what can I do with this
 today" companion.
 
-Document baseline: v1.0.0. Updates through v1.7.0 are layered in §5.3
+Document baseline: v1.0.0. Updates through v1.8.0 are layered in §5.3
 (node-locking), §5.4 (asymmetric contributions), §5.5 (range utilities),
 §5.6 (aggregator vs. true-Nash range-vs-range, v1.7.0+), plus the §7a
-ergonomic subcommands and §7b known perf cliffs sections.
+ergonomic subcommands and §7b known perf cliffs sections. v1.8.0
+ships cross-platform SIMD + the .dmg fork-bomb fix; no user-facing API
+changes vs v1.7.x.
 
 ---
 
@@ -411,6 +413,11 @@ hypothetical line.
 ```python
 from poker_solver import Card, HUNLConfig, Street, solve_hunl_postflop
 
+# Worked example pins hero + villain combos so the snippet completes in
+# under a second. Range-vs-range node-locking requires the per-hand
+# aggregate pattern (see §5.2); leaving `initial_hole_cards=()` triggers
+# the full-range chance-enum + post-solve exploitability walk, which is
+# minutes-to-hours wall-clock (see §7b honest perf cliffs).
 board = tuple(Card.from_str(c) for c in ("As", "7c", "2d", "Kh", "5s"))
 cfg = HUNLConfig(
     starting_stack=10_000,
@@ -418,9 +425,15 @@ cfg = HUNLConfig(
     initial_board=board,
     initial_pot=1_000,
     initial_contributions=(500, 500),
+    initial_hole_cards=(
+        (Card.from_str("Ah"), Card.from_str("Kc")),
+        (Card.from_str("Qd"), Card.from_str("Qh")),
+    ),
 )
 
-# Pin one infoset to a fixed fold/call/raise mix:
+# Pin one infoset to a fixed fold/call/raise mix. Replace the placeholder
+# key with a real one from `result.average_strategy.keys()`; unmatched
+# keys are silently ignored.
 locked = {
     "<infoset_key_str>": [1.0, 0.0, 0.0, 0.0],  # 100% fold at that node
 }
