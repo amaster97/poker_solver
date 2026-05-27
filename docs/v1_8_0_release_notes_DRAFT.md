@@ -9,10 +9,10 @@ the v1.7.1 bundle and v1.7.2 (.dmg fork-bomb fix + CI hardening) are
 folded into v1.8.0 per `docs/v1_6_1_ship_hold_review_2026-05-26.md`
 and `docs/v1_7_1_tag_decision_2026-05-26.md`. The v1.6.1 ship hold is
 LIFTED under the canonical convention (see "Known issues remaining"
-A83 entry). Final ship step is SHA substitution for the
-`<TBD-*>` placeholders + tag + GitHub release.**
+A83 entry). All substantive placeholders have been substituted; final
+ship step is tag + GitHub release.**
 
-**Release date:** 2026-05-XX (TBD at ship time)
+**Release date:** 2026-05-27
 **Tag:** `v1.8.0` (to be created at ship time)
 **Baseline commit on `origin/main`:** `eb74fb3` (PR #60, 2026-05-26),
 plus the terminal-utility convention purge at `37e5be1`
