@@ -911,6 +911,23 @@ def solve_range_vs_range_nash(
     See ``docs/aggregator_vs_true_nash_explainer.md`` for the long-form
     distinction.
 
+    .. warning::
+        **River wall time is multi-hour.** The vector-form solver walks the
+        full 1326-collapsed-by-board hand pair grid each iteration, so cost
+        scales O(hand_count² × decision_nodes). On a river fixture the
+        measured per-iteration cost is ~26 s; the default 500-iter run is
+        ~3.5 h wall time, and even a 200-iter run is ~86 min (1 CPU at 100%).
+        This O(N²) shape matches Brown's MIT reference implementation and is
+        mathematically intrinsic to strict-Nash vector CFR.
+
+        **For interactive use,** prefer :func:`solve_range_vs_range`
+        (the Pluribus-blueprint aggregator), which trades strict-Nash
+        bluff-catching for ~10-100× faster wall time on river boards.
+        Reserve :func:`solve_range_vs_range_nash` for offline parity runs,
+        bluff-catching research questions, and other batch workflows where
+        wall time is acceptable. See PR #105 (HIGH-2) for the perf-wall
+        analysis and routing recommendation.
+
     Args:
         config_template: ``HUNLConfig`` with ``starting_street >= FLOP``.
             ``initial_hole_cards`` is ignored — the vector form enumerates
