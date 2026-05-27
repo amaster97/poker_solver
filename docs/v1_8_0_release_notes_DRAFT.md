@@ -1,39 +1,52 @@
-# poker-solver v1.8.0 — Cross-platform SIMD + `.dmg` fork-bomb fix
+# poker-solver v1.8.0 — Cross-platform SIMD portability + terminal-utility convention purge + `.dmg` fork-bomb fix
 
-**Status: DRAFT — Phases 1-4 + AVX2 all merged to `main` as of
-`77e751c` (PR #32, 2026-05-26). v1.6.1 hold-lift currently UNDER
-REVIEW pending A83 reconciliation (PR 93 terminal-utility ablation
-landed post-RESUME with a result that contradicts the prior "fully
-closed via Nash multiplicity" framing — see
-`docs/A83_RECONCILE_URGENT_2026-05-26.md` and the Known-issues entry
-below). Engine + parity fixes from the v1.7.1 bundle and v1.7.2 (.dmg
-fork-bomb fix + CI hardening) are folded into v1.8.0 per
-`docs/v1_6_1_ship_hold_review_2026-05-26.md` and
-`docs/v1_7_1_tag_decision_2026-05-26.md`. Do not publish until the
-A83 framing reconciliation is settled and the final ship sequence
-executes (tag + GitHub release).**
+**Status: DRAFT (post-purge framed) — Phases 1-4 + AVX2 all merged to
+`main` as of `77e751c` (PR #32, 2026-05-26). The terminal-utility
+convention purge lands as PR `<TBD-PR-NUMBER>` (`<TBD-MERGE-SHA>`)
+and is the engine correctness fix in v1.8.0 — see "Engine fixes" §5
+and "Migration / breaking changes" below. Engine + parity fixes from
+the v1.7.1 bundle and v1.7.2 (.dmg fork-bomb fix + CI hardening) are
+folded into v1.8.0 per `docs/v1_6_1_ship_hold_review_2026-05-26.md`
+and `docs/v1_7_1_tag_decision_2026-05-26.md`. The v1.6.1 ship hold is
+LIFTED under the canonical convention (see "Known issues remaining"
+A83 entry). Final ship step is SHA substitution for the
+`<TBD-*>` placeholders + tag + GitHub release.**
 
 **Release date:** 2026-05-XX (TBD at ship time)
 **Tag:** `v1.8.0` (to be created at ship time)
-**Baseline commit on `origin/main`:** `eb74fb3` (PR #60, 2026-05-26).
-Final tag SHA will be set at `git tag` time; the polish PRs landing
-after this draft are documentation-only and do not change the SIMD /
-`.dmg` ship surface.
+**Baseline commit on `origin/main`:** `eb74fb3` (PR #60, 2026-05-26),
+plus the terminal-utility convention purge at `<TBD-MERGE-SHA>`
+(PR `<TBD-PR-NUMBER>`).
+Final tag SHA will be set at `git tag` time.
 
 ---
 
 ## Headline
 
-**v1.8.0 — Cross-platform SIMD + `.dmg` fork-bomb fix.**
+**v1.8.0 — Cross-platform SIMD portability + terminal-utility convention purge + `.dmg` fork-bomb fix.**
 
-Two things land together in this release:
+Three things land together in this release:
 
-1. **Cross-platform SIMD acceleration.** The Discounted CFR solver's hot
-   inner loops are now hand-vectorized across NEON (Apple Silicon),
-   AVX2 + SSE2 (x86_64, runtime-detected), with an automatic scalar
-   fallback for anything else. Bit-identical output to v1.7.0 on every
-   backend.
-2. **`.dmg` fork-bomb fix (CRITICAL).** The v1.6.0 `.dmg` had an
+1. **Cross-platform SIMD complete (portability win).** The Discounted
+   CFR solver's hot inner loops are now hand-vectorized across NEON
+   (Apple Silicon), AVX2 + SSE2 (x86_64, runtime-detected), with an
+   automatic scalar fallback for anything else. **This is a portability
+   win, not a speedup** — measured wall-clock on Apple Silicon
+   (M4 Pro, aarch64) is within noise (~1.0×) because LLVM's `-O3`
+   autovectorizer already covers the small-slice case. The headline
+   value is closing the ~3-month gap between Apple Silicon and x86_64
+   coverage with a stable hand-written floor that doesn't depend on the
+   compiler's heuristics.
+2. **Terminal-utility convention purge (engine correctness fix).** The
+   prior "rust" terminal-utility convention treated `initial_contributions`
+   as recoverable, which produced a per-action regret bias of 12-50pp
+   versus the reference Brown solver at deep cap. v1.8.0 adopts the
+   single canonical real-poker convention (winner collects the full pot
+   including dead money from prior streets). See "Engine fixes" and
+   "Migration / breaking changes" for the formula, a one-line numeric
+   example, and the rebaseline policy. **Pre-v1.8.0 solver outputs are
+   NOT comparable to v1.8.0 outputs.**
+3. **`.dmg` fork-bomb fix (CRITICAL).** The v1.6.0 `.dmg` had an
    uncontrolled-spawn bug on Finder launch
    (`multiprocessing.freeze_support()` missing from the PyInstaller
    entry point). v1.6.0 `.dmg` has been pulled from its GitHub Release;
@@ -41,14 +54,14 @@ Two things land together in this release:
 
 **SIMD vector kernels (cross-platform):** Explicit NEON/AVX2/SSE2
 intrinsics replace the previous scalar inner loops in `dcfr_vector.rs`.
-Bit-identical output; **measured wall-clock impact on Apple Silicon
-(M4 Pro, aarch64) is within noise (~1.0×)** because LLVM's
-autovectorizer at `-O3` already covers the small-slice case
-(action_count = 2-5 per decision row). Primary value is portability
-(x86_64 with explicit AVX2 dispatch, runtime-detected) and a stable
-hand-written floor that doesn't depend on the compiler's heuristics.
-x86_64 wall-clock measurement is pending (no AVX2 hardware in the
-bench fleet at time of write). Full benchmark report:
+Bit-identical SIMD-vs-scalar output on the same convention; **measured
+wall-clock impact on Apple Silicon (M4 Pro, aarch64) is within noise
+(~1.0×)** because LLVM's autovectorizer at `-O3` already covers the
+small-slice case (action_count = 2-5 per decision row). Primary value
+is portability (x86_64 with explicit AVX2 dispatch, runtime-detected)
+and a stable hand-written floor that doesn't depend on the compiler's
+heuristics. x86_64 wall-clock measurement is pending (no AVX2 hardware
+in the bench fleet at time of write). Full benchmark report:
 `docs/v1_8_simd_perf_benchmark_2026-05-26.md`.
 
 ---
@@ -171,6 +184,40 @@ lifted per `docs/v1_6_1_ship_hold_review_2026-05-26.md`.
 
 **Engine correctness:**
 
+- **PR <TBD-PR-NUMBER> (`<TBD-MERGE-SHA>`) — Terminal-utility
+  convention purge (canonical real-poker convention).** Prior versions
+  used a "rust" terminal-utility formula that treated
+  `initial_contributions` as recoverable by the player who folded; this
+  produced a per-action regret bias that diverged 12-50pp from the
+  reference Brown solver at deep cap (PR #93 ablation,
+  `docs/a83_terminal_utility_ablation_results_2026-05-26.md`). v1.8.0
+  deletes that path and ships a single canonical `utility()` function.
+
+  **Canonical formula** (per `feedback_brown_convention_adopt.md`):
+  ```
+  winner_utility = pot_total - contrib_subgame_winner
+                 = base_pot + contrib_subgame_loser     (in BB)
+  loser_utility  = -contrib_subgame_loser               (in BB)
+  tie_each       = pot_total/2 - contrib_subgame_player (in BB)
+  ```
+  where `contrib_subgame[i] = state.contributions[i] - cfg.initial_contributions[i]`
+  and `pot_total = cfg.initial_pot + contrib_subgame[0] + contrib_subgame[1]`.
+
+  **One-line numeric example.** At a canonical leaf where P0 folds with
+  `base_pot = 10 BB` and zero in-subgame contributions
+  (`contrib_subgame = (0, 0)`, `initial_contributions = (5, 5)`):
+  the old "rust" path returned `(-5, +5)` BB (treating each player's
+  seed-split half-pot as still recoverable); the canonical path
+  returns `(0, +10)` BB — P1 (the non-folder) collects the full pot
+  including the dead money already on the table, P0 loses only their
+  in-subgame contribution (zero here).
+
+  The game is **constant-sum** under the canonical convention
+  (sum of utilities = `+base_pot/bb` per leaf rather than zero); DCFR
+  convergence is unaffected (proofs require bounded utilities + finite
+  action set, not zero-sum). No feature flag, no
+  `TerminalUtilityConvention` enum, no runtime switch — one formula.
+  See "Migration / breaking changes" below for the rebaseline policy.
 - **PR 50 (#5)** — Phantom `ALL_IN` action menu guard (paired Rust +
   Python). At facing-all-in nodes, the responder's action menu no
   longer emits a degenerate `ALL_IN` raise that would have had no chip
@@ -211,10 +258,14 @@ lifted per `docs/v1_6_1_ship_hold_review_2026-05-26.md`.
 The bundle resolves the 22-42pp Brown apples-to-apples deep-cap
 divergence reported in v1.5.0 / v1.5.1 / v1.6.0 dry-runs as a
 combination of test-side wrapper bugs (R8/R9/R10), one engine-side
-mechanical guard (R6, PR 50), and a documented Brown design
-divergence (terminal-utility convention + Nash multiplicity at deep
-cap; see "Known issues remaining" below and
-`docs/a83_validation_2026-05-26.md`).
+mechanical guard (R6, PR 50), the **terminal-utility convention
+purge** (PR `<TBD-PR-NUMBER>`, the engine correctness fix; see the
+first bullet under "Engine correctness" above), and Nash multiplicity
+on the residual at deep-cap indifference manifolds (see "Known issues
+remaining" below). Pre-purge framings that treated the convention as
+a "documented Brown design divergence" are explicitly retracted per
+`feedback_brown_convention_adopt.md`; there is one canonical
+convention.
 
 ### 6. v1.7.2 entries folded into v1.8.0
 
@@ -314,6 +365,17 @@ Full per-workflow status: `docs/persona_test_status_2026-05-26.md`
 (supersedes the 2026-05-25 baseline). The post-v1.8 audit framing is
 captured at `docs/persona_status_post_v1_8_2026-05-26.md`.
 
+**Note on persona baselines vs. the convention purge.** Persona tests
+whose acceptance gate depends on absolute strategy probabilities,
+exploitability magnitudes, or numerical agreement with a pre-v1.8.0
+baseline need re-collection under the canonical convention (see
+"Migration / breaking changes" below). Persona tests gated on
+structural / topological / wall-clock criteria (W3.4 wall-clock,
+W3.2 API existence, etc.) are unaffected by the convention purge.
+The bit-identical-to-v1.7.0 note for W3.5 above refers to the
+pre-purge SIMD smoke (SIMD-vs-scalar, same convention); under the
+canonical convention, all v1.7.x baselines are stale.
+
 ---
 
 ## Known issues remaining
@@ -321,8 +383,35 @@ captured at `docs/persona_status_post_v1_8_2026-05-26.md`.
 The following are **NOT** resolved in v1.8.0 and remain open for future
 work:
 
-### Engine: canonical terminal-utility convention adopted (NEW in v1.8.0)
-Prior versions used an incorrect terminal-utility formula that treated initial_contributions as recoverable, producing per-action regret bias that diverged 12-50pp from reference Brown solver at deep cap (PR #93 ablation, 2026-05-27). v1.8.0 adopts the canonical real-poker convention: winner collects the full pot including dead money from prior streets. Constant-sum game-theoretic class (DCFR convergence is unaffected). Existing exploit-diff snapshots + persona test baselines from v1.7.0 and earlier are NOT comparable to v1.8.0 outputs.
+### A83: Deep-cap Brown apples-to-apples residual gap (post-convention-purge)
+
+**Status post-purge:** `<TBD-POST-PURGE-RESIDUAL>` (v1.5 Brown
+apples-to-apples residual after the canonical-convention adoption,
+to be filled at ship time from the post-purge dry-run).
+
+Whatever remains after the convention purge is **Nash multiplicity at
+indifference manifolds** rather than a game-definition mismatch: deep-cap
+HUNL has indifference manifolds where multiple Nash equilibria are all
+valid and small initial-condition perturbations select between them.
+This is testable via **EV-of-action invariance** — for a constant-sum
+game, the EV of each action at each infoset is unique across all Nash
+equilibria, even when strategy probabilities aren't (see
+`docs/ev_invariance_sanity_gauntlet_design_2026-05-27.md`).
+
+Trajectory of `<TBD-POST-PURGE-MAX-Δ-A83-2K>` (max |Δ| on the A83
+fixture at `iter=2000`) anchors the post-purge baseline relative to
+the pre-purge `12.27pp @ 2000 iters / 10.28pp @ 8000 iters` figure
+from PR #93's ablation.
+
+**v1.6.1 hold-lift validated.** The hold-lift decision stands under
+the canonical convention: the v1.5 Brown apples-to-apples reframed
+4-layer gate (L1 structural / L2 shallow-strict / L3 deep-directional /
+L4 top-action ≥ 60%) PASSES on both river spots under Dry-run #10
+(2026-05-24), and the post-purge residual is Nash-multiplicity rather
+than a bug. Pre-purge premature framings (PR #49 "fully closed via
+Nash multiplicity," the arbitrator NOT-A-BUG verdict) are explicitly
+retracted per `feedback_brown_convention_adopt.md` and the supersede
+banners landed by PR #75.
 - **Gate 4 200K-iter river/turn validation results — PROVISIONAL,
   re-run pending.** The 2026-05-25 Gate 4 200K river-phase run
   (reported `5.28e-14 mbb/g` exploitability, monotone clean) and the
@@ -390,6 +479,53 @@ Prior versions used an incorrect terminal-utility formula that treated initial_c
 
 ---
 
+## Migration / breaking changes
+
+### Terminal-utility convention change (BREAKING for output comparability)
+
+**Pre-v1.8.0 solver outputs are NOT comparable to v1.8.0 outputs.**
+v1.8.0 adopts the canonical real-poker terminal-utility convention
+(see "Engine fixes" §5 above for the formula and a one-line numeric
+example). The prior "rust" convention treated `initial_contributions`
+as recoverable by the player who folded; the canonical convention does
+not. The two conventions produce **different strategy probabilities
+even on identical seeds + identical action menus** — the per-action
+regret bias measured between conventions was 12-50pp at deep cap
+(PR #93 ablation,
+`docs/a83_terminal_utility_ablation_results_2026-05-26.md`).
+
+**Justification:** per `feedback_brown_convention_adopt.md`, there is
+exactly one correct terminal-utility convention — the rule of real
+poker, in which the winner collects every chip in the pot including
+dead money already on the table from prior streets. The "rust"
+convention was an implementation error; it is not a feature flag, not
+a runtime switch, and not a valid alternative. No
+`TerminalUtilityConvention::Rust` variant exists in v1.8.0.
+
+**Rebaseline policy.** Any artifact captured under the pre-v1.8.0
+convention must be regenerated against v1.8.0:
+
+- **Exploit-diff snapshots.** Re-run against v1.8.0; do not compare to
+  v1.7.0-and-earlier exploit numbers numerically. The class of game
+  changed from zero-sum to constant-sum (sum of utilities =
+  `+base_pot/bb` per leaf rather than zero), which moves the
+  exploit-vs-Nash absolute number even when the strategies are
+  qualitatively the same.
+- **Persona test baselines.** Persona retest wrappers re-baseline
+  against v1.8.0; pre-v1.8.0 PASS / FAIL counts for any persona test
+  whose acceptance gate depends on strategy probabilities or
+  exploitability magnitudes are stale and need re-collection.
+- **Fixtures + golden files.** Any deterministic fixture or
+  golden-file artifact captured under the pre-v1.8.0 convention is
+  regenerated under v1.8.0. Don't preserve them via a flag; they were
+  captured under an incorrect game model.
+
+If you have downstream tooling that diff-tests v1.8.0 against a
+pre-v1.8.0 baseline expecting numerical agreement, that test will fail
+by design — replace the baseline with a v1.8.0 capture.
+
+---
+
 ## Upgrade path
 
 ### From v1.7.0 source install
@@ -423,8 +559,14 @@ The v1.6.0 `.dmg` was pulled; do not attempt to redownload it.
 
 - **No public API changes.** All vectorization is behind the existing
   Rust extension's safe Python API.
-- **No CFR algorithm changes.** Bit-identical output to v1.7.0 on the
-  same inputs across all backends.
+- **CFR algorithm: bit-identical SIMD-vs-scalar on the same
+  convention.** The cross-backend SIMD smoke test asserts bit-identical
+  regret + strategy_sum tables across NEON / AVX2 / SSE2 / scalar at
+  every iteration.
+- **CFR output vs v1.7.0: NOT bit-identical** because of the
+  terminal-utility convention purge (see "Migration / breaking
+  changes" above). The change is in the game definition (terminal
+  payoff at winner-take-all leaves), not in the CFR update rule.
 - **Min Python**: unchanged from v1.7.0.
 - **Min Rust toolchain**: stable, unchanged from v1.7.0.
 - **`crates/cfr_core` version bump**: 0.7.x → 0.8.0.
@@ -433,9 +575,10 @@ The v1.6.0 `.dmg` was pulled; do not attempt to redownload it.
   explicitly, you can leave it or `pip uninstall black` — `ruff
   format` is run by the project's pre-commit and CI gates.
 
-If you observe non-bit-identical output between v1.7.0 and v1.8.0 on
-the same problem, please open an issue — this is a regression by
-definition.
+If you observe non-bit-identical output between two v1.8.0 backends
+(NEON vs AVX2 vs SSE2 vs scalar) on the same problem, please open an
+issue — that is a regression by definition. Non-identical output
+between v1.7.0 and v1.8.0 is expected per the convention purge.
 
 ---
 
@@ -472,6 +615,7 @@ All PRs that ship in v1.8.0, in merge order:
 - [#43][pr43] `cfc6bc5` — chore: green up lint/clippy/format/deps gates on main
 - [#44][pr44] `a6b89f7` — docs: fix executable code bugs in README + USAGE
 - [#45][pr45] `dbfc8d0` — docs: drift cleanup v2 (USAGE header, CHANGELOG `.dmg`, supersede banners)
+- [#`<TBD-PR-NUMBER>`][pr-purge] `<TBD-MERGE-SHA>` — fix(engine): terminal-utility convention purge (canonical real-poker convention; single `utility()` function; deletes "rust" convention path)
 
 Plus the CI-hardening prerequisites that landed earlier in the v1.7.x
 sequence but enable the cross-platform SIMD CI matrix:
@@ -539,3 +683,4 @@ performance and a ~2-month-old critical packaging bug. Thanks to:
 [pr58]: https://github.com/amaster97/poker_solver/pull/58
 [pr59-persona]: https://github.com/amaster97/poker_solver/pull/59
 [pr60-orphan]: https://github.com/amaster97/poker_solver/pull/60
+[pr-purge]: https://github.com/amaster97/poker_solver/pull/<TBD-PR-NUMBER>
