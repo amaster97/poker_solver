@@ -131,6 +131,7 @@ def test_each_spot_loads_into_hunl_config(spot: RiverSpot) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("spot", SPOTS[:3], ids=lambda s: s.id)
 def test_each_spot_solver_converges(spot: RiverSpot) -> None:
     """Our DCFR converges to expl < 0.02 × pot at 2000 iters on the first 3 spots.
@@ -171,6 +172,7 @@ def test_each_spot_solver_converges(spot: RiverSpot) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("spot", SPOTS[:3], ids=lambda s: s.id)
 def test_each_spot_game_value_is_finite(spot: RiverSpot) -> None:
     """game_value is finite and bounded by [-pot, pot] in chips."""
