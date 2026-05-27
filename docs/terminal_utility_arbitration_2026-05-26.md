@@ -1,4 +1,13 @@
-> ⚠️ **RETRACTED 2026-05-27.** This arbitration's "NOT-A-BUG, two conventions both valid" verdict was WRONG. The "rust" convention is being purged; Brown's convention is the only canonical terminal utility (winner collects pot including dead money — real poker chip flow). See `feedback_brown_convention_adopt.md` in memory + `docs/terminal_utility_canonical_2026-05-27.md` (will land via the convention-purge PR). The algebraic argument in this doc (uniform per-leaf offset) is correct as far as it goes but missed the reach-weighted aggregation in regret update; PR #93 ablation confirmed convention shifts strategies 12-50pp on identical seeds.
+> **STATUS 2026-05-27: SUPERSEDED — verdict was WRONG.**
+> This arbitration concluded "NOT-A-BUG" (convention is a settled design choice). That
+> conclusion was based on per-leaf algebra that stopped before the regret-update step. The
+> reach-weighted aggregation at the regret-update step DOES turn the per-leaf constant into
+> an action-dependent offset, so the convention IS strategy-affecting and the prior "rust"
+> convention was a bug. It has been purged in PR #78 (SHA `37e5be1`). The canonical
+> terminal utility is Brown's (winner gets pot + c_loser); there is no menu of options.
+>
+> See: `docs/A83_RECONCILE_URGENT_2026-05-26.md` (status SUPERSEDED) for the reach-weighted
+> mechanism; [[brown-convention-adopt]] memory rule; PR #78 merge commit.
 
 # Terminal-Utility Arbitration — 2026-05-26
 

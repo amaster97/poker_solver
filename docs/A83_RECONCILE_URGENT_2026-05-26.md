@@ -1,3 +1,17 @@
+> **STATUS 2026-05-27: SUPERSEDED by PR #78 (convention purge, SHA `37e5be1`).**
+> The "two conventions both valid" framing in this doc is RETRACTED. There is exactly ONE
+> correct terminal-utility convention (Brown's: winner gets pot + c_loser), and the prior
+> "rust" convention was a bug that has been purged. PR #93 (the ablation that prompted this
+> reconcile) was closed without merge; its ablation flag is no longer in the codebase.
+>
+> Post-purge empirical state: v1.5 Brown apples-to-apples PASSES the reframed 4-layer SANITY
+> gate on both K72 and A83 fixtures. Per-cell strict max |Δ| residuals (K72 0.852 / A83
+> 0.907) reflect genuine Nash multiplicity at deep-cap indifference manifolds; the
+> reframed gate is structural+statistical and accepts these.
+>
+> See: [[brown-convention-adopt]] memory rule; `docs/v1_5_brown_post_purge_numbers_2026-05-27.md`;
+> PR #78 merge commit.
+
 # URGENT: A83 status in flux — two empirical findings now contradict the "fully closed" framing
 
 **Created:** 2026-05-26 (post-PR-93-ablation-landing)
