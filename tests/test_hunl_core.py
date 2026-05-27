@@ -277,7 +277,10 @@ def test_hunl_showdown_higher_hand_wins():
         s = game.apply(s, outcomes[0][0])
     assert game.is_terminal(s)
     u = game.utility(s)
-    assert u[0] + u[1] == pytest.approx(0.0)
+    # Canonical Brown utility: u[0] + u[1] = initial_pot / big_blind per leaf
+    # (constant-sum, dead money flows to winner). default_tiny_subgame has
+    # initial_pot=1000, BB=100 → sum = 10.0.
+    assert u[0] + u[1] == pytest.approx(10.0)
 
 
 def test_hunl_showdown_tie_splits_pot():
@@ -316,8 +319,11 @@ def test_hunl_showdown_tie_splits_pot():
         s = game.apply(s, outcomes[0][0])
     assert game.is_terminal(s)
     u = game.utility(s)
-    assert u[0] == pytest.approx(0.0)
-    assert u[1] == pytest.approx(0.0)
+    # Canonical Brown tie: each player gets pot_total/2 - cs_self. With
+    # initial_pot=200, contribs=(100,100), no further betting: cs=(0,0),
+    # pot_total=200 → each player nets pot_total/2 - 0 = 100 chips = 1.0 BB.
+    assert u[0] == pytest.approx(1.0)
+    assert u[1] == pytest.approx(1.0)
 
 
 def test_hunl_all_in_runs_out_remaining_streets():

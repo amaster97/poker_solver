@@ -268,16 +268,21 @@ fn test_hunl_apply_advances_state_correctly() {
     state = state.apply(ACTION_CHECK);
     assert!(state.is_terminal(), "two checks should reach terminal");
     let utility = state.utility();
-    // AhKc vs QdQh on As7c2dKh5s: P0's two-pair (Aces+Kings) > P1's one
-    // pair of Queens with K/A kickers? Wait - let me re-evaluate.
+    // AhKc vs QdQh on As7c2dKh5s:
     // P0: Ah Kc + As 7c 2d Kh 5s -> two pair AA KK (using As, Ah, Kc, Kh)
-    // P1: Qd Qh + As 7c 2d Kh 5s -> one pair QQ (Qd Qh) with A K 7 kickers
-    // -> Two pair (AAKK) >> One pair (QQ). P0 wins big.
+    // P1: Qd Qh + As 7c 2d Kh 5s -> one pair QQ. P0 wins.
+    // Canonical Brown: initial_pot=1000, contribs=(500,500), check-check
+    // → cs=(0,0), pot_total=1000. P0 wins → u[0]=10, u[1]=0. Sum=10
+    // (constant-sum: u[0]+u[1] = initial_pot/big_blind).
     assert!(utility[0] > 0.0, "P0 should win the showdown");
-    assert!(utility[1] < 0.0, "P1 should lose the showdown");
     assert!(
-        (utility[0] + utility[1]).abs() < 1e-9,
-        "zero-sum check: u0+u1 should be 0, got {:?}",
+        (utility[1]).abs() < 1e-9,
+        "loser's subgame contribution was 0 → P1 utility should be 0, got {}",
+        utility[1]
+    );
+    assert!(
+        (utility[0] + utility[1] - 10.0).abs() < 1e-9,
+        "constant-sum check: u0+u1 should equal initial_pot/BB = 10, got {:?}",
         utility
     );
 }

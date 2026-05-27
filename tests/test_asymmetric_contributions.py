@@ -192,8 +192,13 @@ def test_asymmetric_facing_bet_offers_fold_call():
 
 
 def test_asymmetric_fold_loses_contributed_chips():
-    """Fold-loss accounting must reflect each player's actual contribution.
-    P1 folds after putting in 500 → P1 loses 500, P0 wins 500 (NOT 1000)."""
+    """Fold-loss accounting reflects the canonical Brown formula: winner
+    collects the full pot including dead money, loser eats subgame-only
+    contribution. Setup: P0 = aggressor with 1000 in, P1 = caller with
+    500 in, initial_pot = 1500 dead money. P1 (cur_player) folds
+    immediately → no further betting, so cs = (0, 0); pot_total =
+    1500 + 0 + 0 = 1500. P0 wins → u[0] = (1500 - 0)/100 = 15.0;
+    u[1] = -0/100 = 0.0. Sum = 15.0 (= initial_pot / BB)."""
     cfg = HUNLConfig(
         starting_stack=10_000,
         big_blind=100,
@@ -208,9 +213,8 @@ def test_asymmetric_fold_loses_contributed_chips():
     s_folded = game.apply(s, ACTION_FOLD)
     assert game.is_terminal(s_folded)
     u = game.utility(s_folded)
-    # Utility is in BB units; P1 contributed 500 cents = 5 BB.
-    assert u[0] == pytest.approx(5.0)
-    assert u[1] == pytest.approx(-5.0)
+    assert u[0] == pytest.approx(15.0)
+    assert u[1] == pytest.approx(0.0)
 
 
 # ---------------------------------------------------------------------------

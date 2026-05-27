@@ -155,15 +155,31 @@ def test_hunl_branching_factor_bounded():
     _walk_tree(game, s, check, max_depth=40)
 
 
-def test_hunl_terminal_utility_zero_sum():
+def test_hunl_terminal_utility_constant_sum():
+    """Canonical Brown utility is constant-sum: at every leaf,
+    ``u[0] + u[1] == initial_pot / big_blind``.
+
+    Derivation: winner = pot_total - cs_winner; loser = -cs_loser;
+    sum = pot_total - cs_winner - cs_loser = pot_total - (cs0 + cs1)
+    = (initial_pot + cs0 + cs1) - (cs0 + cs1) = initial_pot. Holds for
+    folds (where one cs is the larger of the two) AND for showdowns
+    (where cs0 == cs1) AND for ties (each gets pot_total/2 - cs_i, sum
+    = pot_total - cs0 - cs1 = initial_pot).
+
+    Dead money flows to the winner; live money put in this subgame
+    nets to zero across the two players, so the leaf-level constant is
+    exactly the carry-forward ``initial_pot``.
+    """
     config = _tiny_river_config()
     game = HUNLPoker(config)
     s = _seed_holes_if_needed(game, game.initial_state())
+    bb = config.big_blind
+    expected_sum = config.initial_pot / bb
 
     def check(state, _depth):
         if game.is_terminal(state):
             u = game.utility(state)
-            assert u[0] + u[1] == pytest.approx(0.0)
+            assert u[0] + u[1] == pytest.approx(expected_sum)
 
     _walk_tree(game, s, check, max_depth=40)
 
