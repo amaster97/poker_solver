@@ -28,6 +28,13 @@ default = []
 # NEON-on default path. Library consumers should never enable this.
 force_scalar = []
 
+# HIGH-2 follow-up — enable per-phase Instant-based instrumentation inside
+# `dcfr_vector::traverse` for profiling the river inner kernel. Used by
+# the `rvr_profile` bench only; profile points are thread-local accumulators
+# that compile to no-ops when this feature is off (zero runtime cost on the
+# production hot path).
+profile_rvr = []
+
 [dependencies]
 pyo3 = { version = "0.23" }
 # PR 6 — HUNL postflop port additions. All MIT/Apache 2.0 dual-licensed;
@@ -51,3 +58,12 @@ pyo3 = { version = "0.23", features = ["auto-initialize"] }
 name = "dcfr_bench"
 harness = false
 path = "benches/dcfr_bench.rs"
+
+# HIGH-2 follow-up — vector-form RvR per-phase profile bench. Run with
+# `cargo bench --bench rvr_profile --manifest-path crates/cfr_core/Cargo.toml
+#  --features profile_rvr`. Without the feature flag this bench still
+# reports total wall-clock per iter but per-phase breakdown is zero.
+[[bench]]
+name = "rvr_profile"
+harness = false
+path = "benches/rvr_profile.rs"
