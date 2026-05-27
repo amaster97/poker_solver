@@ -282,6 +282,8 @@ impl PreflopDcfr {
         gamma: f64,
         locked_strategies: HashMap<String, Vec<f64>>,
     ) -> Self {
+        // v1.8.1 (HIGH-1): HARD-FAIL on α ≤ 0, WARN on α < 0.5.
+        crate::dcfr::validate_alpha(alpha);
         Self {
             alpha,
             beta,

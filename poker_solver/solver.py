@@ -652,6 +652,13 @@ def _solve_rust(
     alpha = float(dcfr_kwargs.get("alpha", 1.5))
     beta = float(dcfr_kwargs.get("beta", 0.0))
     gamma = float(dcfr_kwargs.get("gamma", 2.0))
+    # v1.8.1 (HIGH-1): HARD-FAIL on alpha <= 0, WARN on alpha < 0.5 BEFORE
+    # JSON-marshalling into the Rust PyO3 boundary. The Rust constructors
+    # also enforce this (panics surface as PyValueError via catch_unwind),
+    # but checking here gives a cleaner traceback for Python callers.
+    from poker_solver.dcfr import _validate_alpha
+
+    _validate_alpha(alpha)
     # Marshal `locked_strategies` to the wire format the PyO3 binding
     # accepts: `dict[str, list[float]]`. Validation against the engine's
     # legal-action shape is lazy in the Rust loop (matches Python tier).

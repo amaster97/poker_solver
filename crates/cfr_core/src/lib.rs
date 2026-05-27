@@ -10,7 +10,11 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-mod dcfr;
+// v1.8.1: `dcfr` is `pub` so the alpha-guard integration test
+// (`tests/test_dcfr_alpha_guard.rs`) can reach `dcfr::validate_alpha`.
+// The module's public API was already implicitly used by the sibling
+// modules `preflop`, `dcfr_vector`, `hunl_solver` via `crate::dcfr::...`.
+pub mod dcfr;
 mod game;
 mod kuhn;
 mod leduc;
