@@ -58,10 +58,12 @@ This module is intentionally surgical: it does NOT modify
 from __future__ import annotations
 
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from poker_solver.abstraction.equity_features import canonicalize_for_suit_iso
 from poker_solver.card import Card
 from poker_solver.hunl import HUNLConfig, HUNLPoker, HUNLState, Street
 from poker_solver.preflop import PreflopSolveResult, solve_hunl_preflop
@@ -77,6 +79,70 @@ from poker_solver.range_aggregator import (
     _normalize_range,
     solve_range_vs_range_nash,
 )
+
+# ---------------------------------------------------------------------------
+# Board-isomorphism cache (task #56 / issue #31 Phase B)
+# ---------------------------------------------------------------------------
+
+#: Default maximum number of (action_seq, canonical_board) entries kept in
+#: ``ChainedSolveResult.postflop_cache``. LRU eviction kicks in once full.
+#: 100 entries × ~MB per :class:`RangeVsRangeNashResult` is a few hundred MB
+#: ceiling — well below the desktop tier's RAM budget for the typical study
+#: workflow (≤30 representative flops × handful of action sequences).
+DEFAULT_POSTFLOP_CACHE_MAX_SIZE = 100
+
+
+def _canonicalize_board(board: Sequence[Card]) -> str:
+    """Return the suit-isomorphism canonical key for ``board``.
+
+    Wraps :func:`poker_solver.abstraction.equity_features.canonicalize_for_suit_iso`
+    in a board-only entry point. Two boards in the same suit-isomorphism
+    class (e.g. ``Ks8d2h`` and ``Kh8c2s``) produce the same canonical
+    string — the chained orchestrator uses this string as part of its
+    postflop cache key so isomorphic queries share a single solve.
+
+    The underlying function requires a 2-card hand to validate against
+    board collisions; we synthesize a placeholder hand from any two cards
+    not on the board (the chosen permutation depends only on the board,
+    not the hand, so the placeholder is purely a precondition satisfier).
+
+    Args:
+        board: 3 community cards (flop). Phase A only supports flop
+            subgames; length is asserted by the caller.
+
+    Returns:
+        Canonical board key string of the form
+        ``"r{rank}s{suit}_r{rank}s{suit}_r{rank}s{suit}"``.
+
+    Raises:
+        ValueError: ``board`` has fewer than 3 cards or contains duplicates.
+            (Forwarded from the underlying canonicalization helper.)
+    """
+    # Pick any two distinct cards not on the board to satisfy the hand-vs-
+    # board no-collision precondition of canonicalize_for_suit_iso. The
+    # canonical board key depends only on the board, so the choice of
+    # placeholder is irrelevant to the returned string.
+    board_set = set(board)
+    placeholder: list[Card] = []
+    for rank in range(2, 15):
+        for suit in range(4):
+            c = Card(rank, suit)
+            if c not in board_set:
+                placeholder.append(c)
+                if len(placeholder) == 2:
+                    break
+        if len(placeholder) == 2:
+            break
+    if len(placeholder) < 2:  # pragma: no cover — 52-card deck always has spares
+        raise ValueError(
+            f"_canonicalize_board: could not synthesize placeholder hand for "
+            f"board={list(board)} (deck exhausted?)"
+        )
+    canonical_string, _perm_index = canonicalize_for_suit_iso(
+        tuple(board), (placeholder[0], placeholder[1])
+    )
+    return canonical_string
+
 
 # ---------------------------------------------------------------------------
 # Public type aliases
@@ -136,7 +202,12 @@ class ChainedSolveResult:
         reaches the flop, the derived hero / villain continuation
         ranges (see :class:`ContinuationRanges`).
       - ``postflop_cache`` — lazy cache of postflop solves, populated by
-        :meth:`solve_postflop`. Empty on construction.
+        :meth:`solve_postflop`. Keyed by ``(action_sequence,
+        canonical_board_key)`` — suit-isomorphic boards (e.g. ``Ks8d2h``
+        and ``Kh8c2s``) share a single cached entry per the #56 / #31
+        Phase B board-isomorphism optimization. The cache is an
+        :class:`collections.OrderedDict` with LRU eviction once
+        ``max_cache_size`` entries are present. Empty on construction.
 
     Query helpers:
       - :meth:`query` returns a (action_label -> prob) dict for a hand
@@ -155,9 +226,14 @@ class ChainedSolveResult:
     continuation_ranges: dict[PreflopActionSequence, ContinuationRanges] = field(
         default_factory=dict
     )
-    postflop_cache: dict[
-        tuple[PreflopActionSequence, BoardTuple], RangeVsRangeNashResult
-    ] = field(default_factory=dict)
+    # Cache key is ``(action_sequence, canonical_board_key)``. The canonical
+    # key is a string produced by ``_canonicalize_board`` so any two boards
+    # in the same suit-isomorphism class collapse to a single entry. Stored
+    # as an :class:`OrderedDict` to support LRU eviction (move-to-end on
+    # hit, popitem(last=False) on overflow).
+    postflop_cache: OrderedDict[
+        tuple[PreflopActionSequence, str], RangeVsRangeNashResult
+    ] = field(default_factory=OrderedDict)
 
     # Internal state — config + ranges retained for the lazy postflop entry.
     _config_template: HUNLConfig | None = None
@@ -165,6 +241,7 @@ class ChainedSolveResult:
     _villain_classes: list[HandClass] = field(default_factory=list)
     _postflop_iterations: int = 500
     _hero_player: int = 0
+    _max_cache_size: int = DEFAULT_POSTFLOP_CACHE_MAX_SIZE
 
     # ------------------------------------------------------------------
     # Query API
@@ -225,6 +302,13 @@ class ChainedSolveResult:
     ) -> RangeVsRangeNashResult:
         """Solve (or fetch cached) postflop subgame for the given frontier.
 
+        The cache is keyed by ``(action_sequence,
+        _canonicalize_board(board))`` — so two boards that are
+        suit-isomorphic (e.g. ``Ks8d2h`` and ``Kh8c2s``) share one
+        cached solve. When the cache is full (``len() >= max_cache_size``)
+        the least-recently-used entry is evicted before the new entry is
+        inserted. Cache hits move the entry to the most-recent end.
+
         Args:
             action_sequence: Preflop terminal action sequence reaching
                 the flop. Must be a key of ``continuation_ranges``.
@@ -234,7 +318,8 @@ class ChainedSolveResult:
 
         Returns:
             A :class:`RangeVsRangeNashResult` for the flop subgame.
-            First call computes + caches; subsequent calls are O(1).
+            First call (per canonical class) computes + caches;
+            subsequent calls within the same isomorphism class are O(1).
 
         Raises:
             KeyError: ``action_sequence`` is not in
@@ -253,9 +338,12 @@ class ChainedSolveResult:
                 f"{len(board)} cards: {board!r}"
             )
 
-        cache_key = (action_sequence, tuple(board))
+        canonical_key = _canonicalize_board(board)
+        cache_key = (action_sequence, canonical_key)
         cached = self.postflop_cache.get(cache_key)
         if cached is not None:
+            # LRU bookkeeping: mark this entry as most-recently-used.
+            self.postflop_cache.move_to_end(cache_key)
             return cached
 
         if self._config_template is None:  # pragma: no cover
@@ -270,7 +358,13 @@ class ChainedSolveResult:
             iterations=self._postflop_iterations,
             hero_player=self._hero_player,
         )
-        self.postflop_cache[cache_key] = result
+        # LRU eviction: evict the oldest entry BEFORE inserting the new one
+        # so the cache never exceeds ``_max_cache_size``. A ``_max_cache_size``
+        # of 0 disables caching entirely (every call recomputes).
+        if self._max_cache_size > 0:
+            while len(self.postflop_cache) >= self._max_cache_size:
+                self.postflop_cache.popitem(last=False)
+            self.postflop_cache[cache_key] = result
         return result
 
 
@@ -290,6 +384,7 @@ def solve_chained(
     villain_reps: int | None = None,
     on_progress: Callable[[str, int, int], None] | None = None,
     dcfr_kwargs: Mapping[str, Any] | None = None,
+    max_cache_size: int = DEFAULT_POSTFLOP_CACHE_MAX_SIZE,
 ) -> ChainedSolveResult:
     """Solve a preflop chained range-vs-range query (PioSolver chain-style).
 
@@ -341,6 +436,15 @@ def solve_chained(
         dcfr_kwargs: Forwarded to each :func:`solve_hunl_preflop` call
             (DCFR hyperparameter overrides — typically leave as None;
             α=1.5/β=0/γ=2.0 are PLAN.md locked).
+        max_cache_size: Maximum number of ``(action_sequence,
+            canonical_board)`` entries kept in the result's
+            ``postflop_cache``. When full, least-recently-used entries
+            are evicted. Default
+            :data:`DEFAULT_POSTFLOP_CACHE_MAX_SIZE` (100). Pass ``0``
+            to disable caching (every postflop query recomputes).
+            Suit-isomorphic boards collapse to one entry per the #56
+            board-iso cache, so 100 entries spans dozens of distinct
+            action sequences × dozens of canonical flop classes.
 
     Returns:
         A :class:`ChainedSolveResult` with the Stage 1 preflop result,
@@ -354,6 +458,11 @@ def solve_chained(
             villain range; non-zero rake.
     """
     # ---- Validation -----------------------------------------------------
+    if max_cache_size < 0:
+        raise ValueError(
+            f"max_cache_size must be ≥ 0; got {max_cache_size!r} "
+            "(use 0 to disable caching)"
+        )
     if hero_player not in (0, 1):
         raise ValueError(
             f"hero_player must be 0 (aggressor) or 1 (defender); got "
@@ -419,12 +528,13 @@ def solve_chained(
     return ChainedSolveResult(
         preflop_result=preflop_result,
         continuation_ranges=continuation_ranges,
-        postflop_cache={},
+        postflop_cache=OrderedDict(),
         _config_template=config_template,
         _hero_classes=list(hero_classes),
         _villain_classes=list(villain_classes),
         _postflop_iterations=postflop_iterations,
         _hero_player=hero_player,
+        _max_cache_size=max_cache_size,
     )
 
 
@@ -931,6 +1041,7 @@ __all__ = [
     "BoardTuple",
     "ChainedSolveResult",
     "ContinuationRanges",
+    "DEFAULT_POSTFLOP_CACHE_MAX_SIZE",
     "PreflopActionSequence",
     "solve_chained",
 ]

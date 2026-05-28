@@ -372,9 +372,19 @@ def test_solve_postflop_caches_result() -> None:
         f"cache hit took {t_second*1000:.2f}ms; expected <10ms"
     )
 
-    # Cache populated with exactly one entry.
+    # Cache populated with exactly one entry. The cache key is now
+    # ``(action_seq, canonical_board_key)`` per the #56 board-iso cache —
+    # the board tuple itself is no longer a direct key.
     assert len(result.postflop_cache) == 1
-    assert (action_seq, board) in result.postflop_cache
+    cache_keys = list(result.postflop_cache.keys())
+    assert cache_keys[0][0] == action_seq, (
+        f"cache key action seq mismatch: {cache_keys[0][0]!r} vs {action_seq!r}"
+    )
+    # The second element should be a non-empty canonical string.
+    assert isinstance(cache_keys[0][1], str) and cache_keys[0][1], (
+        f"cache key board element must be a non-empty canonical string; "
+        f"got {cache_keys[0][1]!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
