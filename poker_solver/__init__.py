@@ -45,6 +45,15 @@ from poker_solver.blueprint import (
     save_blueprint,
     save_manifest,
 )
+from poker_solver.blueprint_loader import (
+    BlueprintKey,
+    BlueprintLoader,
+    BlueprintLookupError,
+    ManifestMismatchError,
+    OnMissCallback,
+    normalize_action_history,
+    normalize_ante,
+)
 from poker_solver.card import (
     RANKS,
     SUITS,
@@ -126,7 +135,14 @@ __all__ = [
     "AbstractionTables",
     "Blueprint",
     "BlueprintConfig",
+    "BlueprintKey",
+    "BlueprintLoader",
+    "BlueprintLookupError",
     "CANONICAL_169_CLASSES",
+    "ManifestMismatchError",
+    "OnMissCallback",
+    "normalize_action_history",
+    "normalize_ante",
     "HandResolution",
     "Manifest",
     "ManifestEntry",
