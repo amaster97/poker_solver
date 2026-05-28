@@ -61,6 +61,14 @@ from poker_solver.blueprint_subgame import (
     expand_classes_to_range,
     solve_postflop_from_blueprint,
 )
+from poker_solver.solver_router import (
+    DEFAULT_MENU,
+    ActionMenu,
+    RouteDecision,
+    SolveResult as RouterSolveResult,
+    SolverRouter,
+    SpotDescription as RouterSpotDescription,
+)
 from poker_solver.card import (
     RANKS,
     SUITS,
@@ -191,6 +199,12 @@ __all__ = [
     "derive_continuation_ranges_from_blueprint",
     "expand_classes_to_range",
     "solve_postflop_from_blueprint",
+    "ActionMenu",
+    "DEFAULT_MENU",
+    "RouteDecision",
+    "RouterSolveResult",
+    "RouterSpotDescription",
+    "SolverRouter",
     "BoardTuple",
     "ChainedSolveResult",
     "ContinuationRanges",
