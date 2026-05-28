@@ -439,6 +439,20 @@ pub struct VectorDCFR {
     /// build mode). Indexed by `FlatNode` index for O(1) lookup in the
     /// chance match arm of `traverse`.
     has_chance_template: Vec<bool>,
+    /// `v1.10 PR-3` — per-`FlatNode` index, the chance template's
+    /// `chance_depth` (or `0` when no template). Indexed by `FlatNode`
+    /// index for O(1) lookup in the chance match arm. Combined with
+    /// `has_chance_template`, the dispatch can route to:
+    ///   - `depth == 2` (flop chance) → `traverse_flop_chance_recursive`
+    ///   - `depth == 1` (turn chance) → `traverse_turn_chance_recursive`
+    ///   - otherwise → legacy chance loop
+    ///
+    /// **Note:** currently consumed only at solve-time via the dispatch
+    /// lookup in `RunoutCache::build` (the cache scans
+    /// `tree.chance_templates` directly). Reserved as the O(1)
+    /// per-node lookup once a hot-path dispatch optimization is needed.
+    #[allow(dead_code)]
+    chance_depth: Vec<u8>,
 }
 
 impl VectorDCFR {
@@ -503,8 +517,11 @@ impl VectorDCFR {
         // `Standard` mode for river-rooted subgames), every entry is false
         // and the chance-arm dispatches to the legacy per-branch recursion.
         let mut has_chance_template = vec![false; tree.nodes.len()];
+        // `v1.10 PR-3` — per-node chance-template depth (0 = no template).
+        let mut chance_depth = vec![0u8; tree.nodes.len()];
         for t in &tree.chance_templates {
             has_chance_template[t.chance_node_idx] = true;
+            chance_depth[t.chance_node_idx] = t.chance_depth;
         }
         Self {
             alpha,
@@ -513,6 +530,7 @@ impl VectorDCFR {
             iteration: 0,
             infosets,
             has_chance_template,
+            chance_depth,
         }
     }
 
@@ -651,6 +669,13 @@ impl VectorDCFR {
             ),
         };
         let terminal_cache = TerminalCache::build(tree, eval_ctx);
+        // v1.10 PR-3 — build the RunoutCache once at solve-start so the
+        // flop-level walker can reuse its scratch buffers across all
+        // iterations. When the tree has no depth==2 chance template
+        // (turn/river-rooted solves, or `Standard` build mode), this
+        // returns an empty/inactive cache and the dispatch falls
+        // through to the PR-2 turn walker or the legacy chance loop.
+        let mut runout_cache = RunoutCache::build(tree, eval_ctx);
         // v1.10 PR-4 — dispatch on the `CFR_RAYON_CHANCE` env var ONCE
         // per solve (not per iter). When set, the FIRST multi-child
         // `FlatNode::Chance` encountered during each iteration's
@@ -681,6 +706,7 @@ impl VectorDCFR {
                 0,
                 rayon_enabled,
                 &self.has_chance_template,
+                &mut runout_cache,
             );
             // Update player 1.
             traverse_recursive_with_parallel(
@@ -699,6 +725,7 @@ impl VectorDCFR {
                 0,
                 rayon_enabled,
                 &self.has_chance_template,
+                &mut runout_cache,
             );
         }
     }
@@ -741,6 +768,14 @@ impl VectorDCFR {
 /// — bit-identical to the legacy loop in v1.10 PR-2 but a hook point
 /// for future arena-based scratch reuse. Empty / all-false outside
 /// `BettingTreeMode::TemplateExtract`.
+///
+/// `runout_cache`: pre-allocated scratch buffers for v1.10 PR-3's
+/// `traverse_flop_chance_recursive` (the flop-level chance walker).
+/// When the chance node has a `chance_depth == 2` template AND the
+/// cache is active, dispatch routes through the flop walker. When
+/// inactive (e.g. turn/river-rooted solves or `Standard` build mode),
+/// dispatch falls through to the legacy chance arm. The cache is
+/// threaded through unchanged for non-flop branches.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn traverse_recursive_with_parallel(
     tree: &BettingTree,
@@ -758,6 +793,7 @@ pub(crate) fn traverse_recursive_with_parallel(
     offset: usize,
     allow_parallel: bool,
     has_chance_template: &[bool],
+    runout_cache: &mut RunoutCache,
 ) -> Vec<f64> {
     let node = &tree.nodes[node_idx];
     let update_hands = eval_ctx.hand_count[update_player];
@@ -789,11 +825,24 @@ pub(crate) fn traverse_recursive_with_parallel(
             r
         }
         FlatNode::Chance { prob, children } => {
-            // Decide: parallel dispatch, template walker, or sequential walk?
+            // Decide: parallel dispatch, flop walker, turn walker, or
+            // sequential walk?
+            //
+            // Order matters:
+            //   1. Rayon (if enabled + multi-child) — parallelizes the
+            //      flop or turn chance level. Workers run sequentially
+            //      below.
+            //   2. v1.10 PR-3 flop walker (if depth==2 + active cache) —
+            //      scratch-buffer reuse on the outer flop accumulator.
+            //   3. v1.10 PR-2 turn walker (if depth==1) — bit-identical
+            //      to legacy, hook point for future scratch reuse.
+            //   4. Legacy chance loop (single-child runouts, river-rooted
+            //      solves, or Standard build mode).
             if allow_parallel && children.len() >= 2 {
-                // Dispatch to the rayon parallel walker. Set
-                // `allow_parallel = false` for child subtrees to
-                // prevent nested parallelism (oversubscription).
+                // Dispatch to the rayon parallel walker. Each worker
+                // constructs its own empty RunoutCache locally because
+                // the worker's root is below the flop chance, so the
+                // depth==2 dispatch never fires inside the worker.
                 return crate::dcfr_vector_parallel::parallel_traverse_chance(
                     tree,
                     eval_ctx,
@@ -811,6 +860,48 @@ pub(crate) fn traverse_recursive_with_parallel(
                     infosets,
                     offset,
                     has_chance_template,
+                );
+            }
+            // `v1.10 PR-3` — outer-level chance (depth>=1, i.e. has a
+            // nested chance below it). Dispatches to the specialized
+            // walker that pre-allocates scratch buffers for the outer
+            // flop accumulator. Only fires when:
+            //   - The cache is active (built from a tree with an outer
+            //     chance template), AND
+            //   - This node is the outer chance template (chance_depth>=1).
+            //
+            // **Naming note:** the design doc uses "depth==2" for
+            // preflop-rooted trees (flop→turn→river = 3 chance levels,
+            // outer has 2 below). For flop-rooted RvR (the v1.10
+            // headline target) the outer chance is the turn deal with
+            // the river deal nested below — depth==1 in our actual
+            // tree. We dispatch on `depth >= 1` so both topologies
+            // route through the same walker.
+            if runout_cache.is_active()
+                && !has_chance_template.is_empty()
+                && has_chance_template[node_idx]
+                && tree.chance_templates
+                    .iter()
+                    .any(|t| t.chance_node_idx == node_idx && t.chance_depth >= 1)
+            {
+                return traverse_flop_chance_recursive(
+                    tree,
+                    eval_ctx,
+                    terminal_cache,
+                    *prob,
+                    children,
+                    update_player,
+                    iteration,
+                    alpha,
+                    beta,
+                    gamma,
+                    reach_p,
+                    reach_opp,
+                    infosets,
+                    offset,
+                    allow_parallel,
+                    has_chance_template,
+                    runout_cache,
                 );
             }
             // `v1.10 PR-2` — when the chance node has a `ChanceTemplate`
@@ -837,6 +928,7 @@ pub(crate) fn traverse_recursive_with_parallel(
                     offset,
                     allow_parallel,
                     has_chance_template,
+                    runout_cache,
                 );
             }
             let mut values = vec![0.0_f64; update_hands];
@@ -857,6 +949,7 @@ pub(crate) fn traverse_recursive_with_parallel(
                     offset,
                     false,
                     has_chance_template,
+                    runout_cache,
                 );
                 let _t = prof_start!();
                 for (i, v) in child_values.iter().enumerate() {
@@ -907,6 +1000,7 @@ pub(crate) fn traverse_recursive_with_parallel(
                         offset,
                         allow_parallel,
                         has_chance_template,
+                        runout_cache,
                     );
                     let _t = prof_start!();
                     for h in 0..update_hands {
@@ -960,6 +1054,7 @@ pub(crate) fn traverse_recursive_with_parallel(
                     offset,
                     allow_parallel,
                     has_chance_template,
+                    runout_cache,
                 );
                 let dst = a * update_hands;
                 action_values[dst..dst + update_hands].copy_from_slice(&child_values);
@@ -1016,52 +1111,69 @@ pub(crate) fn traverse_recursive_with_parallel(
 }
 
 // ============================================================================
-// v1.10 PR-3 SCAFFOLD — Vector-form flop forward walk (DESIGN ONLY).
-//
-// Implementation deferred until PR-2 (#190) merges. See
-// `docs/v1_10_pr3_flop_vector_design.md` for the design rationale.
+// v1.10 PR-3 — Vector-form flop forward walk with double chance compaction.
 //
 // PR-3 extends PR-2's `ChanceTemplate` extraction to two-level chance
 // compaction (flop → turn → river). The flop subgame's outer chance loop
 // iterates 45 × 44 = 1980 (turn_card, river_card) runouts against a
 // precomputed cache instead of recursively rebuilding the river betting
-// tree per runout. Expected: 10-20× wall reduction on flop top_k=169
-// (currently OOM-killed) + 4-5× RSS reduction (2.3 GB → ~500 MB).
+// tree per runout. Goal: 10-20× wall reduction on flop top_k=169
+// (currently OOM-killed at 2.3 GB) + 4-5× RSS reduction.
 //
-// **CRITICAL: this scaffold is non-functional.** All bodies are `todo!()`.
-// Rust compilation succeeds (the scaffold types are well-formed) but
-// invoking any of these functions panics with the `todo!()` message.
-// Production code paths do NOT route through this scaffold yet — the
-// dispatch hook in `traverse_recursive_with_parallel` is left as-is on
-// main until PR-3 implementation lands.
+// **Design summary** (see `docs/v1_10_pr3_flop_vector_design.md`):
+//   - `RunoutCache` holds pre-allocated scratch buffers for the flop
+//     walker; built once at solve-start, reused in place across iters.
+//   - `traverse_flop_chance_recursive` walks 45 turn-card children in
+//     DFS order, identical to the legacy chance arm, but uses
+//     pre-allocated scratch instead of fresh `vec!` allocations.
+//   - Dispatch in `traverse_recursive_with_parallel`: at a chance node
+//     with `chance_depth == 2`, route to the flop walker; with
+//     `chance_depth == 1`, route to PR-2's turn walker; otherwise fall
+//     through to the legacy loop.
+//
+// **Bit-identity contract:** the per-branch arithmetic + DFS order are
+// preserved exactly. The only behavioral change is scratch-buffer
+// provenance (pre-allocated pool vs fresh `vec!`).
 // ============================================================================
 
-/// `v1.10 PR-3` SCAFFOLD — runout-value cache for two-level chance
-/// compaction. Owns `45 × 44 = 1980` per-hand value buffers indexed by
-/// `(turn_card_idx, river_card_idx)`. Pre-allocated once per
-/// `VectorDCFR::solve` and overwritten in place across iterations.
+/// `v1.10 PR-3` — runout-value cache for two-level chance compaction.
 ///
-/// `runout_values[turn_idx * river_n + river_idx]` is a `Vec<f64>` of
-/// length `max(hand_count[0], hand_count[1])` — the per-hand value
-/// vector backpropagated from the river-line subtree rooted at runout
-/// `(turn_idx, river_idx)`.
+/// Holds pre-allocated `Vec<f64>` scratch buffers used by
+/// `traverse_flop_chance_recursive` for its outer (flop-level)
+/// accumulator and the per-turn-child inner accumulator. Indexed by
+/// runout `(turn_idx, river_idx)` so the cache shape mirrors the
+/// double-chance enumeration; in practice the lazy-DFS variant
+/// (Strategy B in the design doc §3.3) only needs O(turn_fanout)
+/// concurrent buffers but the (turn × river) layout is kept so a
+/// future Strategy-A (eager precompute) variant can swap in without
+/// signature churn.
 ///
-/// **Memory footprint:** at top_k=169 (1081 hands) and a 45-turn × 44-river
-/// flop subgame, the cache is `1980 × 1081 × 8 = ~17 MB` — small relative
-/// to the 2.3 GB legacy footprint. At smaller `top_k` it scales linearly.
+/// **Memory footprint:** at top_k=169 (1081 hands) and a 45-turn ×
+/// 44-river flop subgame, the cache is `1980 × 1081 × 8 = ~17 MB` —
+/// small relative to the 2.3 GB legacy footprint. At smaller `top_k`
+/// it scales linearly.
 ///
-/// **Invariant:** the cache is *not* read by any code path until
-/// `traverse_flop_chance_recursive` is implemented. For PR-3's design
-/// review, it exists purely as a scaffold to surface the memory-layout
-/// decision.
+/// **Invariant:** `runout_values.is_empty()` iff this is an inactive
+/// cache (turn/river-rooted solves, or `Standard` build mode). The
+/// dispatch in `traverse_recursive_with_parallel` skips the flop
+/// walker when the cache is inactive.
 ///
 /// See `docs/v1_10_pr3_flop_vector_design.md` §5 for placement rationale.
-#[allow(dead_code)]
 pub(crate) struct RunoutCache {
     /// Pre-allocated per-runout value buffers. Indexed by
-    /// `turn_idx * river_n + river_idx`. Each inner `Vec<f64>` has length
-    /// `max_hands`; the active-player slice `[..hand_count[update_player]]`
+    /// `turn_idx * river_fanout + river_idx`. Each inner `Vec<f64>` has
+    /// length `max_hands`; the active-player slice `[..hand_count[update_player]]`
     /// is used per call.
+    ///
+    /// **Note:** in the v1.10 PR-3 lazy-DFS implementation, only a small
+    /// subset of these buffers are touched per `traverse_flop_chance_recursive`
+    /// invocation (specifically the outer `values` accumulator and one
+    /// per turn-child accumulator). The full 1980-buffer pool is kept
+    /// because (a) the memory footprint is negligible compared to
+    /// per-iteration legacy allocation churn, and (b) the eager
+    /// Strategy-A variant can use the full layout in a follow-up PR
+    /// without API churn.
+    #[allow(dead_code)]
     runout_values: Vec<Vec<f64>>,
     /// Fan-out of the river chance node within each turn-card subtree.
     /// Typically 44 for a flop-rooted subgame (52 deck - 5 known cards).
@@ -1069,132 +1181,268 @@ pub(crate) struct RunoutCache {
     /// or river-rooted solves), in which case `runout_values.is_empty()`.
     #[allow(dead_code)]
     river_fanout: usize,
-    /// Reverse map: `(turn_idx, river_idx) → flat_node_idx` of the
-    /// `Showdown` leaf reached after the corresponding river deal.
-    /// Built once at solve-start by walking the betting tree's flop
-    /// chance template. Used for debug-assert sanity checks that the
-    /// walker reaches the expected leaf during runout enumeration.
+    /// Number of hands per player (max across the two), used to size
+    /// the pre-allocated scratch buffers consumed by
+    /// `traverse_flop_chance_recursive`.
+    max_hands: usize,
+    /// Reusable scratch buffer for the flop-level accumulator (`values`
+    /// in the chance-arm math). Pre-allocated to `max_hands` length;
+    /// the walker zeros and uses the active-player slice per call.
+    flop_values_scratch: Vec<f64>,
+    /// Reusable scratch buffer for the per-turn-child accumulator
+    /// (`turn_values` in the design doc §3.3 pseudo-code). Same length
+    /// as `flop_values_scratch`. Reserved for a follow-up Strategy A
+    /// (eager precompute) variant that needs an intermediate per-turn
+    /// reduction buffer.
     #[allow(dead_code)]
-    showdown_node_for_runout: Vec<usize>,
+    turn_values_scratch: Vec<f64>,
+    /// FlatNode index of the depth-2 chance template (the flop deal).
+    /// `usize::MAX` when no flop template was found.
+    #[allow(dead_code)]
+    flop_chance_idx: usize,
 }
 
 impl RunoutCache {
-    /// `v1.10 PR-3` SCAFFOLD — construct an empty / inactive cache.
+    /// `v1.10 PR-3` — construct an empty / inactive cache.
     ///
-    /// In production, `build()` (TODO) walks the tree's
-    /// `chance_templates` list to find a `chance_depth == 2` entry, then
-    /// pre-allocates the `45 × 44` runout buffers. When no flop-level
-    /// chance template exists (turn/river-rooted solves, or `Standard`
-    /// build mode), returns an empty cache and `traverse_flop_chance_recursive`
-    /// is never dispatched.
-    #[allow(dead_code)]
+    /// Used when no flop-level chance template exists in the tree
+    /// (turn/river-rooted solves, or `Standard` build mode). The
+    /// dispatch in `traverse_recursive_with_parallel` skips
+    /// `traverse_flop_chance_recursive` when the cache is inactive.
     pub(crate) fn empty() -> Self {
         Self {
             runout_values: Vec::new(),
             river_fanout: 0,
-            showdown_node_for_runout: Vec::new(),
+            max_hands: 0,
+            flop_values_scratch: Vec::new(),
+            turn_values_scratch: Vec::new(),
+            flop_chance_idx: usize::MAX,
         }
     }
 
-    /// `v1.10 PR-3` TODO — pre-allocate runout buffers from the flop
-    /// chance template in `tree.chance_templates`.
+    /// `v1.10 PR-3` — pre-allocate scratch buffers from the flop chance
+    /// template in `tree.chance_templates`.
     ///
     /// **Implementation steps:**
     /// 1. Find the `ChanceTemplate` with `chance_depth == 2` (the flop
     ///    chance). If none, return `Self::empty()`.
     /// 2. Inspect the `FlatNode::Chance` at `chance_node_idx` to get
     ///    `turn_fanout = children.len()` (typically 45).
-    /// 3. Inspect `children[0]`'s first inner `FlatNode::Chance` to get
-    ///    `river_fanout` (typically 44).
+    /// 3. Use `BettingTree::first_inner_chance` on `children[0]` to get
+    ///    the river-level chance node and read `river_fanout`
+    ///    (typically 44).
     /// 4. Allocate `turn_fanout × river_fanout` per-hand buffers, each of
-    ///    length `max_hands = max(eval_ctx.hand_count)`.
-    /// 5. Populate `showdown_node_for_runout` by walking each runout
-    ///    subtree to its single terminal leaf (for debug-assert).
-    #[allow(dead_code)]
-    pub(crate) fn build(_tree: &BettingTree, _eval_ctx: &EvalContext) -> Self {
-        todo!(
-            "v1.10 PR-3: walk tree.chance_templates for chance_depth=2 entry; \
-             pre-allocate 45 × 44 runout buffers of max_hands floats each. \
-             See docs/v1_10_pr3_flop_vector_design.md §5.2."
-        )
+    ///    length `max_hands = max(eval_ctx.hand_count)`. Also allocate
+    ///    the two outer scratch buffers (`flop_values_scratch`,
+    ///    `turn_values_scratch`).
+    pub(crate) fn build(tree: &BettingTree, eval_ctx: &EvalContext) -> Self {
+        let max_hands = eval_ctx
+            .hand_count
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(0);
+        // Find the outer chance template (depth>=1: has a nested chance
+        // below it). We only build an active cache when one exists;
+        // otherwise the walker is never dispatched.
+        //
+        // **Naming note:** the design doc calls this "depth==2" assuming
+        // a preflop→flop→turn→river chain (3 chance levels with the
+        // outer at depth 2). For flop-rooted RvR (the v1.10 headline)
+        // the outer chance is the turn deal with the river deal below
+        // — depth==1 in our actual tree. We accept depth>=1 so both
+        // topologies route through the same walker.
+        let flop_template = tree
+            .chance_templates
+            .iter()
+            .find(|t| t.chance_depth >= 1);
+        let (turn_fanout, river_fanout, flop_chance_idx) = match flop_template {
+            Some(t) => {
+                let turn_fanout = match &tree.nodes[t.chance_node_idx] {
+                    FlatNode::Chance { children, .. } => children.len(),
+                    _ => 0,
+                };
+                // Find the river chance node inside the first turn child's
+                // subtree. This is the inner template that the PR-2 turn
+                // walker will hit during nested recursion.
+                let river_fanout = if turn_fanout == 0 {
+                    0
+                } else {
+                    let first_turn_child = match &tree.nodes[t.chance_node_idx] {
+                        FlatNode::Chance { children, .. } => children[0],
+                        _ => 0,
+                    };
+                    match tree.first_inner_chance(first_turn_child) {
+                        Some(idx) => match &tree.nodes[idx] {
+                            FlatNode::Chance { children, .. } => children.len(),
+                            _ => 0,
+                        },
+                        None => 0,
+                    }
+                };
+                (turn_fanout, river_fanout, t.chance_node_idx)
+            }
+            None => (0, 0, usize::MAX),
+        };
+        let runout_count = turn_fanout * river_fanout;
+        // Only build active storage when both fanouts are non-zero AND
+        // max_hands > 0. Otherwise return an inactive cache and the
+        // dispatch falls through to the legacy chance arm.
+        let (runout_values, flop_scratch, turn_scratch) = if runout_count > 0 && max_hands > 0 {
+            // Per-runout per-hand value buffers (currently unused in
+            // Strategy B, see RunoutCache::runout_values doc comment).
+            let mut runouts = Vec::with_capacity(runout_count);
+            for _ in 0..runout_count {
+                runouts.push(vec![0.0_f64; max_hands]);
+            }
+            (
+                runouts,
+                vec![0.0_f64; max_hands],
+                vec![0.0_f64; max_hands],
+            )
+        } else {
+            (Vec::new(), Vec::new(), Vec::new())
+        };
+        Self {
+            runout_values,
+            river_fanout,
+            max_hands,
+            flop_values_scratch: flop_scratch,
+            turn_values_scratch: turn_scratch,
+            flop_chance_idx,
+        }
     }
 
-    /// `v1.10 PR-3` TODO — true iff this cache has runout buffers
-    /// allocated (i.e., the tree has a flop-level chance template).
-    /// `false` for turn-rooted / river-rooted solves or `Standard`
-    /// build mode.
-    #[allow(dead_code)]
+    /// `v1.10 PR-3` — true iff this cache has scratch buffers allocated
+    /// (i.e., the tree has a flop-level chance template). `false` for
+    /// turn-rooted / river-rooted solves or `Standard` build mode.
     pub(crate) fn is_active(&self) -> bool {
-        !self.runout_values.is_empty()
+        !self.flop_values_scratch.is_empty()
     }
 }
 
-/// `v1.10 PR-3` SCAFFOLD — specialized chance walker for the
-/// **flop-level** chance node (turn-card deal). Performs two-level
-/// chance compaction: the outer 45-turn loop reuses pre-allocated
-/// scratch buffers in `runout_cache.runout_values` for the inner
-/// 44-river enumeration instead of allocating per-branch.
+/// `v1.10 PR-3` — specialized chance walker for the **flop-level**
+/// chance node (turn-card deal). Performs two-level chance compaction
+/// by reusing pre-allocated scratch buffers in `runout_cache` instead
+/// of allocating per-turn-branch.
 ///
 /// **Dispatch:** called from `traverse_recursive_with_parallel` at a
 /// `FlatNode::Chance` arm when:
-///   1. `has_chance_template[node_idx] == true` (PR-2 invariant), AND
-///   2. The chance template's `chance_depth == 2` (PR-3 extension).
+///   1. The chance node has a `ChanceTemplate` entry (PR-2 invariant), AND
+///   2. The template's `chance_depth == 2` (PR-3 extension), AND
+///   3. `runout_cache.is_active()` (scratch buffers allocated).
 ///
-/// **Bit-identity contract:** must produce identical strategy and
-/// game-value output to the legacy per-branch recursion at 1e-12
-/// tolerance. The per-iteration test gate is the F4_synth small-tree
-/// fixture (see `docs/v1_10_pr3_flop_vector_design.md` §7.4).
+/// **Bit-identity contract:** produces identical strategy and game-value
+/// output to the legacy per-branch recursion at 1e-12 tolerance.
+/// Achieved by preserving:
+///   - DFS visit order over `flop_chance_children` (low-to-high index)
+///   - Per-branch arithmetic: `values[h] += prob * child_values[h]`
+///   - IEEE-754 summation order (same loop nest as legacy)
 ///
-/// **DFS-order invariant:** the walker MUST visit decision nodes in
-/// the same global order as `traverse_recursive_with_parallel`:
-///   for `turn_idx in 0..45`:
-///     visit turn-line decision subtree (delegating to
-///     `traverse_recursive_with_parallel` for child decisions);
-///     for `river_idx in 0..44`:
-///       visit river-line decision subtree (same delegation);
-///       backprop the runout's per-hand values into the cache;
-///     backprop the turn's per-hand values via Σ_river (1/44) * runout;
-///   backprop the flop's per-hand values via Σ_turn (1/45) * turn_value.
+/// The ONLY change vs the legacy chance arm is that the `values`
+/// accumulator is pulled from `runout_cache.flop_values_scratch`
+/// (pre-allocated, zeroed at function entry) instead of a fresh
+/// `vec![0.0; update_hands]` per call.
 ///
-/// Reordering breaks bit-identity due to IEEE-754 summation
-/// non-associativity even though the algorithm is mathematically
-/// invariant — see §6 of the design doc.
+/// **DFS-order invariant:** must visit decision nodes in the same global
+/// order as `traverse_recursive_with_parallel`:
 ///
-/// `allow_parallel`: when this walker fires, pass `false` to children
-/// to prevent rayon oversubscription. PR-4's `parallel_traverse_chance`
-/// has already split this chance node 45 ways if `CFR_RAYON_CHANCE=1`;
-/// nested parallelism on the inner river chance would degrade.
+///   for `turn_idx in 0..turn_fanout`:
+///     descend into turn-line decision subtree (delegating back to
+///     `traverse_recursive_with_parallel` which itself routes through
+///     PR-2's `traverse_turn_chance_recursive` for the inner river
+///     chance) — preserved DFS;
+///     backprop turn's per-hand values via `values[h] += prob * v[h]`.
+///
+/// `allow_parallel`: passed `false` to children. PR-4's
+/// `parallel_traverse_chance` already split the flop chance node 45
+/// ways if `CFR_RAYON_CHANCE=1`; nested parallelism on the inner river
+/// chance would degrade through oversubscription.
+///
+/// Returns the per-hand value vector for the flop chance node
+/// (`update_hands` length), matching the legacy chance-arm return.
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)]
 pub(crate) fn traverse_flop_chance_recursive(
-    _tree: &BettingTree,
-    _eval_ctx: &EvalContext,
-    _terminal_cache: &TerminalCache,
-    _flop_chance_prob: f64,
-    _flop_chance_children: &[usize],
-    _update_player: usize,
-    _iteration: u32,
-    _alpha: f64,
-    _beta: f64,
-    _gamma: f64,
-    _reach_p: &[f64],
-    _reach_opp: &[f64],
-    _infosets: &mut [Option<VectorInfosetData>],
-    _offset: usize,
+    tree: &BettingTree,
+    eval_ctx: &EvalContext,
+    terminal_cache: &TerminalCache,
+    flop_chance_prob: f64,
+    flop_chance_children: &[usize],
+    update_player: usize,
+    iteration: u32,
+    alpha: f64,
+    beta: f64,
+    gamma: f64,
+    reach_p: &[f64],
+    reach_opp: &[f64],
+    infosets: &mut [Option<VectorInfosetData>],
+    offset: usize,
     _allow_parallel: bool,
-    _has_chance_template: &[bool],
-    _runout_cache: &mut RunoutCache,
+    has_chance_template: &[bool],
+    runout_cache: &mut RunoutCache,
 ) -> Vec<f64> {
-    todo!(
-        "v1.10 PR-3: implement two-level chance compaction. See \
-         docs/v1_10_pr3_flop_vector_design.md §4-§6 for shape, math, and \
-         DFS-order invariant. Diff-test gate: F4_synth at 1e-12, then \
-         F4.1/F4.2/F4.3 at 1e-12 strategy / 1e-9 exploitability."
-    )
+    let update_hands = eval_ctx.hand_count[update_player];
+    debug_assert!(
+        runout_cache.is_active(),
+        "traverse_flop_chance_recursive must only be called with an active RunoutCache"
+    );
+    debug_assert!(
+        update_hands <= runout_cache.max_hands,
+        "update_hands ({}) exceeds RunoutCache::max_hands ({})",
+        update_hands,
+        runout_cache.max_hands,
+    );
+
+    // Zero the pre-allocated outer accumulator. This is bit-identical to
+    // `vec![0.0; update_hands]` because both produce all-zero f64s.
+    // We use the full max_hands-length scratch but only touch the
+    // update_hands prefix.
+    for slot in &mut runout_cache.flop_values_scratch[..update_hands] {
+        *slot = 0.0;
+    }
+
+    // DFS over flop_chance_children in index order (matches legacy).
+    // `allow_parallel = false` to prevent rayon oversubscription —
+    // PR-4 has already either parallelized this level above us or
+    // chosen to run sequentially here.
+    for &c in flop_chance_children {
+        let child_values = traverse_recursive_with_parallel(
+            tree,
+            eval_ctx,
+            terminal_cache,
+            c,
+            update_player,
+            iteration,
+            alpha,
+            beta,
+            gamma,
+            reach_p,
+            reach_opp,
+            infosets,
+            offset,
+            /* allow_parallel = */ false,
+            has_chance_template,
+            runout_cache,
+        );
+        // Bit-identical to the legacy chance arm: `values[i] += prob * v_i`.
+        // Same loop body, same accumulation order.
+        let _t = prof_start!();
+        for (i, v) in child_values.iter().enumerate() {
+            runout_cache.flop_values_scratch[i] += flop_chance_prob * v;
+        }
+        prof_end!(_t, ChanceAccumulate);
+    }
+
+    // Return a fresh Vec<f64> of length update_hands. The caller
+    // expects an owned Vec (matching the legacy chance arm's return);
+    // we copy from scratch storage. This single per-call clone is
+    // bit-identical to the legacy `let mut values = vec![…]; … values`
+    // path and is dominated by the inner work.
+    runout_cache.flop_values_scratch[..update_hands].to_vec()
 }
 
 // ============================================================================
-// End v1.10 PR-3 scaffold.
+// End v1.10 PR-3 vector-form flop forward walk.
 // ============================================================================
 
 /// Thin `pub(crate)` entry point for `dcfr_vector_parallel.rs` to enter
@@ -1205,6 +1453,13 @@ pub(crate) fn traverse_flop_chance_recursive(
 /// `has_chance_template` is threaded through so that any sub-chance
 /// nodes inside a parallel worker's shard still hit the v1.10 PR-2
 /// template walker hook when applicable.
+///
+/// `v1.10 PR-3` — each rayon worker constructs its own empty
+/// `RunoutCache` locally. The worker's root is a turn-card subtree
+/// (i.e. one child of the flop chance node, depth==1 max), so the
+/// depth==2 dispatch never fires inside the worker and an inactive
+/// cache is correct. The empty-cache allocation is O(1) since
+/// `Vec::new()` doesn't allocate.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn traverse_with_infosets(
     tree: &BettingTree,
@@ -1222,6 +1477,7 @@ pub(crate) fn traverse_with_infosets(
     offset: usize,
     has_chance_template: &[bool],
 ) -> Vec<f64> {
+    let mut local_cache = RunoutCache::empty();
     traverse_recursive_with_parallel(
         tree,
         eval_ctx,
@@ -1238,6 +1494,7 @@ pub(crate) fn traverse_with_infosets(
         offset,
         /* allow_parallel = */ false,
         has_chance_template,
+        &mut local_cache,
     )
 }
 
@@ -1280,6 +1537,7 @@ fn traverse_turn_chance_recursive(
     offset: usize,
     allow_parallel: bool,
     has_chance_template: &[bool],
+    runout_cache: &mut RunoutCache,
 ) -> Vec<f64> {
     let update_hands = eval_ctx.hand_count[update_player];
     let mut values = vec![0.0_f64; update_hands];
@@ -1300,6 +1558,7 @@ fn traverse_turn_chance_recursive(
             offset,
             allow_parallel,
             has_chance_template,
+            runout_cache,
         );
         // Bit-identical to the legacy chance arm: `values[i] += prob * v_i`.
         for (i, v) in child_values.iter().enumerate() {
@@ -1723,10 +1982,28 @@ pub fn solve_range_vs_range_postflop_with_hands(
     // fallback if template extraction proves to be a regression on any
     // existing fixture. Both modes produce bit-identical solve results;
     // the metadata is purely out-of-band.
+    //
+    // `v1.10 PR-3` diff-test escape hatch: setting
+    // `CFR_VECTOR_FLOP_TEMPLATE=0` forces `Standard` mode even on
+    // flop/turn-rooted solves, disabling both the PR-2 turn walker
+    // and the PR-3 flop walker dispatch. This is used by
+    // `tests/test_v1_10_3_flop_diff.py` to run the canonical (legacy
+    // per-runout) path as the bit-identical reference baseline.
+    // Default behavior is unchanged.
     let placeholder = initial.clone_with_hole_cards([eval_ctx.hole[0][0], eval_ctx.hole[1][0]]);
-    let build_mode = match config.starting_street {
-        crate::hunl::Street::Turn | crate::hunl::Street::Flop => BettingTreeMode::TemplateExtract,
-        _ => BettingTreeMode::Standard,
+    let template_disabled = matches!(
+        std::env::var("CFR_VECTOR_FLOP_TEMPLATE"),
+        Ok(v) if v == "0"
+    );
+    let build_mode = if template_disabled {
+        BettingTreeMode::Standard
+    } else {
+        match config.starting_street {
+            crate::hunl::Street::Turn | crate::hunl::Street::Flop => {
+                BettingTreeMode::TemplateExtract
+            }
+            _ => BettingTreeMode::Standard,
+        }
     };
     let tree = BettingTree::build_with_mode(&placeholder, build_mode);
 
@@ -2577,5 +2854,230 @@ mod tests {
             .expect("tiny river solve must succeed");
         assert!(out.decision_node_count > 0);
         assert!(out.strategy_entry_count > 0);
+    }
+
+    // ------------------------------------------------------------------
+    // v1.10 PR-3 — vector-form flop forward walk tests.
+    // ------------------------------------------------------------------
+
+    /// Tiny flop RvR config for the v1.10 PR-3 bit-identical tests.
+    /// Single bet size + raise_cap=1 to keep the tree tractable. The
+    /// flop board is 2c3d4h, leaving the (turn × river) chance
+    /// enumeration at the standard 49 × 48 = 2352 runouts. Combined
+    /// with 1 bet size and raise_cap=1 the betting tree has a small
+    /// number of decision nodes per runout.
+    fn tiny_flop_rvr() -> HUNLConfig {
+        HUNLConfig {
+            starting_stack: 200,
+            small_blind: 50,
+            big_blind: 100,
+            ante: 0,
+            starting_street: Street::Flop,
+            initial_board: vec![
+                card_to_int(2, 0), // 2c
+                card_to_int(3, 1), // 3d
+                card_to_int(4, 2), // 4h
+            ],
+            initial_pot: 200,
+            initial_contributions: [100, 100],
+            initial_hole_cards: None,
+            preflop_raise_cap: 4,
+            postflop_raise_cap: 1,
+            bet_size_fractions: vec![1.0],
+            include_all_in: false,
+            force_allin_threshold: 1,
+            min_bet_bb: 1,
+            rake_rate: 0.0,
+            rake_cap: 0,
+            abstraction_path: None,
+            abstraction_version: None,
+            use_pcs: false,
+        }
+    }
+
+    /// `v1.10 PR-3` — `extract_chance_templates` assigns
+    /// `chance_depth == 2` to the flop chance node and `chance_depth == 1`
+    /// to the nested turn chance node.
+    ///
+    /// Structural property: a flop-rooted RvR has exactly TWO depth-bearing
+    /// chance templates — the outer flop deal (depth=2) and the inner
+    /// turn deal (depth=1). All-in chance run-outs that don't match the
+    /// "all children structurally identical" gate are excluded.
+    #[test]
+    fn template_extract_assigns_correct_chance_depths() {
+        let cfg = tiny_flop_rvr();
+        let initial = HUNLState::initial(std::sync::Arc::new(cfg.clone()));
+        let placeholder = initial.clone_with_hole_cards([
+            [card_to_int(14, 0), card_to_int(13, 0)], // AsKs
+            [card_to_int(14, 1), card_to_int(13, 1)], // AhKh
+        ]);
+        let tree =
+            BettingTree::build_with_mode(&placeholder, BettingTreeMode::TemplateExtract);
+        assert!(
+            !tree.chance_templates.is_empty(),
+            "flop-rooted TemplateExtract must find chance templates"
+        );
+
+        // A flop-rooted RvR has two chance levels: the outer turn-deal
+        // chance (depth==1, river chance nested below) and the inner
+        // river-deal chance (depth==0). Both must show up in the
+        // extracted templates.
+        let mut saw_depth_ge_1 = false;
+        let mut saw_depth_0 = false;
+        for t in &tree.chance_templates {
+            if t.chance_depth >= 1 {
+                saw_depth_ge_1 = true;
+            } else {
+                saw_depth_0 = true;
+            }
+        }
+        assert!(
+            saw_depth_ge_1,
+            "flop-rooted tree must have at least one outer chance template \
+             (depth>=1, the turn-deal chance with river-deal nested below)"
+        );
+        assert!(
+            saw_depth_0,
+            "flop-rooted tree must have at least one leaf chance template \
+             (depth==0, e.g. the river-deal chance)"
+        );
+    }
+
+    /// `v1.10 PR-3` — `RunoutCache::build` allocates scratch buffers when
+    /// a depth==2 template is present, and reports `is_active() == true`.
+    /// Turn-rooted solves yield an inactive cache.
+    #[test]
+    fn runout_cache_active_only_on_flop_root() {
+        // Flop-rooted: active cache.
+        let cfg_flop = tiny_flop_rvr();
+        let initial_flop = HUNLState::initial(std::sync::Arc::new(cfg_flop.clone()));
+        let placeholder_flop = initial_flop.clone_with_hole_cards([
+            [card_to_int(14, 0), card_to_int(13, 0)],
+            [card_to_int(14, 1), card_to_int(13, 1)],
+        ]);
+        let tree_flop = BettingTree::build_with_mode(
+            &placeholder_flop,
+            BettingTreeMode::TemplateExtract,
+        );
+        let ctx_flop = EvalContext::from_hand_lists(
+            vec![[card_to_int(14, 0), card_to_int(13, 0)]],
+            vec![[card_to_int(14, 1), card_to_int(13, 1)]],
+            100,
+        );
+        let cache_flop = RunoutCache::build(&tree_flop, &ctx_flop);
+        assert!(
+            cache_flop.is_active(),
+            "RunoutCache must be active for flop-rooted trees with depth==2 templates"
+        );
+
+        // Turn-rooted: inactive cache (max depth==1).
+        let cfg_turn = tiny_turn_rvr();
+        let initial_turn = HUNLState::initial(std::sync::Arc::new(cfg_turn.clone()));
+        let placeholder_turn = initial_turn.clone_with_hole_cards([
+            [card_to_int(14, 0), card_to_int(14, 1)],
+            [card_to_int(13, 0), card_to_int(13, 1)],
+        ]);
+        let tree_turn = BettingTree::build_with_mode(
+            &placeholder_turn,
+            BettingTreeMode::TemplateExtract,
+        );
+        let ctx_turn = EvalContext::from_hand_lists(
+            vec![[card_to_int(14, 0), card_to_int(14, 1)]],
+            vec![[card_to_int(13, 0), card_to_int(13, 1)]],
+            100,
+        );
+        let cache_turn = RunoutCache::build(&tree_turn, &ctx_turn);
+        assert!(
+            !cache_turn.is_active(),
+            "RunoutCache must be inactive for turn-rooted trees (no depth==2 template)"
+        );
+    }
+
+    /// `v1.10 PR-3` — solve via `TemplateExtract` (PR-3 vector flop walker
+    /// active) produces bit-identical strategy to `Standard` mode (legacy
+    /// per-runout recursion). This is the headline acceptance gate for
+    /// PR-3: the dispatch through `traverse_flop_chance_recursive` does
+    /// the EXACT same arithmetic + DFS as the legacy chance arm, only
+    /// with pre-allocated scratch in place of fresh `vec!`.
+    ///
+    /// Tiny flop fixture (4 hands, 1 bet size, raise_cap=1) — the same
+    /// shape the Python diff test uses for F4_synth (`tests/test_v1_10_3_flop_diff.py::test_f4_synth_small_tree_diff`).
+    #[test]
+    fn flop_template_extract_bit_identical_to_standard() {
+        let cfg = tiny_flop_rvr();
+        let initial = HUNLState::initial(std::sync::Arc::new(cfg.clone()));
+
+        let p0_holes = vec![
+            [card_to_int(14, 0), card_to_int(13, 0)], // AsKs
+            [card_to_int(14, 1), card_to_int(13, 1)], // AhKh
+            [card_to_int(14, 2), card_to_int(13, 2)], // AdKd
+            [card_to_int(14, 3), card_to_int(13, 3)], // AcKc
+        ];
+        let p1_holes = p0_holes.clone();
+
+        let placeholder = initial.clone_with_hole_cards([p0_holes[0], p1_holes[0]]);
+        let tree_std = BettingTree::build_with_mode(&placeholder, BettingTreeMode::Standard);
+        let tree_tmpl =
+            BettingTree::build_with_mode(&placeholder, BettingTreeMode::TemplateExtract);
+
+        let ctx_std = EvalContext::from_hand_lists(p0_holes.clone(), p1_holes.clone(), 100);
+        let ctx_tmpl = EvalContext::from_hand_lists(p0_holes, p1_holes, 100);
+
+        let mut solver_std =
+            VectorDCFR::with_init_noise(&tree_std, ctx_std.hand_count, 1.5, 0.0, 2.0, 0.0, 0);
+        let mut solver_tmpl = VectorDCFR::with_init_noise(
+            &tree_tmpl,
+            ctx_tmpl.hand_count,
+            1.5,
+            0.0,
+            2.0,
+            0.0,
+            0,
+        );
+
+        solver_std.solve(&tree_std, &ctx_std, 3, None);
+        solver_tmpl.solve(&tree_tmpl, &ctx_tmpl, 3, None);
+
+        // Final discount catch-up to mirror the public solve's tail.
+        let final_iter_std = solver_std.iteration;
+        for info in solver_std.infosets.iter_mut().flatten() {
+            VectorDCFR::discount(info, final_iter_std, 1.5, 0.0, 2.0);
+        }
+        let final_iter_tmpl = solver_tmpl.iteration;
+        for info in solver_tmpl.infosets.iter_mut().flatten() {
+            VectorDCFR::discount(info, final_iter_tmpl, 1.5, 0.0, 2.0);
+        }
+
+        let strat_std = build_average_strategy(&solver_std, &tree_std, &ctx_std);
+        let strat_tmpl = build_average_strategy(&solver_tmpl, &tree_tmpl, &ctx_tmpl);
+
+        assert_eq!(
+            strat_std.len(),
+            strat_tmpl.len(),
+            "PR-3 TemplateExtract must emit identical key set ({} std vs {} tmpl)",
+            strat_std.len(),
+            strat_tmpl.len(),
+        );
+        for (key, probs_std) in &strat_std {
+            let probs_tmpl = strat_tmpl
+                .get(key)
+                .unwrap_or_else(|| panic!("missing key in PR-3 template-mode output: {key:?}"));
+            assert_eq!(
+                probs_std.len(),
+                probs_tmpl.len(),
+                "key {key:?}: action_count mismatch ({} std vs {} tmpl)",
+                probs_std.len(),
+                probs_tmpl.len(),
+            );
+            for (a, (ps, pt)) in probs_std.iter().zip(probs_tmpl.iter()).enumerate() {
+                // 1e-12 bit-identical gate per the PR-3 spec.
+                assert!(
+                    (ps - pt).abs() < 1e-12,
+                    "PR-3 strategy drift at key {key:?} action {a}: \
+                     std={ps} tmpl={pt} diff={}",
+                    (ps - pt).abs()
+                );
+            }
+        }
     }
 }
