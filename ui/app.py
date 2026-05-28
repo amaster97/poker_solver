@@ -152,7 +152,16 @@ def build_page() -> None:
     # Track chained-solve completion so we only refresh the chained tab
     # when the result actually lands (one-shot per solve — refresh on
     # every tick would thrash the DOM grid).
-    chained_state: dict[str, int | None] = {"last_id": None}
+    #
+    # Task #68 Phase 6: also track ``chained_postflop_route_info``
+    # identity so the routing badge under the chained tab updates the
+    # moment the user's flop-pick lazy-solve finishes. Without this the
+    # badge would only redraw when ``chained_result`` itself changes,
+    # which is rarely.
+    chained_state: dict[str, int | None] = {
+        "last_id": None,
+        "last_post_route_id": None,
+    }
 
     def _tick() -> None:
         """Pump worker progress into the UI + flush debounced state."""
@@ -178,11 +187,20 @@ def build_page() -> None:
         except Exception:  # noqa: BLE001
             logger.exception("preflop chart refresh on tick raised")
         # Task #57: re-render the chained tab when a chained result lands.
+        # Task #68 Phase 6: also re-render when the postflop route info
+        # identity changes (the user just paid for a flop subgame solve).
         try:
             chained_result = getattr(state.runner, "chained_result", None)
             current_id_c = id(chained_result) if chained_result is not None else None
-            if current_id_c != chained_state["last_id"]:
+            post_info = getattr(
+                state.runner, "chained_postflop_route_info", None
+            )
+            current_post_id = id(post_info) if post_info is not None else None
+            id_changed = current_id_c != chained_state["last_id"]
+            post_changed = current_post_id != chained_state["last_post_route_id"]
+            if id_changed or post_changed:
                 chained_state["last_id"] = current_id_c
+                chained_state["last_post_route_id"] = current_post_id
                 refresh = getattr(state.runner, "_chained_refresh", None)
                 if callable(refresh):
                     refresh()

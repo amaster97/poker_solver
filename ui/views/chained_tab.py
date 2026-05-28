@@ -862,12 +862,14 @@ def _render_postflop_panel(
                 ui.label(f"Postflop solve error: {exc}").style("color:#e07070")
                 return
             wall_post = _time.monotonic() - t_post
-            # Update the postflop route info badge in-place. The
-            # ``_routing_slot`` refreshable is owned by ``render(...)``
-            # — calling ``refresh_after_change`` would re-render the
-            # right pane too, but we want the badge to update without
-            # bouncing the postflop strategy section. The polling timer
-            # in ``ui/app.py`` catches this on the next tick anyway.
+            # Update the postflop route info badge so the polling timer
+            # in ``ui/app.py`` picks up the identity change on the next
+            # tick and refreshes the routing slot. We deliberately do
+            # NOT call ``_chained_refresh()`` inline here — the polling
+            # tick is the single owner of refresh scheduling, and
+            # calling it from inside a render context (this function is
+            # the body of ``_render_postflop_panel`` -> ``_right_pane_slot``)
+            # would re-enter the same refreshable mid-render.
             from ui.blueprint_router import RouteInfo, SourceLabel
 
             runner = getattr(state, "runner", None)
@@ -877,12 +879,6 @@ def _render_postflop_panel(
                     wall_time_s=wall_post,
                     confidence=f"live subgame ({len(action_seq)}-token line)",
                 )
-                refresh = getattr(runner, "_chained_refresh", None)
-                if callable(refresh):
-                    try:
-                        refresh()
-                    except Exception:  # noqa: BLE001
-                        logger.exception("chained refresh after postflop solve")
 
         per_class = getattr(cached, "per_class_strategy", {}) or {}
         if selected_class not in per_class:
