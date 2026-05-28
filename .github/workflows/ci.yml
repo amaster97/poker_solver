@@ -57,7 +57,12 @@ jobs:
       - name: Build Rust + Python tier
         run: |
           maturin develop --release --target ${{ matrix.target }}
-          pip install -e ".[dev]"
+          # Install with both [dev] (test deps incl. pytest-asyncio) and
+          # [ui] (nicegui). The UI smoke tests in tests/test_ui_*.py use
+          # pytest.importorskip to bail when either is missing, but we
+          # want CI to actually exercise them post-PR-178 (blueprint
+          # E2E coverage).
+          pip install -e ".[dev,ui]"
 
       - name: Cargo unit tests
         run: cargo test --lib --release --target ${{ matrix.target }}
