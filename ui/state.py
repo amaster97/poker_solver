@@ -85,8 +85,10 @@ logger = logging.getLogger(__name__)
 # attribute. The UI layer historically treated combos as bare 2-tuples;
 # annotate that explicitly so type checks remain happy while runtime stays
 # polymorphic across both forms (a ``Combo`` IS-A ``tuple[Card, Card]``).
-# Phase C will migrate ``RangeWithFreqs.frequencies`` into ``Range._weight``
-# and drop this alias.
+# B10 Phase C completed the migration: ``RangeWithFreqs.frequencies`` is no
+# longer stored on the wrapper; the canonical weight store lives in
+# ``Range._weight``. ``frequency_of`` / ``set_frequency`` delegate to
+# ``Range.weight`` / ``Range.set_weight``.
 _CardPair = tuple[Card, Card]
 
 # --------------------------------------------------------------------------- #
@@ -355,74 +357,72 @@ def _full_range() -> Range:
 
 @dataclass
 class RangeWithFreqs:
-    """A ``poker_solver.Range`` with an added per-combo frequency layer.
+    """A ``poker_solver.Range`` with per-combo frequency semantics.
 
-    PR 10 needs per-combo float frequencies in ``[0.0, 1.0]``; ``Range`` is
-    membership-only. We do NOT modify ``range.py`` — instead this class wraps
-    a ``Range`` and adds a ``frequencies`` dict from (Card, Card) combos to
-    a float in ``[0.0, 1.0]``.
+    B10 Phase C migration: per-combo weights now live canonically inside
+    ``Range._weight`` (added in B10 Phase A). ``RangeWithFreqs`` is a thin
+    UI-facing facade that delegates ``frequency_of`` / ``set_frequency``
+    to ``Range.weight`` / ``Range.set_weight``. The separate
+    ``frequencies`` dict has been removed.
 
-    Semantics:
+    Semantics (unchanged from pre-Phase-C):
 
-    - ``frequency_of(combo)`` returns ``frequencies[combo]`` if present,
-      else ``1.0`` if combo in ``base_range``, else ``0.0``.
+    - ``frequency_of(combo)`` returns the underlying ``Range`` weight if
+      the combo is present, else ``0.0``.
+    - ``set_frequency(combo, freq)`` clamps ``freq`` to ``[0.0, 1.0]``
+      and writes through to ``Range.set_weight``. Combos not yet in the
+      base range are added.
     - The range-INPUT matrix in ``ui/views/spot_input.py`` mutates
-      ``frequencies[combo]`` when a cell is clicked or shift-clicked.
+      weights via ``set_frequency`` when a cell is clicked or
+      shift-clicked.
     - Agent B's strategy DISPLAY matrix reads
       ``state.current_spot.ranges[player].frequency_of(combo)`` for the
       per-cell aggregate (e.g., to size a "% of range" label).
     """
 
     base_range: Range = field(default_factory=Range)
-    frequencies: dict[_CardPair, float] = field(default_factory=dict)
 
     def frequency_of(self, combo: _CardPair) -> float:
         """Return the frequency of ``combo``.
 
-        Default 1.0 if combo is in ``base_range`` and absent from
-        ``frequencies``; 0.0 otherwise.
+        Delegates to ``Range.weight(combo)``. Returns ``0.0`` when the
+        combo is absent from the base range.
         """
-        if combo in self.frequencies:
-            return self.frequencies[combo]
-        if combo in self.base_range._combo_set:
-            return 1.0
-        return 0.0
+        return self.base_range.weight(combo)
 
     def set_frequency(self, combo: _CardPair, freq: float) -> None:
-        """Set ``frequencies[combo] = freq`` (clamped to ``[0.0, 1.0]``).
+        """Set the combo's frequency to ``freq`` (clamped to ``[0.0, 1.0]``).
 
-        Adds ``combo`` to ``base_range`` if not already present.
+        Delegates to ``Range.set_weight``. Adds ``combo`` to the base
+        range if not already present.
         """
         clamped = max(0.0, min(1.0, freq))
-        self.frequencies[combo] = clamped
-        if combo not in self.base_range._combo_set:
-            self.base_range.add(combo)
+        self.base_range.set_weight(combo, clamped)
 
     @classmethod
     def from_string(cls, range_str: str) -> RangeWithFreqs:
         """Parse ``range_str`` via ``parse_range``; every combo at 1.0."""
         base = parse_range(range_str)
-        freqs: dict[_CardPair, float] = {combo: 1.0 for combo in base.combos}
-        return cls(base_range=base, frequencies=freqs)
+        return cls(base_range=base)
 
     @classmethod
     def full(cls) -> RangeWithFreqs:
         """Construct a ``RangeWithFreqs`` containing all 1326 combos at 1.0."""
         base = _full_range()
-        freqs: dict[_CardPair, float] = {combo: 1.0 for combo in base.combos}
-        return cls(base_range=base, frequencies=freqs)
+        return cls(base_range=base)
 
     @classmethod
     def empty(cls) -> RangeWithFreqs:
         """Construct an empty ``RangeWithFreqs``."""
-        return cls(base_range=Range(), frequencies={})
+        return cls(base_range=Range())
 
     def to_string(self) -> str:
         """Render back to a comma-separated combo list.
 
         Lossy: combos with frequency < 1.0 lose their fractional weight.
         Round-trips ``RangeWithFreqs.from_string(rw.to_string())`` only for
-        unit-weight ranges.
+        unit-weight ranges. (B10 Phase D will switch this to the
+        weight-preserving ``Range.to_string`` once CLI plumbing lands.)
         """
         tokens: list[str] = []
         for combo in self.base_range.combos:
@@ -2193,9 +2193,86 @@ def get_state() -> AppState:
     return _state_singleton
 
 
+def _migrate_legacy_freq_dict(
+    rw: RangeWithFreqs, freq_dict: dict[Any, Any] | None
+) -> None:
+    """B10 Phase C: one-shot upgrade of legacy ``frequencies: {...}`` payloads.
+
+    Pre-Phase-C ``RangeWithFreqs`` carried a sibling ``frequencies`` dict.
+    When loading a state.json written by an older build, walk the dict
+    and replay each entry through ``set_frequency`` (which now delegates
+    to ``Range.set_weight``). Once migrated, the dict is dropped — the
+    next save uses the canonical ``Range._weight`` store, so the legacy
+    field never re-appears.
+
+    The ``freq_dict`` argument is whatever the loader pulled out of the
+    persisted JSON. Keys are encoded as 4-char strings (``"AsKs"``) or
+    as 2-tuples-of-cards (older test fixtures); we accept both. Malformed
+    entries are logged and skipped — never crash on bad input.
+    """
+    if not freq_dict:
+        return
+    for raw_key, raw_val in freq_dict.items():
+        combo = _decode_combo_key(raw_key)
+        if combo is None:
+            logger.warning(
+                "B10 migration: skipping malformed combo key %r", raw_key
+            )
+            continue
+        try:
+            weight = float(raw_val)
+        except (TypeError, ValueError):
+            logger.warning(
+                "B10 migration: skipping non-numeric weight %r for %r",
+                raw_val,
+                raw_key,
+            )
+            continue
+        rw.set_frequency(combo, weight)
+
+
+def _decode_combo_key(raw: Any) -> _CardPair | None:
+    """Decode a persisted combo key to a ``(Card, Card)`` tuple.
+
+    Accepts:
+      * 4-char hole strings (``"AsKs"``, ``"7d2c"``) — the JSON-native
+        encoding.
+      * 2-element list/tuple of card strings (``["As", "Ks"]``) — older
+        debug fixtures.
+      * Pre-parsed ``(Card, Card)`` tuples — defensive, in case callers
+        pass live state.
+
+    Returns ``None`` on any malformed input.
+    """
+    if isinstance(raw, str) and len(raw) == 4:
+        try:
+            c0 = Card.from_str(raw[:2])
+            c1 = Card.from_str(raw[2:])
+        except (ValueError, KeyError, IndexError):
+            return None
+        return (c0, c1)
+    if isinstance(raw, (list, tuple)) and len(raw) == 2:
+        c0_raw, c1_raw = raw
+        if isinstance(c0_raw, Card) and isinstance(c1_raw, Card):
+            return (c0_raw, c1_raw)
+        if isinstance(c0_raw, str) and isinstance(c1_raw, str):
+            try:
+                return (Card.from_str(c0_raw), Card.from_str(c1_raw))
+            except (ValueError, KeyError, IndexError):
+                return None
+    return None
+
+
 def _load_or_default() -> AppState:
-    """Construct the singleton, loading prefs from disk if available."""
+    """Construct the singleton, loading prefs from disk if available.
+
+    B10 Phase C also runs a one-shot upgrade on any legacy ``frequencies``
+    payload found under ``current_spot.ranges[*].frequencies``. The
+    canonical weight store now lives in ``Range._weight`` — see
+    ``_migrate_legacy_freq_dict``.
+    """
     prefs = UIPrefs()
+    current_spot = Spot()
     try:
         if _STATE_FILE.exists():
             with _STATE_FILE.open("r", encoding="utf-8") as fh:
@@ -2221,6 +2298,14 @@ def _load_or_default() -> AppState:
                 ),
                 chart_log_scale=bool(prefs_data.get("chart_log_scale", True)),
             )
+            # B10 Phase C migration: walk any persisted ranges and
+            # upgrade legacy ``frequencies: {...}`` payloads. We do not
+            # yet persist full spots (PR 11 work), but the loader is
+            # forward-compatible with both old (Phase A/B) and new
+            # (Phase C) range encodings — see ``_apply_range_payload``.
+            spot_data = data.get("current_spot")
+            if isinstance(spot_data, dict):
+                _apply_spot_payload(current_spot, spot_data)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         logger.warning("Failed to load state.json (%s); starting from defaults", exc)
         # Back up corrupt file then proceed with defaults.
@@ -2230,7 +2315,7 @@ def _load_or_default() -> AppState:
             except OSError:
                 logger.exception("Failed to back up corrupt state.json")
     return AppState(
-        current_spot=Spot(),
+        current_spot=current_spot,
         current_solve=None,
         current_tree_node_id="root",
         selected_player_for_input=0,
@@ -2238,6 +2323,44 @@ def _load_or_default() -> AppState:
         prefs=prefs,
         state_path=_STATE_FILE,
     )
+
+
+def _apply_spot_payload(spot: Spot, spot_data: dict[str, Any]) -> None:
+    """Apply a persisted ``current_spot`` payload onto ``spot`` in place.
+
+    Limited scope: only the per-player range weights are restored (the
+    feature B10 Phase C ships). Other spot fields are left at their
+    default and will be filled in by future PRs that persist them.
+
+    The ranges payload is shaped as either:
+
+    * **Pre-Phase-C (legacy)** — ``{"ranges": [{"frequencies": {key: w}}, ...]}``
+      The legacy ``frequencies`` dict is walked and migrated via
+      ``set_frequency``.
+    * **Phase-C+ (canonical)** — ``{"ranges": [{"weights": {key: w}}, ...]}``
+      Each entry is replayed via ``set_frequency`` (which writes through
+      to ``Range._weight``).
+    """
+    raw_ranges = spot_data.get("ranges")
+    if not isinstance(raw_ranges, (list, tuple)):
+        return
+    rebuilt: list[RangeWithFreqs] = []
+    for entry in raw_ranges[:2]:
+        if not isinstance(entry, dict):
+            rebuilt.append(RangeWithFreqs.full())
+            continue
+        # Start from empty range; weights below seed it.
+        rw = RangeWithFreqs.empty()
+        # Legacy field — strip on next save.
+        if "frequencies" in entry:
+            _migrate_legacy_freq_dict(rw, entry.get("frequencies"))
+        # Canonical (Phase C+) field — same encoding, future-proof name.
+        if "weights" in entry:
+            _migrate_legacy_freq_dict(rw, entry.get("weights"))
+        rebuilt.append(rw)
+    while len(rebuilt) < 2:
+        rebuilt.append(RangeWithFreqs.full())
+    spot.ranges = (rebuilt[0], rebuilt[1])
 
 
 def save_state() -> None:
@@ -2290,10 +2413,14 @@ def _maybe_flush_state() -> None:
 def _serialize_state(state: AppState) -> dict[str, Any]:
     """Serialize ``AppState`` to a JSON-friendly dict.
 
-    PR 10a only persists ``prefs`` (per spec §9.2). Spots / ranges / library
-    entries land in PR 11.
+    PR 10a only persists ``prefs`` (per spec §9.2). Spots / ranges /
+    library entries are still pending PR 11, BUT B10 Phase C adds a
+    minimal per-range ``weights`` payload so the per-combo intensity
+    editor's edits survive a session round-trip. The legacy
+    ``frequencies`` key is *never* emitted — the loader is forward-
+    compatible with both, the serializer is canonical-only.
     """
-    return {
+    payload: dict[str, Any] = {
         "version": _STATE_VERSION,
         "prefs": {
             "dark_mode": state.prefs.dark_mode,
@@ -2305,6 +2432,43 @@ def _serialize_state(state: AppState) -> dict[str, Any]:
             "chart_log_scale": state.prefs.chart_log_scale,
         },
     }
+    spot = state.current_spot
+    if spot is not None:
+        spot_payload = _serialize_spot_ranges(spot)
+        if spot_payload is not None:
+            payload["current_spot"] = spot_payload
+    return payload
+
+
+def _serialize_spot_ranges(spot: Spot) -> dict[str, Any] | None:
+    """Serialize the per-player range weights only.
+
+    Emits ``None`` when both ranges are full unit-weight (the implicit
+    default) — keeps state.json small for the common case where the
+    user hasn't yet edited any per-combo weight. The check is
+    deliberately conservative: if EITHER range has any combo whose
+    weight ``< 1.0``, emit the full payload for both ranges so the
+    asymmetric case never silently loses data.
+    """
+
+    def _has_fractional(rw: RangeWithFreqs) -> bool:
+        for combo in rw.base_range.combos:
+            if rw.frequency_of(combo) < 1.0:
+                return True
+        return False
+
+    if not any(_has_fractional(rw) for rw in spot.ranges):
+        return None
+
+    range_payloads: list[dict[str, Any]] = []
+    for rw in spot.ranges:
+        weights: dict[str, float] = {}
+        for combo in rw.base_range.combos:
+            c0, c1 = combo
+            key = f"{c0}{c1}"
+            weights[key] = rw.frequency_of(combo)
+        range_payloads.append({"weights": weights})
+    return {"ranges": range_payloads}
 
 
 def reset_state_for_testing() -> None:
