@@ -965,6 +965,10 @@ class SolveRunner:
             # directly to drive the 13x13 preflop chart + the lazy postflop
             # subgame display.
             self.chained_result = None
+            # Task #68 Phase 6: clear stale chained route info so a
+            # previous solve's badges don't appear under the next solve.
+            self.chained_preflop_route_info = None
+            self.chained_postflop_route_info = None
             # Stash the active mode so views can tell whether to project
             # their result holder (mirrors the preflop_chart pattern).
             self._mode = "chained" if solver_mode == "chained" else self.__dict__.get("_mode", "")
