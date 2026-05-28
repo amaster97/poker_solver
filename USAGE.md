@@ -11,7 +11,13 @@ Document baseline: v1.0.0. Updates through v1.8.0 are layered in §5.3
 §5.6 (aggregator vs. true-Nash range-vs-range, v1.7.0+), plus the §7a
 ergonomic subcommands and §7b known perf cliffs sections. v1.8.0
 ships cross-platform SIMD + the .dmg fork-bomb fix; no user-facing API
-changes vs v1.7.x.
+changes vs v1.7.x. v1.8.2 (post-v1.8.0, on `main` today) adds the
+`subgame` CLI command, `--walk-tree` / `--node` / `--format` flags,
+`--version`, `return_ev=True` on push/fold, `SolveResult` off-path
+annotation, the DCFR α-guard, and a 213× river-RvR speedup — see
+§5.6 ("When to use blueprint vs true Nash" bench numbers), §5.7
+(off-path filtering), §7a (subgame + walk-tree CLI), and the README
+"Recent changes (since v1.8.0)" section for the full list.
 
 ---
 
@@ -108,6 +114,19 @@ Output is a frequency in `[0, 1]`.
 
 A full HUNL configuration also auto-routes to the chart when it lands
 in range — `result.backend` returns `"pushfold_chart"`.
+
+**v1.8.2: EV alongside the frequency.** Pass `return_ev=True` to
+`get_pushfold_strategy` to receive a `{"strategy": prob, "ev_bb": ev}`
+dict (EV in big blinds) instead of a bare frequency. Useful for
+push/fold UIs that want to surface "what does the deviation cost?"
+next to the chart cell:
+
+```python
+from poker_solver import get_pushfold_strategy
+cell = get_pushfold_strategy(stack_bb=10, position="sb_jam",
+                             hand="AKs", return_ev=True)
+print(cell)   # {"strategy": 1.0, "ev_bb": 1.62}
+```
 
 ### 3b. River subgame solve
 
@@ -595,6 +614,102 @@ hero = ["AA", "KK", "QQ", "JJ", "TT", "99", "88", "77", "66", "55", "44",
         "33", "22", "AKs", "AKo"]
 ```
 
+#### When to use blueprint vs true Nash — bench numbers (v1.8.2)
+
+After PR #114's TerminalCache landed, the river joint-Nash path is
+fast enough to use interactively; turn is workable; flop remains
+governed by tree size. Bench numbers below are sec/iteration on a 3-class
+hero range against a 3-class villain range, Apple Silicon (M-series),
+Rust backend.
+
+| Street | Aggregator (§5.2) | True Nash (§5.6) | Recommendation |
+|---|---|---|---|
+| **River** | 0.44 s/iter | 0.09 s/iter | True Nash is now faster *and* correct on bluff-catch / polarized spots. Default to `solve_range_vs_range_nash` for river. |
+| **Turn**  | 0.92 s/iter | 25.43 s/iter | Aggregator remains the interactive path; Nash only for offline / batch. |
+| **Flop**  | impractical (>27 min CPU on a 3-class range; still running) | n/a at production scale | Use the aggregator for population-frequency reads; expect minutes-to-hours per query, not interactive. |
+
+Practical decision rule:
+
+- **River, any range size:** prefer `solve_range_vs_range_nash` (true
+  joint Nash, sub-second per iter after PR #114).
+- **Turn, ≤6 classes:** either path works; aggregator is faster for
+  interactive use, Nash for tight bluff-catch / polarization decisions.
+- **Turn, 7+ classes or flop:** aggregator only at interactive
+  budgets; Nash for offline batch runs.
+- **Multi-street / production-scale charts:** aggregator (the Sarah
+  interactive budget governs).
+
+### 5.7 Off-path infoset filtering (v1.8.2)
+
+Deep HUNL trees accumulate strategies at infosets that are never
+actually reached under the equilibrium — phantom probability mass that
+can confuse downstream consumers ("why does my chart say hero raises
+100% here?"). v1.8.2 (PR #129) annotates this directly on `SolveResult`:
+
+- `result.reach_probability` — `{infoset_key: float}` mapping each
+  infoset to its reach probability under the average strategy. Off-path
+  nodes have reach `0.0` (or numerically close).
+- `result.off_path_keys` — a `set[str]` of infoset keys whose reach
+  probability is below the off-path threshold; equivalent to
+  `{k for k, p in result.reach_probability.items() if p == 0.0}`.
+
+```python
+from poker_solver import HUNLConfig, solve_hunl_postflop
+
+result = solve_hunl_postflop(cfg, iterations=500)
+
+# Discrete filter — drop unreachable nodes outright:
+on_path_strategy = {
+    k: v
+    for k, v in result.average_strategy.items()
+    if k not in result.off_path_keys
+}
+
+# Continuous filter — pair each strategy with its reach mass:
+weighted_strategy = {
+    k: (v, result.reach_probability[k])
+    for k, v in result.average_strategy.items()
+}
+
+# Diagnostics — what fraction of infosets are phantom?
+total = len(result.average_strategy)
+off = len(result.off_path_keys)
+print(f"{off}/{total} infosets off-path ({100*off/total:.1f}%)")
+```
+
+Off-path filtering is opt-in (the raw `average_strategy` is
+unchanged); downstream tooling that displays full strategy dumps
+should filter before rendering to avoid surfacing strategies at nodes
+that the solver never visits under the equilibrium.
+
+### 5.8 DCFR α-guard (v1.8.2)
+
+v1.8.2 (PR #113) hard-fails `solve(..., alpha=0)` — previously this
+silently produced a non-Nash strategy because DCFR's regret-discount
+weighting collapses with `alpha=0`. Behavior matrix:
+
+- `alpha=0` → raises `ValueError` (was silent bug).
+- `alpha` in `(0, 0.5)` → emits a `DeprecationWarning` and proceeds.
+- `alpha >= 0.5` → proceeds normally. Brown & Sandholm 2019 paper
+  default is `alpha=1.5` (the project default).
+
+If you previously relied on `alpha=0` to disable DCFR's positive-regret
+discount, switch to the linear-CFR setting (`alpha=1.0, beta=1.0,
+gamma=1.0`) or vanilla CFR (`alpha=None` → routes to the CFR+ path).
+
+```python
+from poker_solver import solve, HUNLPoker
+
+# OK — Brown & Sandholm paper default.
+result = solve(HUNLPoker(cfg), iterations=500, alpha=1.5, beta=0.0, gamma=2.0)
+
+# Warn — alpha in deprecated range.
+result = solve(HUNLPoker(cfg), iterations=500, alpha=0.3)  # DeprecationWarning
+
+# Error — alpha=0 now hard-fails.
+result = solve(HUNLPoker(cfg), iterations=500, alpha=0)    # ValueError
+```
+
 ---
 
 ## 6. Library mode (caching solves)
@@ -728,6 +843,91 @@ is a thin wrapper around an existing library API; zero engine changes.
   `--fixture-path` (override fixture JSON), `--iters` (default 2000).
   Requires Brown's binary built via `scripts/build_noambrown.sh`; exits
   2 with a hint when the binary is missing.
+
+### v1.8.2 CLI additions
+
+- **`poker-solver subgame --street flop|turn|river` (PR #127).**
+  Generalizes the v1.7.0 `poker-solver river` command to flop and turn
+  boards. `--street` selects the starting street; `--board` accepts
+  the matching card count (3 for flop, 4 for turn, 5 for river). The
+  rest of the flag surface mirrors `river`. The legacy `river`
+  subcommand remains for backwards compatibility (it now delegates to
+  `subgame --street river`).
+
+  ```bash
+  # Flop subgame:
+  poker-solver subgame --street flop --board "As 7c 2d" \
+      --hero AdQd --villain-range "QQ,JJ,AKs" --iters 200
+
+  # Turn subgame:
+  poker-solver subgame --street turn --board "As 7c 2d Kh" \
+      --hero AdQd --villain-range "QQ,JJ,AKs" --iters 200
+
+  # River subgame (equivalent to `poker-solver river ...`):
+  poker-solver subgame --street river --board "As 7c 2d Kh 5s" \
+      --hero AdQd --villain-range "QQ,JJ,AKs" --iters 200
+  ```
+
+  Honest framing: flop and turn solves are bounded by the perf cliffs
+  in §7b — expect minutes on a flop with default flags. For interactive
+  flop range queries, use the §5.2 aggregator. The `subgame` CLI is the
+  right tool for ad-hoc fixed-hero-vs-range sanity checks on flop/turn
+  spots, not for production-scale chart generation.
+
+- **`--walk-tree`, `--node`, `--format` (PR #123).** Available on
+  `solve`, `river`, and `subgame`. Replace the default
+  first-decision-only aggregate output with the full decision tree (or
+  a drill-down at a specific node). Pair with `--format` to emit JSON
+  or CSV for downstream tooling.
+
+  ```bash
+  # Walk the full decision tree, JSON to stdout:
+  poker-solver subgame --street river --board "As 7c 2d Kh 5s" \
+      --hero AdQd --villain-range "QQ,JJ,AKs" --iters 200 \
+      --walk-tree --format json > river_tree.json
+
+  # Drill into one specific infoset (csv for spreadsheet use):
+  poker-solver subgame --street river --board "As 7c 2d Kh 5s" \
+      --hero AdQd --villain-range "QQ,JJ,AKs" --iters 200 \
+      --node "P0:RIVER:Ad Qd|As 7c 2d Kh 5s|" --format csv
+  ```
+
+  - `--walk-tree` — emit the full tree; mutually exclusive with
+    `--node` (passing both errors out).
+  - `--node <key>` — drill into one infoset (the key format is the
+    same as `result.average_strategy.keys()`; copy from a previous
+    `--walk-tree` JSON dump if you don't know the exact string).
+  - `--format json|csv` — output encoding. Default is the legacy
+    human-readable summary; `json` is structured for tooling, `csv` is
+    flat for spreadsheets. Both filter `off_path_keys` automatically
+    (see §5.7).
+
+  Example abbreviated JSON output for `--walk-tree --format json`:
+
+  ```json
+  {
+    "infosets": [
+      {
+        "key": "P0:RIVER:Ad Qd|As 7c 2d Kh 5s|",
+        "reach_probability": 1.0,
+        "strategy": {"check": 0.62, "bet_75": 0.38}
+      },
+      ...
+    ],
+    "off_path_count": 4,
+    "exploitability_final": 0.0021
+  }
+  ```
+
+- **`poker-solver --version` (PR #116).** Prints the package version
+  string (e.g. `poker-solver 1.8.0`) and exits. Resolves the
+  HIGH-deferred ergonomic gap from the PR #107 README/quickstart drift
+  audit. Output tracks `poker_solver.__version__`.
+
+  ```bash
+  $ poker-solver --version
+  poker-solver 1.8.0
+  ```
 
 ### Still missing from the CLI
 
