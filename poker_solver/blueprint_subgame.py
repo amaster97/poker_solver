@@ -168,7 +168,7 @@ def _player_to_act_after_tokens(
         for idx, action in enumerate(actions):
             trial = game.apply(state, action)
             tok = _action_token_from_states(state, trial)
-            if tok == next_tok:
+            if _tokens_equivalent(tok, next_tok):
                 chosen_idx = idx
                 break
         if chosen_idx is None:
@@ -179,6 +179,32 @@ def _player_to_act_after_tokens(
     if game.is_terminal(state):
         return -1
     return int(game.current_player(state))
+
+
+def _tokens_equivalent(emitted: str, requested: str) -> bool:
+    """Return True if the engine-emitted token matches the requested one.
+
+    Convention mismatch fix for the J7o walkthrough (2026-05-28): the Rust
+    preflop engine (crates/cfr_core/src/preflop_rvr.rs) emits ``b<amt>`` for
+    the SB's opening raise (treating the open as a "bet"), but the Python
+    HUNLPoker engine emits ``r<amt>`` for the same action (treating the BB
+    blind as a pending bet). Both refer to the same physical action when
+    the chip amount matches. We normalize by treating ``b<amt>`` and
+    ``r<amt>`` as equivalent at the preflop tree's first aggressor step.
+    """
+    if emitted == requested:
+        return True
+    if (
+        len(emitted) > 1
+        and len(requested) > 1
+        and emitted[0] in ("b", "r")
+        and requested[0] in ("b", "r")
+        and emitted[1:].isdigit()
+        and requested[1:].isdigit()
+        and emitted[1:] == requested[1:]
+    ):
+        return True
+    return False
 
 
 def _action_token_from_states(prev: HUNLState, new: HUNLState) -> str:
@@ -392,7 +418,7 @@ def _pot_chips_after_tokens(
         for idx, action in enumerate(actions):
             trial = game.apply(state, action)
             tok = _action_token_from_states(state, trial)
-            if tok == next_tok:
+            if _tokens_equivalent(tok, next_tok):
                 chosen_idx = idx
                 break
         if chosen_idx is None:
@@ -537,7 +563,7 @@ def _is_terminal_fold_or_allin(
         for idx, action in enumerate(actions):
             trial = game.apply(state, action)
             tok = _action_token_from_states(state, trial)
-            if tok == next_tok:
+            if _tokens_equivalent(tok, next_tok):
                 chosen_idx = idx
                 break
         if chosen_idx is None:
