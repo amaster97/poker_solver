@@ -141,6 +141,13 @@ async def test_rvr_toggle_routes_to_aggregator(
     # Flip RvR toggle on.
     state = get_state()
     state.current_spot.rvr_mode = True
+    # Pin the legacy ``"blueprint"`` mode so this PR 24a smoke keeps
+    # exercising the ``solve_range_vs_range`` dispatch path. The GUI
+    # default flipped to ``"true_nash"`` on 2026-05-27 (task #61, post
+    # PR-126 follow-up); without this pin the worker would route to
+    # ``solve_range_vs_range_nash`` and the blueprint mock here would
+    # never fire.
+    state.current_spot.solver_mode = "blueprint"
     # Click Solve.
     user.find(marker="solve-button").click()
     # Wait for the worker to finish (mock returns immediately).

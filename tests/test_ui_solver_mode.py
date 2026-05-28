@@ -1,13 +1,15 @@
 """Smoke tests for the task #61 GUI True-Nash RvR mode toggle.
 
-Covers the three task-#61 acceptance points:
+Covers the three task-#61 acceptance points (default flipped 2026-05-27):
 
-1. Default mode (``solver_mode == "blueprint"``) routes to
-   ``solve_range_vs_range`` (Pluribus blueprint), preserving prior
-   behaviour bit-for-bit.
-2. ``solver_mode == "true_nash"`` routes to ``solve_range_vs_range_nash``
-   (vector-form CFR — true joint Nash, with exploitability).
-3. UI smoke: the page renders with the new ``true-nash-checkbox`` marker.
+1. Default mode (``solver_mode == "true_nash"``) routes to
+   ``solve_range_vs_range_nash`` (vector-form CFR — true joint Nash,
+   with exploitability number).
+2. Opting into ``solver_mode == "blueprint"`` routes to
+   ``solve_range_vs_range`` (legacy Pluribus aggregator).
+3. UI smoke: the page renders with the (now repurposed)
+   ``true-nash-checkbox`` marker — the marker name is kept for external
+   selector compatibility; the label / semantics now opt INTO blueprint.
 
 Uses the NiceGUI ``User`` fixture pattern from ``tests/test_ui_pr24a.py``
 and mocks the engine call sites so the smoke is on the UI dispatch
@@ -74,18 +76,113 @@ def isolated_state_dir(
 
 
 # ---------------------------------------------------------------------------
-# Smoke 1: default mode -> blueprint aggregator
+# Smoke 1: default mode -> true_nash (vector-form CFR)
+# Default flipped from "blueprint" to "true_nash" on 2026-05-27 per
+# empirical bench (turn ~27× faster; blueprint flop impractical).
+# Opting INTO blueprint is covered by Smoke 2.
 # ---------------------------------------------------------------------------
 
 
-async def test_default_solver_mode_routes_to_blueprint(
+async def test_default_solver_mode_routes_to_true_nash(
     user: User,
     isolated_state_dir: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """With ``rvr_mode=True`` and default ``solver_mode`` (``"blueprint"``),
-    clicking Solve calls ``solve_range_vs_range`` and NOT
-    ``solve_range_vs_range_nash``.
+    """With ``rvr_mode=True`` and the default ``solver_mode`` (``"true_nash"``),
+    clicking Solve calls ``solve_range_vs_range_nash`` and NOT
+    ``solve_range_vs_range`` (blueprint).
+    """
+    from poker_solver.range_aggregator import (
+        RangeVsRangeNashResult,
+        RangeVsRangeResult,
+    )
+    from ui.state import RangeWithFreqs, get_state
+
+    blueprint_calls: dict[str, Any] = {"count": 0}
+    nash_calls: dict[str, Any] = {"count": 0}
+
+    def _fake_blueprint(*args: Any, **kwargs: Any) -> RangeVsRangeResult:
+        blueprint_calls["count"] += 1
+        raise AssertionError("blueprint path called when true_nash expected as default")
+
+    def _fake_nash(
+        config: Any,
+        hero_range: Any,
+        villain_range: Any,
+        *,
+        iterations: int = 500,
+        hero_player: int = 0,
+        on_progress: Any = None,
+        **kwargs: Any,
+    ) -> RangeVsRangeNashResult:
+        nash_calls["count"] += 1
+        return RangeVsRangeNashResult(
+            per_class_strategy={"AA": {"check": 0.5, "bet_75": 0.5}},
+            range_aggregate={"check": 0.5, "bet_75": 0.5},
+            exploitability=0.0099,
+            iterations=iterations,
+            wall_clock_s=0.21,
+            decision_node_count=3,
+            hand_count_per_player=(6, 6),
+            backend="rust_vector",
+            position="aggressor" if hero_player == 0 else "defender",
+        )
+
+    monkeypatch.setattr(
+        "poker_solver.range_aggregator.solve_range_vs_range",
+        _fake_blueprint,
+    )
+    monkeypatch.setattr(
+        "poker_solver.range_aggregator.solve_range_vs_range_nash",
+        _fake_nash,
+    )
+
+    await user.open("/")
+    state = get_state()
+    # Flop K72r to escape the preflop guardrail; tiny range for speed.
+    from poker_solver.card import Card
+
+    state.current_spot.board = [Card(13, 0), Card(7, 1), Card(2, 2)]
+    state.current_spot.ranges = (
+        RangeWithFreqs.from_string("AA"),
+        RangeWithFreqs.from_string("KK"),
+    )
+    state.current_spot.rvr_mode = True
+    # Default: solver_mode is "true_nash" (flipped 2026-05-27).
+    assert state.current_spot.solver_mode == "true_nash"
+
+    user.find(marker="solve-button").click()
+    deadline = 4.0
+    waited = 0.0
+    while waited < deadline and nash_calls["count"] == 0:
+        await asyncio.sleep(0.1)
+        waited += 0.1
+
+    assert nash_calls["count"] == 1, (
+        f"expected solve_range_vs_range_nash exactly once; got {nash_calls['count']}"
+    )
+    assert blueprint_calls["count"] == 0, (
+        f"expected solve_range_vs_range (blueprint) NOT called; "
+        f"got {blueprint_calls['count']}"
+    )
+    state.runner.join(timeout=2.0)
+
+
+# ---------------------------------------------------------------------------
+# Smoke 1b: opting into blueprint -> blueprint aggregator (was Smoke 1's
+# scenario pre-flip; preserved as an explicit opt-in test for the legacy
+# fast mode).
+# ---------------------------------------------------------------------------
+
+
+async def test_opting_into_blueprint_routes_to_blueprint(
+    user: User,
+    isolated_state_dir: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With ``rvr_mode=True`` and ``solver_mode="blueprint"`` (explicit
+    opt-in via the inverted-label checkbox), clicking Solve calls
+    ``solve_range_vs_range`` and NOT ``solve_range_vs_range_nash``.
     """
     from poker_solver.range_aggregator import RangeVsRangeResult
     from ui.state import RangeWithFreqs, get_state
@@ -111,7 +208,7 @@ async def test_default_solver_mode_routes_to_blueprint(
 
     def _fake_nash(*args: Any, **kwargs: Any) -> Any:
         nash_calls["count"] += 1
-        raise AssertionError("nash path called when blueprint expected")
+        raise AssertionError("nash path called when blueprint expected (opt-in)")
 
     monkeypatch.setattr(
         "poker_solver.range_aggregator.solve_range_vs_range",
@@ -124,7 +221,6 @@ async def test_default_solver_mode_routes_to_blueprint(
 
     await user.open("/")
     state = get_state()
-    # Flop K72r to escape the preflop guardrail; tiny range for speed.
     from poker_solver.card import Card
 
     state.current_spot.board = [Card(13, 0), Card(7, 1), Card(2, 2)]
@@ -133,8 +229,8 @@ async def test_default_solver_mode_routes_to_blueprint(
         RangeWithFreqs.from_string("KK"),
     )
     state.current_spot.rvr_mode = True
-    # Default: solver_mode is "blueprint".
-    assert state.current_spot.solver_mode == "blueprint"
+    # Explicit opt-in to the legacy blueprint fast mode.
+    state.current_spot.solver_mode = "blueprint"
 
     user.find(marker="solve-button").click()
     deadline = 4.0

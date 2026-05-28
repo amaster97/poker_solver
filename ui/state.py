@@ -371,19 +371,26 @@ class Spot:
     # Task #61: RvR solver-mode selector (post-PR-114 true-Nash unlock).
     # When ``rvr_mode`` is True, this field picks which engine entry the
     # worker routes through:
-    #   * ``"blueprint"`` (default — backward compat): the Pluribus-style
+    #   * ``"true_nash"`` (default since 2026-05-27):
+    #     ``poker_solver.range_aggregator.solve_range_vs_range_nash``
+    #     (vector-form CFR — Brown's algorithm bit for bit). Yields a true
+    #     joint Nash with an exploitability number. Per PR #114 the river
+    #     path is now ~213× faster (interactive on river); empirical bench
+    #     also shows turn ~27× faster than blueprint and flop is feasible
+    #     where blueprint flop is impractical (>27 min CPU on tiny ranges).
+    #   * ``"blueprint"`` (legacy opt-in fast mode for tiny river spots):
+    #     the Pluribus-style
     #     ``poker_solver.range_aggregator.solve_range_vs_range`` aggregator.
     #     Fast per-spot, but produces per-class blueprint approximations,
     #     not a true joint Nash. See ``docs/aggregator_vs_true_nash_explainer.md``.
-    #   * ``"true_nash"``: ``poker_solver.range_aggregator.solve_range_vs_range_nash``
-    #     (vector-form CFR — Brown's algorithm bit for bit). Yields a true
-    #     joint Nash with an exploitability number. Per PR #114 the river
-    #     path is now ~213× faster (interactive on river; flop/turn may
-    #     still be longer wall-clock). The UI surfaces a tooltip warning
-    #     when this mode is enabled.
     # Ignored when ``rvr_mode`` is False (concrete solves don't go through
     # the aggregator at all).
-    solver_mode: str = "blueprint"
+    #
+    # 2026-05-27 update: default flipped from "blueprint" to "true_nash"
+    # per empirical bench (turn ~27× faster, blueprint flop impractical
+    # at >27 min CPU on a tiny 3-class range). Blueprint remains opt-in
+    # as a legacy fast mode for tiny river spots.
+    solver_mode: str = "true_nash"
     # PR 24a: hero seat selector (v1.3.1 ``hero_player`` surface).
     # 0 = hero at P0 (SB seat / button — aggressor postflop sequencing);
     # 1 = hero at P1 (BB seat — defender). Mirrors the
@@ -754,11 +761,13 @@ class SolveRunner:
         # Task #61: true-Nash solver-mode dispatch (post-PR-114 perf unlock).
         # When ``rvr_mode`` is True, ``solver_mode == "true_nash"`` routes the
         # worker through ``solve_range_vs_range_nash`` (vector-form CFR);
-        # the default ``"blueprint"`` keeps the existing Pluribus aggregator
-        # path. The value is ignored when ``rvr_mode`` is False. Must be
-        # one of ``"blueprint"`` or ``"true_nash"``; any other value raises
-        # ValueError so misconfigurations surface early.
-        solver_mode: str = "blueprint",
+        # ``"blueprint"`` selects the legacy Pluribus aggregator path
+        # (kept for tiny-river opt-in / backward compat). The value is
+        # ignored when ``rvr_mode`` is False. Must be one of ``"blueprint"``
+        # or ``"true_nash"``; any other value raises ValueError so
+        # misconfigurations surface early. Default flipped to ``"true_nash"``
+        # on 2026-05-27 per empirical bench.
+        solver_mode: str = "true_nash",
         # PR 24b §3.5: node-locking. ``locked_strategies`` maps infoset
         # key -> probability vector aligned to the engine's legal-action
         # ordering at that node. Empty/None falls through to existing
@@ -933,7 +942,7 @@ class SolveRunner:
         rvr_hero_range: list[HandClass] | None = None,
         rvr_villain_range: list[HandClass] | None = None,
         rvr_hero_player: int = 0,
-        solver_mode: str = "blueprint",
+        solver_mode: str = "true_nash",
         locked_strategies: dict[str, list[float]] | None = None,
         force_tree_solve: bool = False,
     ) -> None:
@@ -1293,12 +1302,12 @@ class SolveRunner:
         villain_range: list[HandClass],
         hero_player: int,
         dcfr_kwargs: dict[str, Any] | None,
-        solver_mode: str = "blueprint",
+        solver_mode: str = "true_nash",
     ) -> None:
         """Run the range-vs-range path (PR 24a + task #61).
 
-        When ``solver_mode == "blueprint"`` (default, backward-compatible):
-        dispatches to ``poker_solver.range_aggregator.solve_range_vs_range``.
+        When ``solver_mode == "blueprint"`` (legacy fast mode for tiny
+        river spots): dispatches to ``poker_solver.range_aggregator.solve_range_vs_range``.
         Progress is plumbed via the aggregator's ``on_progress(done, total,
         hand_class)`` callback so the UI's chart can show class-level
         completion as a coarse stand-in for exploitability (the aggregator
@@ -1309,12 +1318,14 @@ class SolveRunner:
         subtitle in ``run_panel._chart_options`` reflects this (see PR 24a
         §3.4 "true Nash vs blueprint").
 
-        When ``solver_mode == "true_nash"`` (task #61, post-PR-114 unlock):
-        dispatches to ``poker_solver.range_aggregator.solve_range_vs_range_nash``
+        When ``solver_mode == "true_nash"`` (default since 2026-05-27;
+        task #61, post-PR-114 unlock): dispatches to
+        ``poker_solver.range_aggregator.solve_range_vs_range_nash``
         (vector-form CFR, joint Nash of the supplied ranges with an
-        exploitability number computed at the end). Per PR #114 the river
-        path is ~213× faster than the pre-cache baseline; flop / turn wall
-        times may still be longer than the blueprint path. The result lands
+        exploitability number computed at the end). Empirical bench shows
+        turn is ~27× faster than the blueprint aggregator; flop is
+        feasible (blueprint flop is impractical at >27 min CPU on a
+        tiny 3-class range). The result lands
         on ``self.nash_result`` (vs ``self.rvr_result`` for the blueprint
         path); both expose ``per_class_strategy`` so the matrix renderer
         treats them the same.
