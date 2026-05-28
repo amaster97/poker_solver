@@ -49,6 +49,13 @@ ndarray-npy = { version = "0.9", default-features = false, features = ["compress
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 arrayvec = "0.7"
+# v1.10 PR-4 — opt-in multi-threading for the flop turn-card chance subtree.
+# MIT/Apache-2.0 dual licensed (compatible with this crate's MIT). Always
+# linked but only invoked when the `CFR_RAYON_CHANCE=1` env var is set at
+# `solve()` entry; the canonical single-threaded path is unchanged and
+# bit-identical to pre-PR-4. See `dcfr_vector_parallel.rs` for the
+# concurrency model (per-thread regret-delta buffers + explicit merge).
+rayon = "1.10"
 
 [dev-dependencies]
 # PR 6 Agent C — integration tests call Python via PyO3 for canonicalization

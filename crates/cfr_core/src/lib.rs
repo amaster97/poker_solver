@@ -57,6 +57,12 @@ pub mod exploit;
 // (Kuhn, Leduc, fixed-combo HUNL postflop/preflop) are unchanged.
 pub mod dcfr_vector;
 
+// v1.10 PR-4 — Opt-in Rayon multi-threading for the postflop chance
+// subtree. Activated by `CFR_RAYON_CHANCE=1` at solve entry. Default
+// (env var unset) is bit-identical to pre-PR-4. See module docstring
+// for the safety / concurrency model.
+pub mod dcfr_vector_parallel;
+
 // Phase A (full-tree preflop RvR) — preflop 169x169 equity leaf table
 // (`preflop_equity`) and the vector-form preflop solver driver
 // (`preflop_rvr`). The equity table is precomputed once via
