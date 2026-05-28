@@ -42,6 +42,13 @@ from poker_solver.card import (
     parse_card,
     parse_hand,
 )
+from poker_solver.chained import (
+    BoardTuple,
+    ChainedSolveResult,
+    ContinuationRanges,
+    PreflopActionSequence,
+    solve_chained,
+)
 from poker_solver.dcfr import DCFRSolver, InfosetData
 from poker_solver.equity import EquityResult, equity
 from poker_solver.evaluator import HandRank, evaluate
@@ -129,6 +136,11 @@ __all__ = [
     "RangeVsRangeResult",
     "solve_range_vs_range",
     "solve_range_vs_range_nash",
+    "BoardTuple",
+    "ChainedSolveResult",
+    "ContinuationRanges",
+    "PreflopActionSequence",
+    "solve_chained",
     "Game",
     "KuhnPoker",
     "KuhnState",
