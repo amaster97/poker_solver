@@ -386,6 +386,21 @@ def render(state: AppState, on_solve: Callable[[], None] | None = None) -> None:
     def _detail_slot() -> None:
         _render_detail_panel(state)
 
+    # Task #68 Phase 6: source-indicator badge slot. The badge text is
+    # rebuilt from ``state.runner.preflop_route_info`` on each refresh
+    # tick; we expose it as a separate refreshable so the polling timer
+    # in ``ui/app.py`` can update the badge without re-rendering the
+    # full grid (the badge changes more often than the grid does).
+    @ui.refreshable  # type: ignore[untyped-decorator]
+    def _source_badge_slot() -> None:
+        text = _route_info_badge(state)
+        info = getattr(getattr(state, "runner", None), "preflop_route_info", None)
+        color = _badge_color(info)
+        ui.label(text).mark("preflop-chart-source-badge").style(
+            f"color:{color};font-family:Menlo,Consolas,monospace;"
+            "font-size:11px;padding:4px 0"
+        )
+
     def _refresh_all() -> None:
         try:
             _grid_slot.refresh()
@@ -395,6 +410,10 @@ def render(state: AppState, on_solve: Callable[[], None] | None = None) -> None:
             _detail_slot.refresh()
         except Exception:  # noqa: BLE001
             logger.exception("preflop chart detail refresh failed")
+        try:
+            _source_badge_slot.refresh()
+        except Exception:  # noqa: BLE001
+            logger.exception("preflop chart source badge refresh failed")
 
     with (
         ui.element("div")
@@ -415,6 +434,9 @@ def render(state: AppState, on_solve: Callable[[], None] | None = None) -> None:
                 f"min-width:{_CELL_PX * 13 + 30}px;flex:0 0 auto"
             ):
                 _grid_slot()
+                # Source badge sits directly under the chart grid so the
+                # user sees the route on the same eye-line as the data.
+                _source_badge_slot()
             with ui.element("div").style(
                 "flex:1 1 320px;min-width:320px;max-width:480px"
             ):
@@ -438,6 +460,49 @@ def _chart_subtitle(state: AppState) -> str:
     iters = int(chart_result.get("iterations", 0))
     wall = float(chart_result.get("wallclock_seconds", 0.0))
     return f"{iters} iters · {wall:.1f}s · {status}"
+
+
+def _route_info_badge(state: AppState) -> str:
+    """Task #68 Phase 6: source-indicator badge for the chart widget.
+
+    Reads ``state.runner.preflop_route_info`` (populated by either
+    :meth:`SolveRunner.try_blueprint_preflop_chart` for blueprint /
+    interpolated routes or by :meth:`SolveRunner.start_preflop_chart`
+    for the live path) and renders a one-line label.
+
+    Falls back to an "unrouted" placeholder when no route info is
+    present yet (chart hasn't been triggered).
+    """
+    runner = getattr(state, "runner", None)
+    if runner is None:
+        return "[unavailable] no runner"
+    info = getattr(runner, "preflop_route_info", None)
+    if info is None:
+        return "[unrouted] click Solve to populate"
+    from ui.blueprint_router import describe_route
+
+    return describe_route(info)
+
+
+def _badge_color(info: Any) -> str:
+    """Color-code the source badge so the route is scannable at a glance.
+
+    Greens for instant blueprint hits, yellow for interpolated, white
+    for live (which the user expects to take seconds), grey when no
+    route has been chosen yet.
+    """
+    if info is None:
+        return "#7a7a7a"
+    from ui.blueprint_router import SourceLabel
+
+    label = getattr(info, "source", None)
+    if label == SourceLabel.BLUEPRINT:
+        return "#9ad29a"
+    if label == SourceLabel.INTERPOLATED:
+        return "#e0d27c"
+    if label == SourceLabel.LIVE:
+        return "#e8e8e8"
+    return "#7a7a7a"
 
 
 def _render_grid(state: AppState) -> None:

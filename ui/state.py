@@ -868,6 +868,18 @@ class SolveRunner:
         self._pending_preflop_chart_opens: list[float] | None = None
         self._pending_preflop_chart_mults: list[float] | None = None
         self._pending_preflop_chart_iterations: int | None = None
+        # Task #68 Phase 6: blueprint-vs-live routing metadata. The
+        # preflop chart + chained tab read these to render a "source"
+        # badge under each chart so the user can see whether the
+        # displayed strategy came from a precomputed asset (instant),
+        # an interpolation across two anchor shards (instant), or a
+        # live solve (seconds). ``preflop_route_info`` covers the
+        # preflop chart; ``chained_preflop_route_info`` and
+        # ``chained_postflop_route_info`` cover the chained tab's two
+        # stages. The dataclass lives in ``ui.blueprint_router``.
+        self.preflop_route_info: Any | None = None
+        self.chained_preflop_route_info: Any | None = None
+        self.chained_postflop_route_info: Any | None = None
 
     def start(
         self,
@@ -953,6 +965,10 @@ class SolveRunner:
             # directly to drive the 13x13 preflop chart + the lazy postflop
             # subgame display.
             self.chained_result = None
+            # Task #68 Phase 6: clear stale chained route info so a
+            # previous solve's badges don't appear under the next solve.
+            self.chained_preflop_route_info = None
+            self.chained_postflop_route_info = None
             # Stash the active mode so views can tell whether to project
             # their result holder (mirrors the preflop_chart pattern).
             self._mode = "chained" if solver_mode == "chained" else self.__dict__.get("_mode", "")
@@ -982,6 +998,87 @@ class SolveRunner:
             name="poker-solver-ui-worker",
         )
         self._thread.start()
+
+    def try_blueprint_preflop_chart(
+        self,
+        *,
+        stack_bb: int,
+        ante: str | float | int,
+        action_history: str = "",
+    ) -> bool:
+        """Try to populate the preflop chart from the blueprint asset (task #68 Phase 6).
+
+        Looks up the chart via :class:`ui.blueprint_router.BlueprintRouter`.
+        On a blueprint or interpolated hit, stashes:
+          * ``self.preflop_chart_result`` — the per-class dict the chart
+            widget already consumes.
+          * ``self.preflop_route_info`` — the source/wall-time/confidence
+            badge data.
+
+        Returns ``True`` when the blueprint covered the request (caller
+        should NOT trigger a live solve). Returns ``False`` when the
+        blueprint has no coverage at this (stack, ante) and the caller
+        must fall back to the live solve path
+        (:meth:`start_preflop_chart`).
+
+        This is a SYNCHRONOUS call — blueprint shard loads are tiny
+        (~1-15 MB) and the lookup completes in microseconds once warm.
+        No worker thread, no progress polling. The polling timer in
+        ``ui/app.py`` still fires on the ``preflop_chart_result``
+        identity change and refreshes the chart widget.
+        """
+        from ui.blueprint_router import (
+            BlueprintRouter,
+            SourceLabel,
+            default_asset_dir,
+        )
+
+        router = BlueprintRouter.from_asset_dir(default_asset_dir())
+        if router is None:
+            with self._lock:
+                # Surface a "live only" badge so the user understands why
+                # the source row says "live" even before they click solve.
+                self.preflop_route_info = None
+            return False
+
+        info = router.lookup_chart(
+            stack_bb=int(stack_bb),
+            ante=ante,
+            action_history=action_history,
+        )
+        if info.source == SourceLabel.LIVE or not info.per_class:
+            with self._lock:
+                self.preflop_route_info = info  # carries the live hint
+            return False
+
+        # We have blueprint coverage — synthesize a chart_result the
+        # preflop_chart widget already knows how to render.
+        action_labels: list[str] = []
+        for action_map in info.per_class.values():
+            for k in action_map:
+                if k not in action_labels:
+                    action_labels.append(k)
+        chart_result: dict[str, Any] = {
+            "per_class": info.per_class,
+            "actions": action_labels,
+            "iterations": 0,
+            "wallclock_seconds": float(info.wall_time_s),
+            "decision_node_count": len(info.per_class),
+            "strategy_entry_count": sum(
+                len(m) for m in info.per_class.values()
+            ),
+            "source": info.source.value,
+        }
+        with self._lock:
+            self.preflop_chart_result = chart_result
+            self.preflop_route_info = info
+            self.status = "done"
+            self._mode = "preflop_chart"
+            self.iteration = 0
+            self.target_iterations = 1
+            self.start_time_monotonic = time.monotonic()
+            self.current_time_monotonic = self.start_time_monotonic
+        return True
 
     def start_preflop_chart(
         self,
@@ -1016,6 +1113,11 @@ class SolveRunner:
             )
         self._pause_event.clear()
         self._stop_event.clear()
+        # Task #68 Phase 6: clear any stale blueprint route info; the
+        # live-solve worker will populate ``preflop_route_info`` to LIVE
+        # on success (so the chart's source badge says "live N iter")
+        # and clear it on failure (so the badge falls back to the
+        # router's pre-solve hint, if any).
         with self._lock:
             self.result = None
             self.iteration = 0
@@ -1031,6 +1133,16 @@ class SolveRunner:
             self.target_iterations = iterations
             self.start_time_monotonic = time.monotonic()
             self.current_time_monotonic = self.start_time_monotonic
+            # Surface "live" pre-emptively so the badge updates the
+            # moment the user clicks Solve; the worker overwrites with
+            # the final wall_time when it finishes.
+            from ui.blueprint_router import RouteInfo, SourceLabel
+
+            self.preflop_route_info = RouteInfo(
+                source=SourceLabel.LIVE,
+                wall_time_s=0.0,
+                confidence=f"{iterations} iter rust_preflop_rvr (running)",
+            )
 
         self._thread = threading.Thread(
             target=self._run_preflop_chart_path,
@@ -1155,6 +1267,17 @@ class SolveRunner:
                 self.status = "stopped"
             else:
                 self.status = "done"
+            # Task #68 Phase 6: finalize the route info with the
+            # real wall time so the badge displays the right number.
+            from ui.blueprint_router import RouteInfo, SourceLabel
+
+            wall_s = float(chart_result.get("wallclock_seconds", 0.0))
+            iters = int(chart_result.get("iterations", iterations))
+            self.preflop_route_info = RouteInfo(
+                source=SourceLabel.LIVE,
+                wall_time_s=wall_s,
+                confidence=f"{iters} iter rust_preflop_rvr",
+            )
 
     @staticmethod
     def _build_preflop_chart_summary(rust_out: dict[str, Any]) -> dict[str, Any]:
@@ -2017,6 +2140,38 @@ class SolveRunner:
                 self.status = "stopped"
             else:
                 self.status = "done"
+            # Task #68 Phase 6: surface route info for the chained tab.
+            # Today the chained orchestrator runs its own live solve for
+            # the preflop stage via Route A aggregation (see
+            # ``poker_solver/chained.py``); the postflop stage is a
+            # live subgame. Both stages are LIVE — but the wall time +
+            # iteration count make the badge useful so users see how
+            # long each stage took. The blueprint-vs-live decision for
+            # chained will land when ``chained.py`` learns to consume a
+            # Premium-A asset directly (a Phase 4+ subplan follow-up).
+            from ui.blueprint_router import RouteInfo, SourceLabel
+
+            pre_wall = float(
+                getattr(chained_result.preflop_result, "wall_clock_s", 0.0)
+            )
+            pre_iters = int(
+                getattr(chained_result.preflop_result, "iterations", iterations)
+            )
+            self.chained_preflop_route_info = RouteInfo(
+                source=SourceLabel.LIVE,
+                wall_time_s=pre_wall,
+                confidence=f"{pre_iters} iter Route A aggregator",
+            )
+            # Postflop is also live; we don't know its wall time until
+            # the user triggers ``ChainedSolveResult.solve_postflop``
+            # via the board picker. Pre-seed with a "live subgame"
+            # placeholder so the badge renders BEFORE any postflop
+            # solve has run.
+            self.chained_postflop_route_info = RouteInfo(
+                source=SourceLabel.LIVE,
+                wall_time_s=0.0,
+                confidence="live subgame (triggered per flop pick)",
+            )
 
     def _run_mock_path(
         self,
