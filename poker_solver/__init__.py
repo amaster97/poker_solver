@@ -97,7 +97,7 @@ from poker_solver.pushfold import (
     is_pushfold_mode,
     solve_pushfold,
 )
-from poker_solver.range import Range, parse_range
+from poker_solver.range import Combo, Range, parse_range
 from poker_solver.range_aggregator import (
     DEFAULT_TIME_BUDGET_PER_SOLVE_S,
     RangeVsRangeNashResult,
@@ -129,6 +129,7 @@ __all__ = [
     "evaluate",
     "EquityResult",
     "equity",
+    "Combo",
     "Range",
     "parse_range",
     "DEFAULT_TIME_BUDGET_PER_SOLVE_S",
