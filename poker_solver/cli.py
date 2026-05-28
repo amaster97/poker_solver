@@ -859,6 +859,385 @@ def _print_spot_header(
     print(render_header(header), end="")
 
 
+def _str_to_bool(v: str) -> bool:
+    """Parse ``true``/``false`` (case-insensitive) for a CLI bool flag.
+
+    Argparse ``type=bool`` is a no-op (any non-empty string is truthy); we
+    use this helper for flags like ``--lazy-postflop true|false`` where
+    the user expects the string literal to map to a Python ``bool``.
+    """
+    s = v.strip().lower()
+    if s in ("true", "1", "yes", "y", "on"):
+        return True
+    if s in ("false", "0", "no", "n", "off"):
+        return False
+    raise ValueError(
+        f"expected one of (true, false); got {v!r}"
+    )
+
+
+def _cmd_chained(args: argparse.Namespace) -> int:
+    """Task #58 — chained preflop -> lazy postflop orchestrator CLI.
+
+    Wraps :func:`poker_solver.chained.solve_chained` (PR #121,
+    Phase A of issue #31). Exposes:
+
+      - Preflop range-vs-range solve via Route A blueprint aggregation.
+      - Per-action continuation ranges for every preflop terminal that
+        reaches the flop.
+      - Optional lazy postflop solve for a single flop (``--board``).
+
+    Output formats:
+
+      - ``text`` (default): preflop per-class strategy table + a section
+        per flop-reaching terminal showing the surviving continuation
+        ranges. When ``--board`` is set, also prints the postflop
+        per-class strategy for that flop.
+      - ``json``: full ``ChainedSolveResult`` payload (preflop + every
+        continuation + the postflop solve if ``--board`` is set).
+      - ``csv``: one row per ``(action_sequence, hand_class, action,
+        probability)`` triple. With ``--board``, also emits postflop
+        rows.
+
+    Range inputs use the PioSolver-style range notation accepted by
+    :func:`poker_solver.range.parse_range` (e.g. ``"AA,KK,AKs"``). The
+    orchestrator collapses concrete combos to hand classes internally;
+    the labels used by the CLI text/JSON/CSV outputs are the canonical
+    pair / suited / offsuit labels (``"AA"``, ``"AKs"``, ``"76o"``).
+    """
+    from poker_solver.chained import solve_chained
+    from poker_solver.hunl import HUNLConfig, Street
+
+    fmt: str = (getattr(args, "format", "text") or "text").lower()
+    if fmt not in ("text", "json", "csv"):
+        raise ValueError(
+            f"--format must be one of (text, json, csv); got {fmt!r}"
+        )
+
+    # ---- Parse range inputs (PioSolver notation) -----------------------
+    hero_range = parse_range(args.hero_range)
+    villain_range = parse_range(args.villain_range)
+    if len(hero_range) == 0:
+        raise ValueError(f"--hero-range parsed to 0 combos: {args.hero_range!r}")
+    if len(villain_range) == 0:
+        raise ValueError(
+            f"--villain-range parsed to 0 combos: {args.villain_range!r}"
+        )
+
+    # ---- Stack validation --------------------------------------------------
+    if args.stacks < 2:
+        raise ValueError(
+            f"--stacks must be at least 2 BB; got {args.stacks}"
+        )
+
+    # ---- Build the preflop HUNLConfig template ----------------------------
+    big_blind = 100
+    starting_stack = int(args.stacks) * big_blind
+    config = HUNLConfig(
+        starting_stack=starting_stack,
+        small_blind=big_blind // 2,
+        big_blind=big_blind,
+        starting_street=Street.PREFLOP,
+        initial_hole_cards=(),
+    )
+
+    # ---- Parse --board (optional) ----------------------------------------
+    board_cards: list[Card] = []
+    if getattr(args, "board", None):
+        board_cards = parse_board(args.board)
+        if len(board_cards) != 3:
+            raise ValueError(
+                f"--board must specify 3 flop cards for chained Phase A; "
+                f"got {len(board_cards)}"
+            )
+
+    # Whether the lazy postflop solve should fire for the requested board.
+    # ``--lazy-postflop`` is informational: with ``--board`` set, the
+    # solve fires regardless (the flag's only meaningful state when
+    # ``--board`` is present is "yes, please solve it"); we surface it
+    # so callers can disable the postflop step explicitly via
+    # ``--lazy-postflop false``.
+    lazy_postflop: bool = bool(getattr(args, "lazy_postflop", True))
+
+    # ---- Run the orchestrator ---------------------------------------------
+    result = solve_chained(
+        config,
+        hero_range=hero_range,
+        villain_range=villain_range,
+        preflop_iterations=int(args.preflop_iterations),
+        postflop_iterations=int(args.postflop_iterations),
+        hero_player=int(getattr(args, "hero_player", 0)),
+    )
+
+    # ---- Optional postflop solve -----------------------------------------
+    # If the user passed --board and lazy_postflop is enabled, solve the
+    # postflop subgame for the top-N flop-reaching terminals ranked by
+    # joint hero+villain reach weight. Solving every terminal (often
+    # 50-300+ at deep stacks) would dominate CLI runtime; the top-N
+    # captures the modal lines while keeping wall-clock reasonable.
+    # Postflop solves are cached on the ``ChainedSolveResult``; users
+    # who want others can call ``solve_postflop`` from Python.
+    postflop_solves: dict[tuple, object] = {}
+    if board_cards and lazy_postflop:
+        board_tuple = tuple(board_cards)
+        # Rank terminals by joint reach weight (sum of hero weights *
+        # sum of villain weights — a proxy for "how often does this
+        # line happen").
+        ranked = sorted(
+            result.continuation_ranges.items(),
+            key=lambda kv: -(
+                sum(kv[1].hero.values()) * sum(kv[1].villain.values())
+            ),
+        )
+        top_n = int(getattr(args, "max_postflop_terminals", 5) or 5)
+        for action_seq, _cont in ranked[:top_n]:
+            try:
+                pf = result.solve_postflop(action_seq, board_tuple)
+            except (KeyError, ValueError):
+                # solve_postflop raises ValueError for non-flop boards
+                # (Phase A guards) and KeyError for missing sequences;
+                # both already validated above so this is defensive.
+                continue
+            postflop_solves[action_seq] = pf
+
+    # ---- Dispatch to the requested format --------------------------------
+    if fmt == "json":
+        _render_chained_json(
+            args=args,
+            board_cards=board_cards,
+            result=result,
+            postflop_solves=postflop_solves,
+        )
+        return 0
+    if fmt == "csv":
+        _render_chained_csv(
+            result=result,
+            postflop_solves=postflop_solves,
+        )
+        return 0
+    _render_chained_text(
+        args=args,
+        board_cards=board_cards,
+        result=result,
+        postflop_solves=postflop_solves,
+    )
+    return 0
+
+
+def _render_chained_text(
+    *,
+    args: argparse.Namespace,
+    board_cards: list[Card],
+    result,
+    postflop_solves: dict,
+) -> None:
+    """Pretty-print the chained result in human-readable form."""
+    print("Chained preflop solve")
+    print("=" * 56)
+    print(f"Hero range:      {args.hero_range}")
+    print(f"Villain range:   {args.villain_range}")
+    print(f"Stacks:          {args.stacks} BB")
+    print(f"Preflop iters:   {args.preflop_iterations}")
+    print(f"Postflop iters:  {args.postflop_iterations}")
+    print(f"Position:        {result.preflop_result.position}")
+    if board_cards:
+        print(f"Flop:            {' '.join(str(c) for c in board_cards)}")
+    print()
+
+    # Preflop range aggregate (combo-weighted across hero classes).
+    print("Preflop range aggregate (hero, combo-weighted):")
+    agg = result.preflop_result.range_aggregate
+    if agg:
+        for label in sorted(agg.keys()):
+            print(f"  {label:<14}  {agg[label]:.6f}")
+    else:
+        print("  (empty — preflop solve produced no first-decision aggregate)")
+    print()
+
+    # Per-class strategy matrix.
+    print("Preflop per-class strategy:")
+    per_class = result.preflop_result.per_class_strategy
+    if per_class:
+        for cls in sorted(per_class.keys()):
+            freqs = per_class[cls]
+            parts = [f"{lbl}={p:.3f}" for lbl, p in sorted(freqs.items())]
+            print(f"  {cls:<6}  {'  '.join(parts)}")
+    else:
+        print("  (no per-class strategy)")
+    print()
+
+    # Continuation ranges per preflop terminal.
+    cont_ranges = result.continuation_ranges
+    if not cont_ranges:
+        print("Continuation ranges: (none — every preflop terminal folded or "
+              "went all-in)")
+        return
+
+    print(f"Continuation ranges ({len(cont_ranges)} flop-reaching terminals):")
+    for action_seq in sorted(cont_ranges.keys()):
+        cont = cont_ranges[action_seq]
+        label = " ".join(action_seq) if action_seq else "(open)"
+        print(f"  [{label}]  pot={cont.pot_chips} chips")
+        hero_top = sorted(cont.hero.items(), key=lambda kv: -kv[1])[:8]
+        vill_top = sorted(cont.villain.items(), key=lambda kv: -kv[1])[:8]
+        hero_str = ", ".join(f"{k}({v:.1f})" for k, v in hero_top)
+        vill_str = ", ".join(f"{k}({v:.1f})" for k, v in vill_top)
+        print(f"    hero:    {hero_str}")
+        print(f"    villain: {vill_str}")
+    print()
+
+    # Postflop strategy for the requested board.
+    if board_cards and postflop_solves:
+        print(f"Postflop strategy on {' '.join(str(c) for c in board_cards)}:")
+        for action_seq in sorted(postflop_solves.keys()):
+            pf = postflop_solves[action_seq]
+            label = " ".join(action_seq) if action_seq else "(open)"
+            print(f"  After [{label}]:")
+            pf_per_class = pf.per_class_strategy
+            if not pf_per_class:
+                print("    (postflop solve produced no per-class strategy)")
+                continue
+            for cls in sorted(pf_per_class.keys()):
+                freqs = pf_per_class[cls]
+                parts = [f"{lbl}={p:.3f}" for lbl, p in sorted(freqs.items())]
+                print(f"    {cls:<6}  {'  '.join(parts)}")
+        print()
+    elif board_cards and not postflop_solves:
+        print("Postflop strategy: (no flop-reaching terminals to solve)")
+
+
+def _render_chained_json(
+    *,
+    args: argparse.Namespace,
+    board_cards: list[Card],
+    result,
+    postflop_solves: dict,
+) -> None:
+    """Emit the full ``ChainedSolveResult`` payload as JSON."""
+
+    def _preflop_to_dict(pre) -> dict:
+        return {
+            "per_history_strategy": {
+                k: list(v) for k, v in pre.per_history_strategy.items()
+            },
+            "per_class_strategy": {
+                cls: dict(freqs) for cls, freqs in pre.per_class_strategy.items()
+            },
+            "range_aggregate": dict(pre.range_aggregate),
+            "exploitability": pre.exploitability,
+            "iterations": pre.iterations,
+            "wall_clock_s": pre.wall_clock_s,
+            "decision_node_count": pre.decision_node_count,
+            "hand_count_per_player": list(pre.hand_count_per_player),
+            "memory_profile": dict(pre.memory_profile),
+            "backend": pre.backend,
+            "position": pre.position,
+            "warnings": list(pre.warnings),
+        }
+
+    def _postflop_to_dict(pf) -> dict:
+        return {
+            "per_class_strategy": {
+                cls: dict(freqs) for cls, freqs in pf.per_class_strategy.items()
+            },
+            "range_aggregate": dict(pf.range_aggregate),
+            "exploitability": pf.exploitability,
+            "iterations": pf.iterations,
+            "wall_clock_s": pf.wall_clock_s,
+            "backend": pf.backend,
+            "position": pf.position,
+            "hand_count_per_player": list(pf.hand_count_per_player),
+        }
+
+    cont_payload: dict[str, dict] = {}
+    for action_seq, cont in result.continuation_ranges.items():
+        key = " ".join(action_seq) if action_seq else "(open)"
+        cont_payload[key] = {
+            "action_sequence": list(action_seq),
+            "hero": dict(cont.hero),
+            "villain": dict(cont.villain),
+            "pot_chips": cont.pot_chips,
+        }
+
+    postflop_payload: dict[str, dict] = {}
+    for action_seq, pf in postflop_solves.items():
+        key = " ".join(action_seq) if action_seq else "(open)"
+        postflop_payload[key] = _postflop_to_dict(pf)
+
+    payload = {
+        "hero_range": args.hero_range,
+        "villain_range": args.villain_range,
+        "stacks_bb": args.stacks,
+        "preflop_iterations": args.preflop_iterations,
+        "postflop_iterations": args.postflop_iterations,
+        "board": " ".join(str(c) for c in board_cards) if board_cards else None,
+        "preflop_result": _preflop_to_dict(result.preflop_result),
+        "continuation_ranges": cont_payload,
+        "postflop_solves": postflop_payload,
+    }
+    print(_json.dumps(payload, indent=2, sort_keys=True))
+
+
+def _render_chained_csv(
+    *,
+    result,
+    postflop_solves: dict,
+) -> None:
+    """Emit per ``(action_sequence, hand_class, action, probability)`` rows.
+
+    Layout::
+
+        scope,action_sequence,hand_class,action,probability
+
+    ``scope`` is ``"preflop"`` (per-class strategy at the root) or
+    ``"postflop"`` (per-class strategy at the flop after the preceding
+    action sequence). The ``action_sequence`` column is space-separated
+    tokens; empty for the preflop root.
+    """
+    import csv as _csv_mod
+    import io as _io_mod
+
+    buf = _io_mod.StringIO()
+    writer = _csv_mod.writer(buf)
+    writer.writerow(
+        ["scope", "action_sequence", "hand_class", "action", "probability"]
+    )
+
+    # Preflop per-class rows. ``action_sequence`` is empty at the root.
+    per_class = result.preflop_result.per_class_strategy
+    for cls in sorted(per_class.keys()):
+        freqs = per_class[cls]
+        for action_label in sorted(freqs.keys()):
+            writer.writerow(
+                [
+                    "preflop",
+                    "",
+                    cls,
+                    action_label,
+                    f"{freqs[action_label]:.6f}",
+                ]
+            )
+
+    # Postflop per-class rows per (action_sequence, board) solve.
+    for action_seq in sorted(postflop_solves.keys()):
+        pf = postflop_solves[action_seq]
+        seq_str = " ".join(action_seq)
+        for cls in sorted(pf.per_class_strategy.keys()):
+            freqs = pf.per_class_strategy[cls]
+            for action_label in sorted(freqs.keys()):
+                writer.writerow(
+                    [
+                        "postflop",
+                        seq_str,
+                        cls,
+                        action_label,
+                        f"{freqs[action_label]:.6f}",
+                    ]
+                )
+
+    print(buf.getvalue(), end="")
+
+
 def _cmd_river(args: argparse.Namespace) -> int:
     """PR 39: river spot solve with fixed hero hole cards vs villain range.
 
@@ -2361,6 +2740,110 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     sg.set_defaults(func=_cmd_subgame)
+
+    # ---- Task #58: chained preflop -> lazy postflop orchestrator CLI ----
+    ch = sub.add_parser(
+        "chained",
+        help=(
+            "Chained preflop range solve + per-action continuation ranges "
+            "+ optional lazy postflop flop solve (task #58, #31 Phase D)."
+        ),
+    )
+    ch.add_argument(
+        "--hero-range",
+        type=str,
+        required=True,
+        help=(
+            "Hero range in PioSolver notation, e.g. 'AA,KK,AKs'. Concrete "
+            "combos collapse to hand classes (AA / AKs / 76o) internally."
+        ),
+    )
+    ch.add_argument(
+        "--villain-range",
+        type=str,
+        required=True,
+        help="Villain range in PioSolver notation, e.g. 'AA,KK,AKs,76s'.",
+    )
+    ch.add_argument(
+        "--stacks",
+        type=int,
+        default=100,
+        help="Per-player effective stack in BB (default 100).",
+    )
+    ch.add_argument(
+        "--preflop-iterations",
+        type=int,
+        default=1000,
+        help="DCFR iterations per per-pair preflop solve (default 1000).",
+    )
+    ch.add_argument(
+        "--postflop-iterations",
+        type=int,
+        default=500,
+        help=(
+            "DCFR iterations passed to the lazy postflop solve (default "
+            "500; only fires when --board is set and --lazy-postflop is "
+            "true)."
+        ),
+    )
+    ch.add_argument(
+        "--board",
+        type=str,
+        default=None,
+        help=(
+            "Optional 3-card flop (e.g. 'Ks 8d 2h'). When set, the chained "
+            "orchestrator also runs the lazy postflop solve for this flop "
+            "after every preflop terminal that reaches it; the postflop "
+            "strategy appears in the text/JSON/CSV output."
+        ),
+    )
+    ch.add_argument(
+        "--hero-player",
+        type=int,
+        choices=(0, 1),
+        default=0,
+        help=(
+            "Hero seat: 0 = aggressor / SB-button (default), 1 = defender "
+            "/ BB. Reported preflop / postflop frequencies are this "
+            "player's."
+        ),
+    )
+    ch.add_argument(
+        "--format",
+        choices=("text", "json", "csv"),
+        default="text",
+        help=(
+            "Output format: 'text' (default, human-readable preflop "
+            "matrix + per-action continuation ranges + optional flop "
+            "strategy); 'json' (full ChainedSolveResult dict dump); "
+            "'csv' (one row per (action_sequence, hand_class, action, "
+            "probability) for piping)."
+        ),
+    )
+    ch.add_argument(
+        "--lazy-postflop",
+        type=_str_to_bool,
+        default=True,
+        help=(
+            "Whether the postflop solve should fire when --board is set. "
+            "Default 'true'. Pass 'false' to print the preflop + "
+            "continuation ranges only (skips the lazy postflop)."
+        ),
+    )
+    ch.add_argument(
+        "--max-postflop-terminals",
+        type=int,
+        default=5,
+        help=(
+            "When --board is set + lazy postflop on, solve the top-N "
+            "flop-reaching terminals ranked by joint hero+villain reach "
+            "weight (default 5). Solving every terminal (often 50-300+ "
+            "at deep stacks) is prohibitively slow; the cap keeps the "
+            "CLI usable. Callers who want every terminal can drive "
+            "``ChainedSolveResult.solve_postflop`` from Python."
+        ),
+    )
+    ch.set_defaults(func=_cmd_chained)
 
     pp = sub.add_parser(
         "parity",
