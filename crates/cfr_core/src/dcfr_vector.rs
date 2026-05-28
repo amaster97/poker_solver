@@ -74,6 +74,7 @@
 
 use std::collections::HashMap;
 
+use crate::arena::{BumpArena, TLS_ARENA};
 use crate::exploit::{
     enumerate_hole_card_pairs, hole_string, terminal_utility, BettingTree, BettingTreeMode,
     FlatNode,
@@ -658,49 +659,68 @@ impl VectorDCFR {
         // sequential to avoid oversubscription). Default (env var
         // unset) is bit-identical to pre-PR-4.
         let rayon_enabled = crate::dcfr_vector_parallel::parallel_chance_enabled();
-        for _ in 0..iterations {
-            self.iteration += 1;
-            let iteration = self.iteration;
-            let alpha = self.alpha;
-            let beta = self.beta;
-            let gamma = self.gamma;
-            // Update player 0.
-            traverse_recursive_with_parallel(
-                tree,
-                eval_ctx,
-                &terminal_cache,
-                0,
-                0,
-                iteration,
-                alpha,
-                beta,
-                gamma,
-                &reach_p0,
-                &reach_p1,
-                &mut self.infosets,
-                0,
-                rayon_enabled,
-                &self.has_chance_template,
-            );
-            // Update player 1.
-            traverse_recursive_with_parallel(
-                tree,
-                eval_ctx,
-                &terminal_cache,
-                0,
-                1,
-                iteration,
-                alpha,
-                beta,
-                gamma,
-                &reach_p1,
-                &reach_p0,
-                &mut self.infosets,
-                0,
-                rayon_enabled,
-                &self.has_chance_template,
-            );
-        }
+        // v1.10 PR-1 — pull the thread-local bump arena once and reuse
+        // across all iterations. Per-`traverse` scratch buffers
+        // (`strategy`, `action_values`, `next_reach`) come from this
+        // arena instead of `vec![0.0; N]`. Backing capacity grows by
+        // doubling on the first solve and is reused for every
+        // subsequent solve on this thread.
+        //
+        // `has_chance_template` is threaded through so the v1.10 PR-2
+        // template walker hook fires inside the recursive traversal when
+        // a chance node was tagged at tree-build time.
+        TLS_ARENA.with(|cell| {
+            let mut arena_ref = cell.borrow_mut();
+            let arena: &mut BumpArena = &mut arena_ref;
+            let outer_mark = arena.mark();
+            for _ in 0..iterations {
+                self.iteration += 1;
+                let iteration = self.iteration;
+                let alpha = self.alpha;
+                let beta = self.beta;
+                let gamma = self.gamma;
+                // Update player 0.
+                traverse_recursive_with_parallel(
+                    tree,
+                    eval_ctx,
+                    &terminal_cache,
+                    arena,
+                    0,
+                    0,
+                    iteration,
+                    alpha,
+                    beta,
+                    gamma,
+                    &reach_p0,
+                    &reach_p1,
+                    &mut self.infosets,
+                    0,
+                    rayon_enabled,
+                    &self.has_chance_template,
+                );
+                arena.reset_to(outer_mark);
+                // Update player 1.
+                traverse_recursive_with_parallel(
+                    tree,
+                    eval_ctx,
+                    &terminal_cache,
+                    arena,
+                    0,
+                    1,
+                    iteration,
+                    alpha,
+                    beta,
+                    gamma,
+                    &reach_p1,
+                    &reach_p0,
+                    &mut self.infosets,
+                    0,
+                    rayon_enabled,
+                    &self.has_chance_template,
+                );
+                arena.reset_to(outer_mark);
+            }
+        });
     }
 }
 
@@ -746,6 +766,7 @@ pub(crate) fn traverse_recursive_with_parallel(
     tree: &BettingTree,
     eval_ctx: &EvalContext,
     terminal_cache: &TerminalCache,
+    arena: &mut BumpArena,
     node_idx: usize,
     update_player: usize,
     iteration: u32,
@@ -769,8 +790,14 @@ pub(crate) fn traverse_recursive_with_parallel(
         offset + infosets.len(),
         infosets.len(),
     );
+    // v1.10 PR-1 — record arena high-water-mark on entry so we can
+    // restore it before returning, preserving LIFO stack discipline.
+    // The Vec<f64> return value is allocated on the heap so it survives
+    // the arena reset (the rayon merge in
+    // `parallel_traverse_chance` needs to own the per-child Vec<f64>).
+    let entry_mark = arena.mark();
 
-    match node {
+    let result = match node {
         FlatNode::Fold { .. } | FlatNode::Showdown { .. } => {
             let opp_player = 1 - update_player;
             let _t = prof_start!();
@@ -793,8 +820,12 @@ pub(crate) fn traverse_recursive_with_parallel(
             if allow_parallel && children.len() >= 2 {
                 // Dispatch to the rayon parallel walker. Set
                 // `allow_parallel = false` for child subtrees to
-                // prevent nested parallelism (oversubscription).
-                return crate::dcfr_vector_parallel::parallel_traverse_chance(
+                // prevent nested parallelism (oversubscription). The
+                // parallel walker pulls each worker's own thread-local
+                // arena (via `TLS_ARENA` inside `traverse_with_infosets`)
+                // — this thread's arena is untouched while the workers
+                // run, so we MUST rewind to entry_mark on the way out.
+                let r = crate::dcfr_vector_parallel::parallel_traverse_chance(
                     tree,
                     eval_ctx,
                     terminal_cache,
@@ -812,6 +843,8 @@ pub(crate) fn traverse_recursive_with_parallel(
                     offset,
                     has_chance_template,
                 );
+                arena.reset_to(entry_mark);
+                return r;
             }
             // `v1.10 PR-2` — when the chance node has a `ChanceTemplate`
             // (all children share structural identity), dispatch to
@@ -820,10 +853,11 @@ pub(crate) fn traverse_recursive_with_parallel(
             // to the legacy loop below: same DFS visit order, same
             // arithmetic, same accumulator update sequence.
             if !has_chance_template.is_empty() && has_chance_template[node_idx] {
-                return traverse_turn_chance_recursive(
+                let r = traverse_turn_chance_recursive(
                     tree,
                     eval_ctx,
                     terminal_cache,
+                    arena,
                     *prob,
                     children,
                     update_player,
@@ -838,13 +872,20 @@ pub(crate) fn traverse_recursive_with_parallel(
                     allow_parallel,
                     has_chance_template,
                 );
+                arena.reset_to(entry_mark);
+                return r;
             }
             let mut values = vec![0.0_f64; update_hands];
-            for &c in children {
+            // Snapshot children to release `node` borrow so we can
+            // re-borrow `arena` (and `infosets`) mutably in the loop.
+            let children_vec: Vec<usize> = children.clone();
+            let prob_val = *prob;
+            for c in children_vec {
                 let child_values = traverse_recursive_with_parallel(
                     tree,
                     eval_ctx,
                     terminal_cache,
+                    arena,
                     c,
                     update_player,
                     iteration,
@@ -860,7 +901,7 @@ pub(crate) fn traverse_recursive_with_parallel(
                 );
                 let _t = prof_start!();
                 for (i, v) in child_values.iter().enumerate() {
-                    values[i] += *prob * v;
+                    values[i] += prob_val * v;
                 }
                 prof_end!(_t, ChanceAccumulate);
             }
@@ -870,32 +911,47 @@ pub(crate) fn traverse_recursive_with_parallel(
             let player = *player as usize;
             let action_count = actions.len();
             let player_hands = eval_ctx.hand_count[player];
+            // Snapshot children indices to release the immutable `node`
+            // borrow before the recursive `&mut arena` re-borrow.
+            let children_vec: Vec<usize> = children.clone();
             let _ta = prof_start!();
-            let mut strategy = vec![0.0_f64; player_hands * action_count];
+            // v1.10 PR-1 — `strategy` moves from per-call vec! to arena.
+            let strategy_off = arena.alloc_zeroed(player_hands * action_count);
             prof_end!(_ta, AllocStrategyBuf);
             {
                 let info = infosets[local_idx]
                     .as_ref()
                     .expect("decision node must have an infoset slot");
                 let _t = prof_start!();
-                VectorDCFR::compute_strategy(info, &mut strategy);
+                let strategy = arena.get_mut(strategy_off, player_hands * action_count);
+                VectorDCFR::compute_strategy(info, strategy);
                 prof_end!(_t, ComputeStrategy);
             }
 
             if player != update_player {
                 let mut values = vec![0.0_f64; update_hands];
+                // `next_reach` is a heap Vec — small enough (≤1326 f64s
+                // per player at full deck) that allocator reuse is faster
+                // than threading a fourth arena offset through; the
+                // arena wins on the LARGER buffers (strategy +
+                // action_values, both ~`player_hands * action_count`).
                 let mut next_reach = vec![0.0_f64; player_hands];
-                for (a, &child_idx) in children.iter().enumerate() {
+                for (a, child_idx) in children_vec.iter().enumerate() {
                     let _t = prof_start!();
-                    for h in 0..player_hands {
-                        next_reach[h] = reach_opp[h] * strategy[h * action_count + a];
+                    {
+                        // next_reach[h] = reach_opp[h] * strategy[h, a]
+                        let strategy = arena.get(strategy_off, player_hands * action_count);
+                        for h in 0..player_hands {
+                            next_reach[h] = reach_opp[h] * strategy[h * action_count + a];
+                        }
                     }
                     prof_end!(_t, OppNextReach);
                     let child_values = traverse_recursive_with_parallel(
                         tree,
                         eval_ctx,
                         terminal_cache,
-                        child_idx,
+                        arena,
+                        *child_idx,
                         update_player,
                         iteration,
                         alpha,
@@ -914,41 +970,60 @@ pub(crate) fn traverse_recursive_with_parallel(
                     }
                     prof_end!(_t, ChanceAccumulate);
                 }
+                arena.reset_to(entry_mark);
                 return values;
             }
 
-            {
+            // v1.10 PR-1 (Candidate I3) — skip the post-discount strategy
+            // recompute when the discount was a no-op
+            // (`last_discount_iter >= iteration`, i.e. the regret table
+            // is unchanged). Bit-identical to the unconditional recompute
+            // because the regrets read by the recompute are the same in
+            // that case. Saves one `compute_strategy` call per
+            // own-decision visit when the node has already been
+            // discounted earlier this iteration (e.g. both players'
+            // walks visit the same node within one iter).
+            let needs_strategy_recompute = {
                 let info = infosets[local_idx]
                     .as_mut()
                     .expect("decision node must have an infoset slot");
+                let needs = info.last_discount_iter < iteration;
                 let _t = prof_start!();
                 VectorDCFR::discount(info, iteration, alpha, beta, gamma);
                 prof_end!(_t, Discount);
-            }
-            {
+                needs
+            };
+            if needs_strategy_recompute {
                 let info = infosets[local_idx]
                     .as_ref()
                     .expect("decision node must have an infoset slot");
                 let _t = prof_start!();
-                VectorDCFR::compute_strategy(info, &mut strategy);
+                let strategy = arena.get_mut(strategy_off, player_hands * action_count);
+                VectorDCFR::compute_strategy(info, strategy);
                 prof_end!(_t, ComputeStrategy);
             }
 
             let _ta = prof_start!();
-            let mut action_values = vec![0.0_f64; action_count * update_hands];
+            // v1.10 PR-1 — `action_values` moves from per-call vec! to arena.
+            let action_values_off = arena.alloc_zeroed(action_count * update_hands);
             let mut next_reach = vec![0.0_f64; player_hands];
             prof_end!(_ta, AllocActionValues);
-            for (a, &child_idx) in children.iter().enumerate() {
+            for (a, child_idx) in children_vec.iter().enumerate() {
                 let _t = prof_start!();
-                for h in 0..player_hands {
-                    next_reach[h] = reach_p[h] * strategy[h * action_count + a];
+                {
+                    // next_reach[h] = reach_p[h] * strategy[h, a]
+                    let strategy = arena.get(strategy_off, player_hands * action_count);
+                    for h in 0..player_hands {
+                        next_reach[h] = reach_p[h] * strategy[h * action_count + a];
+                    }
                 }
                 prof_end!(_t, OwnNextReach);
                 let child_values = traverse_recursive_with_parallel(
                     tree,
                     eval_ctx,
                     terminal_cache,
-                    child_idx,
+                    arena,
+                    *child_idx,
                     update_player,
                     iteration,
                     alpha,
@@ -962,18 +1037,26 @@ pub(crate) fn traverse_recursive_with_parallel(
                     has_chance_template,
                 );
                 let dst = a * update_hands;
+                let action_values =
+                    arena.get_mut(action_values_off, action_count * update_hands);
                 action_values[dst..dst + update_hands].copy_from_slice(&child_values);
             }
 
             let _t = prof_start!();
             let mut node_values = vec![0.0_f64; update_hands];
-            for h in 0..update_hands {
-                let mut value = 0.0_f64;
-                let s_offset = h * action_count;
-                for a in 0..action_count {
-                    value += strategy[s_offset + a] * action_values[a * update_hands + h];
+            {
+                // strategy (R), action_values (R) — both immutable slice
+                // borrows from the same Vec are allowed simultaneously.
+                let strategy = arena.get(strategy_off, player_hands * action_count);
+                let action_values = arena.get(action_values_off, action_count * update_hands);
+                for h in 0..update_hands {
+                    let mut value = 0.0_f64;
+                    let s_offset = h * action_count;
+                    for a in 0..action_count {
+                        value += strategy[s_offset + a] * action_values[a * update_hands + h];
+                    }
+                    node_values[h] = value;
                 }
-                node_values[h] = value;
             }
             prof_end!(_t, NodeValues);
 
@@ -981,13 +1064,20 @@ pub(crate) fn traverse_recursive_with_parallel(
             let avg_weight = 1.0_f64;
             let _ = regret_weight;
             {
+                // The SIMD kernels mutate `info.regret` / `info.strategy_sum`
+                // (a slot in `infosets[local_idx]`), which is a separate
+                // object from `arena.buf` — we can hold immutable arena
+                // slice borrows concurrently with the mutable infoset
+                // borrow without conflict.
+                let action_values = arena.get(action_values_off, action_count * update_hands);
+                let strategy = arena.get(strategy_off, player_hands * action_count);
                 let info = infosets[local_idx]
                     .as_mut()
                     .expect("decision node must have an infoset slot");
                 let _t = prof_start!();
                 simd::update_regret_sum_vector(
                     &mut info.regret,
-                    &action_values,
+                    action_values,
                     &node_values,
                     update_hands,
                     action_count,
@@ -1012,7 +1102,10 @@ pub(crate) fn traverse_recursive_with_parallel(
 
             node_values
         }
-    }
+    };
+
+    arena.reset_to(entry_mark);
+    result
 }
 
 // ============================================================================
@@ -1205,6 +1298,12 @@ pub(crate) fn traverse_flop_chance_recursive(
 /// `has_chance_template` is threaded through so that any sub-chance
 /// nodes inside a parallel worker's shard still hit the v1.10 PR-2
 /// template walker hook when applicable.
+///
+/// **v1.10 PR-1**: pulls the worker thread's own `TLS_ARENA` and threads
+/// it into the recursive walker. Each Rayon worker has a distinct
+/// thread-local arena (so workers' scratch buffers do not contend), and
+/// the arena's backing `Vec<f64>` capacity persists across iterations
+/// on the same worker.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn traverse_with_infosets(
     tree: &BettingTree,
@@ -1222,23 +1321,31 @@ pub(crate) fn traverse_with_infosets(
     offset: usize,
     has_chance_template: &[bool],
 ) -> Vec<f64> {
-    traverse_recursive_with_parallel(
-        tree,
-        eval_ctx,
-        terminal_cache,
-        node_idx,
-        update_player,
-        iteration,
-        alpha,
-        beta,
-        gamma,
-        reach_p,
-        reach_opp,
-        infosets,
-        offset,
-        /* allow_parallel = */ false,
-        has_chance_template,
-    )
+    TLS_ARENA.with(|cell| {
+        let mut arena_ref = cell.borrow_mut();
+        let arena: &mut BumpArena = &mut arena_ref;
+        let entry_mark = arena.mark();
+        let r = traverse_recursive_with_parallel(
+            tree,
+            eval_ctx,
+            terminal_cache,
+            arena,
+            node_idx,
+            update_player,
+            iteration,
+            alpha,
+            beta,
+            gamma,
+            reach_p,
+            reach_opp,
+            infosets,
+            offset,
+            /* allow_parallel = */ false,
+            has_chance_template,
+        );
+        arena.reset_to(entry_mark);
+        r
+    })
 }
 
 /// `v1.10 PR-2` — specialized chance-node walker for chance nodes with
@@ -1267,6 +1374,7 @@ fn traverse_turn_chance_recursive(
     tree: &BettingTree,
     eval_ctx: &EvalContext,
     terminal_cache: &TerminalCache,
+    arena: &mut BumpArena,
     prob: f64,
     children: &[usize],
     update_player: usize,
@@ -1283,11 +1391,16 @@ fn traverse_turn_chance_recursive(
 ) -> Vec<f64> {
     let update_hands = eval_ctx.hand_count[update_player];
     let mut values = vec![0.0_f64; update_hands];
-    for &c in children {
+    // Snapshot children indices so we can re-borrow `arena` mutably in the
+    // loop without conflicting with the immutable `children: &[usize]`
+    // borrow held by the caller's `FlatNode::Chance` match arm.
+    let children_vec: Vec<usize> = children.to_vec();
+    for c in children_vec {
         let child_values = traverse_recursive_with_parallel(
             tree,
             eval_ctx,
             terminal_cache,
+            arena,
             c,
             update_player,
             iteration,
