@@ -1,0 +1,277 @@
+{
+  "schema_version": "v1.0",
+  "premium_a_version": "v1",
+  "generated_date_utc": "2026-05-28T07:09:44.838615+00:00",
+  "shards": [
+    {
+      "stack_bb": 20,
+      "ante_bb": 0.0,
+      "filename": "preflop_169class_20bb_anteNone.json.gz",
+      "sha256": "2b162f45a5ccce39f733acfa1c224d39f079f579fee373186dfec4470984670a",
+      "file_size_bytes": 438310,
+      "final_exploitability_bb100": null,
+      "wall_seconds": 46.8593111038208,
+      "iterations": 25000
+    },
+    {
+      "stack_bb": 20,
+      "ante_bb": 0.5,
+      "filename": "preflop_169class_20bb_anteHalf.json.gz",
+      "sha256": "e14b15afbb84e62e5b6248e577e16b740e5560eaeeec855d0b67e977961d274e",
+      "file_size_bytes": 510566,
+      "final_exploitability_bb100": null,
+      "wall_seconds": 51.722551107406616,
+      "iterations": 25000
+    },
+    {
+      "stack_bb": 20,
+      "ante_bb": 1.0,
+      "filename": "preflop_169class_20bb_anteFull.json.gz",
+      "sha256": "8302568f8c821c947e1ce1a43731749fe459e4aad7c1bf5f0b47f013cb590678",
+      "file_size_bytes": 436204,
+      "final_exploitability_bb100": null,
+      "wall_seconds": 50.142841815948486,
+      "iterations": 25000
+    },
+    {
+      "stack_bb": 30,
+      "ante_bb": 0.0,
+      "filename": "preflop_169class_30bb_anteNone.json.gz",
+      "sha256": "67e9a7096009cf7878d90c27b1f60b8bef4da96af7f149a74440ab89c36764ba",
+      "file_size_bytes": 625358,
+      "final_exploitability_bb100": null,
+      "wall_seconds": 67.72978401184082,
+      "iterations": 25000
+    },
+    {
+      "stack_bb": 30,
+      "ante_bb": 0.5,
+      "filename": "preflop_169class_30bb_anteHalf.json.gz",
+      "sha256": "75514058fb3d55a46a40828192f0feda81b1155eb1655c2f5e8e4951551c7815",
+      "file_size_bytes": 658815,
+      "final_exploitability_bb100": null,
+      "wall_seconds": 67.3166069984436,
+      "iterations": 25000
+    },
+    {
+      "stack_bb": 30,
+      "ante_bb": 1.0,
+      "filename": "preflop_169class_30bb_anteFull.json.gz",
+      "sha256": "7e061b1f2d9f8903c050786513fb50a59254770d076773749d1f68f8a1a01442",
+      "file_size_bytes": 603044,
+      "final_exploitability_bb100": null,
+      "wall_seconds": 67.30993914604187,
+      "iterations": 25000
+    },
+    {
+      "stack_bb": 40,
+      "ante_bb": 0.0,
+      "filename": "preflop_169class_40bb_anteNone.json.gz",
+      "sha256": "d0000f1df70f311b153943436c352f7951d0b47ed0c3eb864f95a5725e61e6c8",
+      "file_size_bytes": 689345,
+      "final_exploitability_bb100": null,
+      "wall_seconds": 74.30015683174133,
+      "iterations": 25000
+    },
+    {
+      "stack_bb": 40,
+      "ante_bb": 0.5,
+      "filename": "preflop_169class_40bb_anteHalf.json.gz",
+      "sha256": "0c4d7577373b69425ea224b52e938318ca2da90cc3814bb342e2de8e0cfedb3a",
+      "file_size_bytes": 732567,
+      "final_exploitability_bb100": null,
+      "wall_seconds": 79.20781207084656,
+      "iterations": 25000
+    },
+    {
+      "stack_bb": 40,
+      "ante_bb": 1.0,
+      "filename": "preflop_169class_40bb_anteFull.json.gz",
+      "sha256": "1a73a7a23550a17f23d7b3f555a73f12935c8801563a46e3d81bf237b14ac239",
+      "file_size_bytes": 654517,
+      "final_exploitability_bb100": null,
+      "wall_seconds": 79.65490221977234,
+      "iterations": 25000
+    },
+    {
+      "stack_bb": 60,
+      "ante_bb": 0.0,
+      "filename": "preflop_169class_60bb_anteNone.json.gz",
+      "sha256": "c068a66d455cd7947a5c61015afa2914f8abcc8616748e8b34961e26dd91c3e2",
+      "file_size_bytes": 861230,
+      "final_exploitability_bb100": null,
+      "wall_seconds": 90.08079504966736,
+      "iterations": 25000
+    },
+    {
+      "stack_bb": 60,
+      "ante_bb": 0.5,
+      "filename": "preflop_169class_60bb_anteHalf.json.gz",
+      "sha256": "6f4da05ca3bf764cb9ef37bc15749813bbfb2751e4c7d55c67c9d9fd37290699",
+      "file_size_bytes": 904487,
+      "final_exploitability_bb100": null,
+      "wall_seconds": 93.4129810333252,
+      "iterations": 25000
+    },
+    {
+      "stack_bb": 60,
+      "ante_bb": 1.0,
+      "filename": "preflop_169class_60bb_anteFull.json.gz",
+      "sha256": "319b1be863ca89be733b0fec6ef9e3d226140a22a76a7b62951f6afe2092e905",
+      "file_size_bytes": 803384,
+      "final_exploitability_bb100": null,
+      "wall_seconds": 86.39110994338989,
+      "iterations": 25000
+    },
+    {
+      "stack_bb": 80,
+      "ante_bb": 0.0,
+      "filename": "preflop_169class_80bb_anteNone.json.gz",
+      "sha256": "3bdf563c0ef246f84d3f1e030ca4762bdddbe095d5f60d09c93a8a42842b3454",
+      "file_size_bytes": 967433,
+      "final_exploitability_bb100": null,
+      "wall_seconds": 101.37005424499512,
+      "iterations": 25000
+    },
+    {
+      "stack_bb": 80,
+      "ante_bb": 0.5,
+      "filename": "preflop_169class_80bb_anteHalf.json.gz",
+      "sha256": "bff3426fc444e9b75b3e9fb13b413b9fe9db8187a2927076fc73c728a65475dc",
+      "file_size_bytes": 987034,
+      "final_exploitability_bb100": null,
+      "wall_seconds": 101.51954197883606,
+      "iterations": 25000
+    },
+    {
+      "stack_bb": 80,
+      "ante_bb": 1.0,
+      "filename": "preflop_169class_80bb_anteFull.json.gz",
+      "sha256": "d072ead2e4561e1cf0f32b93bf149a1cb3f717c3b35047d27ad680c51f6eca46",
+      "file_size_bytes": 874584,
+      "final_exploitability_bb100": null,
+      "wall_seconds": 88.62922811508179,
+      "iterations": 25000
+    },
+    {
+      "stack_bb": 100,
+      "ante_bb": 0.0,
+      "filename": "preflop_169class_100bb_anteNone.json.gz",
+      "sha256": "f67e520d269221522526041b24c58444c879c45f90671b1f75daa929f126ae0c",
+      "file_size_bytes": 951092,
+      "final_exploitability_bb100": null,
+      "wall_seconds": 100.32512617111206,
+      "iterations": 25000
+    },
+    {
+      "stack_bb": 100,
+      "ante_bb": 0.5,
+      "filename": "preflop_169class_100bb_anteHalf.json.gz",
+      "sha256": "962d5d6c793e2dcff59ab7c4a93ee74b05de7eb822771b6443eac2598fde4c8a",
+      "file_size_bytes": 1020644,
+      "final_exploitability_bb100": null,
+      "wall_seconds": 99.13212418556213,
+      "iterations": 25000
+    },
+    {
+      "stack_bb": 100,
+      "ante_bb": 1.0,
+      "filename": "preflop_169class_100bb_anteFull.json.gz",
+      "sha256": "6bda86a2f7fa2d3a51322948e6abb7cc4414afab61c8e49b8ef273c7b54333bb",
+      "file_size_bytes": 906338,
+      "final_exploitability_bb100": null,
+      "wall_seconds": 87.48088598251343,
+      "iterations": 25000
+    },
+    {
+      "stack_bb": 150,
+      "ante_bb": 0.0,
+      "filename": "preflop_169class_150bb_anteNone.json.gz",
+      "sha256": "535fe2273501ebac79809eb0ac326de803334c8fac272f2b6f59c14fec3054b5",
+      "file_size_bytes": 967300,
+      "final_exploitability_bb100": null,
+      "wall_seconds": 100.19626498222351,
+      "iterations": 25000
+    },
+    {
+      "stack_bb": 150,
+      "ante_bb": 0.5,
+      "filename": "preflop_169class_150bb_anteHalf.json.gz",
+      "sha256": "ee326fb4b55a79dfbea5f9283542df79c0420b7b8835039720fdb7c471dca5b7",
+      "file_size_bytes": 1008293,
+      "final_exploitability_bb100": null,
+      "wall_seconds": 100.20432209968567,
+      "iterations": 25000
+    },
+    {
+      "stack_bb": 150,
+      "ante_bb": 1.0,
+      "filename": "preflop_169class_150bb_anteFull.json.gz",
+      "sha256": "59391845538fc6b503356b73cb8e0b5d6a031bff22bf8580479ddb52aebc79d1",
+      "file_size_bytes": 882814,
+      "final_exploitability_bb100": null,
+      "wall_seconds": 86.40030598640442,
+      "iterations": 25000
+    },
+    {
+      "stack_bb": 175,
+      "ante_bb": 0.0,
+      "filename": "preflop_169class_175bb_anteNone.json.gz",
+      "sha256": "c025833b7f95020862f02dd3fd7773eec326ed8378963b0b626ccfbb37e1e6f3",
+      "file_size_bytes": 995075,
+      "final_exploitability_bb100": null,
+      "wall_seconds": 100.24837875366211,
+      "iterations": 25000
+    },
+    {
+      "stack_bb": 175,
+      "ante_bb": 0.5,
+      "filename": "preflop_169class_175bb_anteHalf.json.gz",
+      "sha256": "900237dba50abe07a6ff06f2a7b10f571c7e41d16640f0a466c87b2eef600216",
+      "file_size_bytes": 1014121,
+      "final_exploitability_bb100": null,
+      "wall_seconds": 98.84161472320557,
+      "iterations": 25000
+    },
+    {
+      "stack_bb": 175,
+      "ante_bb": 1.0,
+      "filename": "preflop_169class_175bb_anteFull.json.gz",
+      "sha256": "bd5edb2922f473a4e910f14a4cbf90478b234027a2d6b1c064ebefb0c41308a0",
+      "file_size_bytes": 905584,
+      "final_exploitability_bb100": null,
+      "wall_seconds": 89.03119587898254,
+      "iterations": 25000
+    },
+    {
+      "stack_bb": 200,
+      "ante_bb": 0.0,
+      "filename": "preflop_169class_200bb_anteNone.json.gz",
+      "sha256": "0db3d385b02384d574aa49e9f39091c8cd1e992776f71679b33125b5a2eff82d",
+      "file_size_bytes": 957585,
+      "final_exploitability_bb100": null,
+      "wall_seconds": 100.91991114616394,
+      "iterations": 25000
+    },
+    {
+      "stack_bb": 200,
+      "ante_bb": 0.5,
+      "filename": "preflop_169class_200bb_anteHalf.json.gz",
+      "sha256": "c7283a349b5521c3b24a9bf8494e501b94bb9a4183a24db965ebde2970d38ea9",
+      "file_size_bytes": 1011343,
+      "final_exploitability_bb100": null,
+      "wall_seconds": 105.44720888137817,
+      "iterations": 25000
+    },
+    {
+      "stack_bb": 200,
+      "ante_bb": 1.0,
+      "filename": "preflop_169class_200bb_anteFull.json.gz",
+      "sha256": "b8f1add2e389bd53cbbcc797f34ffd50e728ed2f9bb83d54552a1a7986e59b7c",
+      "file_size_bytes": 907792,
+      "final_exploitability_bb100": null,
+      "wall_seconds": 89.88587594032288,
+      "iterations": 25000
+    }
+  ]
+}

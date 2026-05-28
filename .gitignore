@@ -70,3 +70,6 @@ wake_up_*.md
 *.patch
 *.patch.bak
 PLAN.md
+
+# Local-only archives + scratch (not project source)
+.local/
