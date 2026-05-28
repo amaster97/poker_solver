@@ -275,10 +275,11 @@ def render(
         handles["backend_toggle"] = backend_toggle
 
         # ----- Solve-mode toggle (RvR vs Concrete) (PR 24a §3.2) -----
-        # Routes through ``poker_solver.solve_range_vs_range`` when set to
-        # ``Range-vs-range``. The Pluribus-blueprint aggregator is slower
-        # per spot but honestly framed — see chart subtitle for the
-        # "blueprint approximation" caveat.
+        # Routes through ``poker_solver.range_aggregator.solve_range_vs_range_nash``
+        # (true-Nash vector-form CFR, default since 2026-05-27) when set
+        # to ``Range-vs-range``. The legacy blueprint path is available
+        # via the opt-in checkbox below. See chart subtitle for the
+        # method actually used.
         with ui.row().classes("gap-2 items-center"):
             ui.label("Solve mode:").classes("text-xs")
             rvr_toggle = ui.toggle(
@@ -294,6 +295,46 @@ def render(
                 save_state()
 
             rvr_toggle.on_value_change(_on_rvr_toggle)
+
+        # ----- Pluribus-blueprint opt-in checkbox (task #61) -----
+        # True-Nash vector-form CFR is the default since 2026-05-27 (per
+        # empirical bench: turn ~27× faster, blueprint flop impractical
+        # at >27 min CPU on a tiny range). This checkbox opts back into
+        # the legacy ``solve_range_vs_range`` Pluribus-blueprint
+        # aggregator, which can still be faster on tiny river spots.
+        # The label semantics are INVERTED from the pre-flip version:
+        # checked => blueprint (legacy), unchecked => true_nash (default).
+        with ui.row().classes("gap-2 items-center"):
+            blueprint_checkbox = ui.checkbox(
+                "Use Pluribus blueprint (legacy, faster on tiny river)",
+                value=(
+                    getattr(state.current_spot, "solver_mode", "blueprint")
+                    == "blueprint"
+                ),
+            )
+            # Marker is kept as ``true-nash-checkbox`` so existing tests
+            # and external selectors (PR 10b UI snapshots) keep working.
+            # The semantic flip is encoded in the on-change handler.
+            blueprint_checkbox.mark("true-nash-checkbox")
+            ui.tooltip(
+                "Opt into the legacy Pluribus-blueprint aggregator "
+                "(``solve_range_vs_range``). Default is true-Nash "
+                "vector-form CFR (joint Nash + exploitability number). "
+                "Blueprint can be faster on tiny river spots but is "
+                "impractical on flop (>27 min CPU). See "
+                "docs/aggregator_vs_true_nash_explainer.md."
+            )
+            handles["true_nash_checkbox"] = blueprint_checkbox
+
+            def _on_blueprint_toggle(e: Any) -> None:
+                # Inverted semantics: checking the box selects blueprint,
+                # unchecking it returns to the new default (true_nash).
+                state.current_spot.solver_mode = (
+                    "blueprint" if bool(e.value) else "true_nash"
+                )
+                save_state()
+
+            blueprint_checkbox.on_value_change(_on_blueprint_toggle)
 
         ui.separator()
         # ----- Solve / Pause / Stop -----
@@ -380,6 +421,19 @@ def render(
             eta_label.mark("progress-eta")
             handles["eta_label"] = eta_label
 
+            # ----- Task #61: result method + exploitability readouts -----
+            # Surface which engine path produced the displayed strategy
+            # (concrete / blueprint aggregator / true-Nash vector CFR) and
+            # the exploitability number when true-Nash mode is used. The
+            # labels stay empty when no solve has run.
+            method_label = ui.label("").classes("text-xs font-mono")
+            method_label.mark("progress-method")
+            handles["method_label"] = method_label
+
+            nash_expl_label = ui.label("").classes("text-xs font-mono")
+            nash_expl_label.mark("progress-nash-exploitability")
+            handles["nash_expl_label"] = nash_expl_label
+
 
 def refresh_progress(state: AppState) -> None:
     """Called by the ``ui.timer(0.5, ...)`` tick.
@@ -437,6 +491,58 @@ def refresh_progress(state: AppState) -> None:
     # Chart update.
     if runner.expl_history:
         _redraw_chart(handles, history=runner.expl_history, state=state)
+
+    # Task #61: method-used + true-Nash exploitability surface.
+    # ``nash_result`` is set only by the true-Nash vector-form path; when
+    # present, surface the dataclass-reported exploitability + wall-clock.
+    # The blueprint aggregator path leaves it None and we fall back to a
+    # generic "blueprint aggregator" label; the concrete-vs-concrete path
+    # surfaces "concrete (Python|Rust)". Per spec §3.4 (PR 24a) the chart
+    # subtitle already names the method qualitatively; these labels are a
+    # numeric companion.
+    method_label = handles.get("method_label")
+    nash_expl_label = handles.get("nash_expl_label")
+    if method_label is not None and nash_expl_label is not None:
+        nash_result = getattr(runner, "nash_result", None)
+        rvr_result = getattr(runner, "rvr_result", None)
+        spot = state.current_spot
+        rvr_mode_on = bool(getattr(spot, "rvr_mode", False))
+        solver_mode = str(getattr(spot, "solver_mode", "blueprint"))
+        if status in ("done", "stopped") and nash_result is not None:
+            wall_clock = float(getattr(nash_result, "wall_clock_s", 0.0))
+            method_label.set_text(
+                f"Method: true-Nash vector CFR  (wall {wall_clock:.2f} s)"
+            )
+            expl_val = float(getattr(nash_result, "exploitability", 0.0))
+            nash_expl_label.set_text(
+                f"Nash exploitability: {expl_val:.4f} (chips/hand)"
+            )
+        elif status in ("done", "stopped") and rvr_mode_on and rvr_result is not None:
+            method_label.set_text("Method: Pluribus blueprint aggregator (legacy)")
+            nash_expl_label.set_text("")
+        elif status in ("done", "stopped") and not rvr_mode_on:
+            backend_str = (
+                state.current_solve.backend if state.current_solve else "python"
+            )
+            method_label.set_text(f"Method: concrete ({backend_str})")
+            nash_expl_label.set_text("")
+        elif status == "running":
+            # Surface "would use true-Nash" while still solving so the
+            # user sees the dispatch intent without waiting for the result.
+            if rvr_mode_on and solver_mode == "true_nash":
+                method_label.set_text(
+                    "Method: true-Nash vector CFR (default; computing...)"
+                )
+            elif rvr_mode_on:
+                method_label.set_text(
+                    "Method: Pluribus blueprint aggregator (legacy)"
+                )
+            else:
+                method_label.set_text("")
+            nash_expl_label.set_text("")
+        else:
+            method_label.set_text("")
+            nash_expl_label.set_text("")
 
     # Status-error surface: when runner.status == "error", show notify.
     if status == "error" and not handles.get("_error_shown"):
@@ -618,20 +724,30 @@ def _chart_options(
 def _chart_quality_label(state: AppState) -> str:
     """Return the chart subtitle for the current solve mode + backend.
 
-    Per PR 24a §3.4:
+    Per PR 24a §3.4 + task #61 (default flipped 2026-05-27):
       * concrete + Rust  -> "true Nash (Rust best-response walk, v1.3.2)"
       * concrete + Python -> "true Nash (Python best-response walk, slow)"
-      * RvR (any backend) -> "blueprint approximation (Pluribus-style
-                              aggregator, v1.3.0; not Nash)"
+      * RvR + ``solver_mode == "true_nash"`` (default) -> "true Nash RvR
+                              (vector-form CFR, default; v1.7.0+; post-PR-114)"
+      * RvR + ``solver_mode == "blueprint"`` (legacy opt-in) -> "blueprint
+                              approximation (Pluribus-style aggregator,
+                              legacy fast mode; not Nash)"
 
-    Reads ``state.current_spot.rvr_mode`` and ``state.current_solve.backend``
-    (falling back to ``"python"`` when no solve has run yet — the chart
-    is rendered at page-open with empty history so this default must be
-    safe). The label is recomputed every ``_redraw_chart`` call.
+    Reads ``state.current_spot.rvr_mode``, ``state.current_spot.solver_mode``,
+    and ``state.current_solve.backend`` (falling back to ``"python"`` when
+    no solve has run yet — the chart is rendered at page-open with empty
+    history so this default must be safe). The label is recomputed every
+    ``_redraw_chart`` call.
     """
     rvr_mode = bool(getattr(state.current_spot, "rvr_mode", False))
     if rvr_mode:
-        return "blueprint approximation (Pluribus-style aggregator, v1.3.0; not Nash)"
+        solver_mode = str(getattr(state.current_spot, "solver_mode", "blueprint"))
+        if solver_mode == "true_nash":
+            return "true Nash RvR (vector-form CFR, default; v1.7.0+; post-PR-114)"
+        return (
+            "blueprint approximation (Pluribus-style aggregator, "
+            "legacy fast mode; not Nash)"
+        )
     backend = "python"
     solve = state.current_solve
     if solve is not None:
