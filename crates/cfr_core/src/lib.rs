@@ -462,6 +462,17 @@ fn compute_exploitability(
 /// `solve_range_vs_range_nash` wrapper all already do this). See PR #105
 /// (HIGH-2 framing) and PR #114 (`TerminalCache` optimization) for
 /// analysis.
+/// B10 Phase B — per-combo fractional weights wire-in.
+///
+/// `p0_weights` / `p1_weights`: optional per-hand initial-reach scalars,
+/// aligned positionally with `p0_holes` / `p1_holes`. When supplied,
+/// the vector-form kernel uses these as the initial reach vectors in
+/// place of the all-ones default. Each scalar should be in `[0.0, 1.0]`
+/// — the contract is a multiplicative factor only, no algorithmic change
+/// in the regret / strategy update loops. All-ones (the default) is
+/// bit-identical to the pre-Phase-B code. If supplied, `pN_weights.len()
+/// == pN_holes.len()` is required (asserted Rust-side; mismatched length
+/// hard-fails with a panic surfaced through PyValueError).
 #[pyfunction]
 #[pyo3(signature = (
     config_json,
@@ -473,6 +484,8 @@ fn compute_exploitability(
     p1_holes=None,
     regret_init_noise=0.0,
     rng_seed=0,
+    p0_weights=None,
+    p1_weights=None,
 ))]
 #[allow(clippy::too_many_arguments)]
 fn solve_range_vs_range_rust(
@@ -486,6 +499,8 @@ fn solve_range_vs_range_rust(
     p1_holes: Option<Vec<[u8; 2]>>,
     regret_init_noise: f64,
     rng_seed: u64,
+    p0_weights: Option<Vec<f64>>,
+    p1_weights: Option<Vec<f64>>,
 ) -> PyResult<PyObject> {
     let config: hunl::HUNLConfig = serde_json::from_str(config_json)
         .map_err(|e| PyValueError::new_err(format!("invalid HUNLConfig JSON: {e}")))?;
@@ -503,6 +518,19 @@ fn solve_range_vs_range_rust(
         }
     };
 
+    // B10 Phase B — per-combo weights. Defaults to None (all-ones reach,
+    // bit-identical to pre-Phase-B). When supplied, both p0/p1 weights
+    // must be present together (same shape contract as p0_holes/p1_holes).
+    let hand_weights: Option<[Vec<f64>; 2]> = match (p0_weights, p1_weights) {
+        (Some(w0), Some(w1)) => Some([w0, w1]),
+        (None, None) => None,
+        _ => {
+            return Err(PyValueError::new_err(
+                "p0_weights and p1_weights must both be supplied or both omitted",
+            ));
+        }
+    };
+
     let started = std::time::Instant::now();
     // Release the GIL for the pure-Rust solve. CPU-bound, no Python callbacks.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -516,6 +544,7 @@ fn solve_range_vs_range_rust(
                 gamma,
                 regret_init_noise,
                 rng_seed,
+                hand_weights,
             )
         })
     }));

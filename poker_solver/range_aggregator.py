@@ -419,10 +419,13 @@ def solve_range_vs_range(
 
         result.per_solve_wall_clock_s[hclass] = time.perf_counter() - class_t_start
 
-    # Aggregate by combo count.
+    # Aggregate by per-combo weight (B10 Phase B). When ``hero_range`` is
+    # a ``Range`` we honor per-combo weights; otherwise fall back to legacy
+    # combo counts (``_combo_count``).
     result.range_aggregate = _aggregate_range(
         result.per_class_strategy,
         hero_classes,
+        hero_range if isinstance(hero_range, Range) else None,
     )
 
     result.wall_clock_s = time.perf_counter() - t_total_start
@@ -755,12 +758,28 @@ def _renormalize(freqs: dict[str, float]) -> dict[str, float]:
 def _aggregate_range(
     per_class: dict[HandClass, dict[str, float]],
     class_order: list[HandClass],
+    range_: Range | None = None,
 ) -> dict[str, float]:
     """Combo-weighted average across hand classes.
 
-    Each class contributes its frequency dict weighted by its canonical
-    combo count (pair=6, suited=4, offsuit=12, etc.). The output sums to
-    1.0 modulo float epsilon if every input class also sums to 1.0.
+    Each class contributes its frequency dict weighted by either:
+
+    - The sum of per-combo fractional weights from ``range_`` for the
+      class's combos (B10 Phase B). Combos absent from ``range_`` count
+      as 0.0; combos at default weight 1.0 fall back to the legacy
+      combo count (``_combo_count(cls)``) by construction.
+    - The canonical combo count from ``_combo_count(cls)`` (legacy
+      back-compat) when ``range_`` is ``None``.
+
+    The output sums to 1.0 modulo float epsilon if every input class
+    also sums to 1.0.
+
+    Back-compat invariant: when ``range_`` is a ``Range`` whose combos
+    are all at weight 1.0 AND it contains every combo of each class in
+    ``class_order``, this function returns the same result as the
+    ``range_=None`` legacy path. The new test
+    ``test_aggregator_all_one_weights_matches_legacy`` in
+    ``tests/test_range_frac_freq_engine.py`` codifies this.
     """
     if not per_class:
         return {}
@@ -773,7 +792,14 @@ def _aggregate_range(
         freqs = per_class.get(cls)
         if not freqs:
             continue
-        w = float(_combo_count(cls))
+        if range_ is None:
+            w = float(_combo_count(cls))
+        else:
+            # Per-combo weight sum from the Range. Each combo defaults to
+            # 0.0 if absent (no contribution); at 1.0 each combo counts the
+            # same as the legacy `_combo_count` enumeration would (so a
+            # fully-populated all-1.0 range reproduces legacy behavior).
+            w = sum(range_.weight(c) for c in _enumerate_combos(cls))
         total_weight += w
         for k in keys:
             weighted_sum[k] += w * freqs.get(k, 0.0)
@@ -1061,6 +1087,35 @@ def solve_range_vs_range_nash(
         [card_to_int(c[0]), card_to_int(c[1])] for c in p1_combos
     ]
 
+    # ---- B10 Phase B — per-combo weights wire-in -----------------------
+    # When the caller supplied a ``Range`` with non-uniform fractional
+    # weights, plumb them to Rust as ``p0_weights`` / ``p1_weights`` lists
+    # aligned positionally with ``p0_holes`` / ``p1_holes``. Range objects
+    # that are all-1.0 (or class-label sequences, which have no Range to
+    # consult) skip the weights and Rust uses the all-ones default —
+    # bit-identical to pre-Phase-B.
+    def _weights_for(combos: list[tuple[Card, Card]], rng_obj: object) -> list[float] | None:
+        if not isinstance(rng_obj, Range):
+            return None
+        weights = [rng_obj.weight(c) for c in combos]
+        if all(w == 1.0 for w in weights):
+            return None
+        return weights
+
+    p0_weights: list[float] | None
+    p1_weights: list[float] | None
+    if hero_player == 0:
+        p0_weights = _weights_for(p0_combos, hero_range)
+        p1_weights = _weights_for(p1_combos, villain_range)
+    else:
+        p0_weights = _weights_for(p0_combos, villain_range)
+        p1_weights = _weights_for(p1_combos, hero_range)
+    # Rust requires both p0_weights / p1_weights together or neither.
+    if p0_weights is None and p1_weights is not None:
+        p0_weights = [1.0] * len(p0_holes)
+    elif p1_weights is None and p0_weights is not None:
+        p1_weights = [1.0] * len(p1_holes)
+
     # ---- Serialize config + call Rust binding ---------------------------
     # The vector form requires `initial_hole_cards = None` (per
     # `dcfr_vector.rs:746-750`); strip whatever the caller passed.
@@ -1071,6 +1126,10 @@ def solve_range_vs_range_nash(
         on_progress(0, iterations, "solve_start")
 
     t0 = time.perf_counter()
+    rust_kwargs: dict[str, Any] = {}
+    if p0_weights is not None or p1_weights is not None:
+        rust_kwargs["p0_weights"] = p0_weights
+        rust_kwargs["p1_weights"] = p1_weights
     rust_out = rust_solve(
         config_json,
         iterations,
@@ -1079,6 +1138,7 @@ def solve_range_vs_range_nash(
         gamma,
         p0_holes,
         p1_holes,
+        **rust_kwargs,
     )
     wall_clock_s = time.perf_counter() - t0
 
@@ -1102,12 +1162,19 @@ def solve_range_vs_range_nash(
     # villain acts first, until we reach hero_player's first decision.
     # Look up the per-(hand, action) rows in average_strategy for each
     # hero combo, then group by hand class and average within the class.
+    #
+    # B10 Phase B: when ``hero_range`` is a ``Range`` with non-uniform
+    # per-combo weights, the within-class average is *weighted* by combo
+    # weight rather than uniform. All-1.0 weights reproduce the pre-Phase-B
+    # uniform behavior by construction.
+    hero_range_obj = hero_range if isinstance(hero_range, Range) else None
     per_class, range_agg, action_labels = _project_to_hand_classes(
         config=nash_config,
         average_strategy=average_strategy,
         hero_combos=hero_combos,
         hero_classes=hero_classes,
         hero_player=hero_player,
+        hero_range=hero_range_obj,
     )
 
     # ---- Memory profile unpack ------------------------------------------
@@ -1154,6 +1221,7 @@ def _project_to_hand_classes(
     hero_combos: list[tuple[Card, Card]],
     hero_classes: list[HandClass],
     hero_player: int,
+    hero_range: Range | None = None,
 ) -> tuple[dict[HandClass, dict[str, float]], dict[str, float], list[str]]:
     """Project the per-(history, hand) Nash strategy onto hand classes.
 
@@ -1163,6 +1231,13 @@ def _project_to_hand_classes(
     aggregator's ``_extract_first_decision_freqs`` convention). When the
     current player IS hero, look up the per-(hand, action) rows for every
     hero combo at that infoset key, group by hand class, and average.
+
+    B10 Phase B: when ``hero_range`` is supplied AND contains non-uniform
+    per-combo weights, the within-class average is weighted by combo
+    weight. Combos absent from ``hero_range`` get the default weight 1.0
+    (back-compat with callers that pass `Sequence[HandClass]` rather than
+    a `Range`). When all per-combo weights are 1.0, the weighted average
+    reduces to the legacy uniform average exactly.
 
     Returns ``(per_class_strategy, range_aggregate, action_labels)`` where
     ``action_labels`` is the engine's labelling for the hero infoset.
@@ -1201,13 +1276,16 @@ def _project_to_hand_classes(
             state = game.apply(state, actions[modal_idx])
             visited += 1
             continue
-        # Hero's first decision — extract per-combo rows and project.
+        # Hero's first decision — extract per-(combo, weight) rows and project.
         actions = game.legal_actions(state)
         action_labels = [
             _label_for_action(a, config.bet_size_fractions) for a in actions
         ]
         key_suffix = _key_suffix_for_state(game, state, hero_player)
-        per_class: dict[HandClass, list[list[float]]] = {}
+        # Per class: list of (row, weight) tuples. Weight defaults to 1.0
+        # so the legacy uniform-average path is identical bit-for-bit when
+        # hero_range is None or all combos are at weight 1.0.
+        per_class: dict[HandClass, list[tuple[list[float], float]]] = {}
         for combo in hero_combos:
             hole_str = _hole_string_rust(combo)
             full_key = hole_str + key_suffix
@@ -1215,16 +1293,33 @@ def _project_to_hand_classes(
             if row is None or len(row) != len(actions):
                 continue
             cls = _combo_to_hand_class(combo)
-            per_class.setdefault(cls, []).append([float(x) for x in row])
-        # Average within class.
+            if hero_range is None:
+                w = 1.0
+            else:
+                w = hero_range.weight(combo)
+                # Combos not in `hero_range` (e.g. the caller passed a
+                # narrower `Range` than the class-derived combo list)
+                # are skipped: weight 0 means no contribution.
+                if w <= 0.0:
+                    continue
+            per_class.setdefault(cls, []).append(
+                ([float(x) for x in row], w)
+            )
+        # Weighted average within class. When every combo's weight is
+        # 1.0, this is exactly the legacy uniform mean.
         per_class_avg: dict[HandClass, dict[str, float]] = {}
-        for cls, rows in per_class.items():
-            if not rows:
+        for cls, rows_with_w in per_class.items():
+            if not rows_with_w:
                 continue
-            n = len(rows)
-            avg = [sum(r[i] for r in rows) / n for i in range(len(action_labels))]
+            total_w = sum(w for _, w in rows_with_w)
+            if total_w <= 0.0:
+                continue
+            avg = [
+                sum(r[i] * w for r, w in rows_with_w) / total_w
+                for i in range(len(action_labels))
+            ]
             per_class_avg[cls] = dict(zip(action_labels, avg, strict=True))
-        range_agg = _aggregate_range(per_class_avg, hero_classes)
+        range_agg = _aggregate_range(per_class_avg, hero_classes, hero_range)
         return per_class_avg, range_agg, action_labels
     return {}, {}, []
 
