@@ -83,6 +83,8 @@ def _fake_chained_result() -> Any:
     by patching the result's ``solve_postflop`` method to return a
     canned :class:`RangeVsRangeNashResult`.
     """
+    from collections import OrderedDict
+
     from poker_solver.chained import ChainedSolveResult, ContinuationRanges
     from poker_solver.range_aggregator import RangeVsRangeNashResult
 
@@ -113,7 +115,10 @@ def _fake_chained_result() -> Any:
     result = ChainedSolveResult(
         preflop_result=preflop_result,
         continuation_ranges={action_sequence: continuation},
-        postflop_cache={},
+        # Production's cache supports LRU bookkeeping via OrderedDict
+        # (``move_to_end`` / ``popitem(last=False)``). A plain dict
+        # would silently fail on ``move_to_end`` during cache-hit reads.
+        postflop_cache=OrderedDict(),
     )
     return result
 
@@ -298,7 +303,16 @@ async def test_cell_click_plus_flop_triggers_postflop_solve(
     def _fake_solve_postflop(action_sequence: Any, board: Any) -> Any:
         postflop_calls["count"] += 1
         postflop_result = _fake_postflop_result()
-        result.postflop_cache[(action_sequence, tuple(board))] = postflop_result
+        # Mirror production's cache key (PR #150): the cache is keyed on
+        # the canonical board (suit-isomorphism class), not the raw tuple.
+        # This fake replaces ``solve_postflop`` entirely via ``patch.object``,
+        # so the only consumer of this write is incidental inspection —
+        # but use the right shape so the test stays a fair stand-in.
+        from poker_solver.chained import _canonicalize_board
+
+        result.postflop_cache[
+            (action_sequence, _canonicalize_board(board))
+        ] = postflop_result
         return postflop_result
 
     with patch.object(result, "solve_postflop", _fake_solve_postflop):
@@ -357,6 +371,7 @@ def test_lazy_cache_second_query_is_instant() -> None:
     Per task #57 acceptance gate 3 (lazy cache).
     """
     from poker_solver.card import Card
+    from poker_solver.chained import _canonicalize_board
 
     result = _fake_chained_result()
     action_sequence = next(iter(result.continuation_ranges.keys()))
@@ -365,8 +380,16 @@ def test_lazy_cache_second_query_is_instant() -> None:
     # Pre-populate the cache via a stubbed solve_postflop so we don't
     # run the real solver in unit tests. The smoke is on the cache-hit
     # path of the wrapper, not the cold-solve performance.
+    #
+    # PR #150 changed the cache key from the raw board tuple to
+    # ``(action_sequence, _canonicalize_board(board))`` so two boards in
+    # the same suit-isomorphism class share a single solve. This test
+    # mirrors the production lookup by writing under the canonical key —
+    # writing the raw tuple would silently miss on the production read
+    # path and the wrapper would fall through to the real solver.
     first_result = _fake_postflop_result()
-    result.postflop_cache[(action_sequence, board)] = first_result
+    canonical_key = _canonicalize_board(board)
+    result.postflop_cache[(action_sequence, canonical_key)] = first_result
 
     # First fetch via the wrapper's public API — must return the cached
     # object verbatim. Time it as a sanity check (cache hit is well

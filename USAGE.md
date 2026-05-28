@@ -767,6 +767,32 @@ back to the nearest neighbor.
 - Action menu: `fold`, `call`, open sizes {2.0, 3.0, 4.0, 5.0} BB,
   3/4/5-bet multipliers {2.0, 3.0, 4.0, 5.0} of the previous bet,
   `all_in`. Raise cap 4 per preflop street.
+
+  **Multiplier convention (important).** Action labels of the form
+  `raise_to_X` mean **X is the TOTAL bet** the player puts in, including
+  chips already committed in the pot. The engine's reraise multiplier
+  is applied to the *last raise increment*, not the opponent's total bet:
+
+  ```text
+  bet_to = opp_total_contribution + multiplier × last_raise_increment
+  ```
+
+  where `last_raise_increment = previous_raise_to − contribution_before_that_raise`.
+  It is NOT `multiplier × opponent_total_bet`.
+
+  *Worked example.* SB opens to 2.5 BB (raise_to = 250 chips). The BB
+  already has the 100-chip big blind in, so
+  `last_raise_increment = 250 − 100 = 150`. With reraise multiplier
+  `4.0`, the BB's 3-bet is:
+
+  ```text
+  bet_to = 250 + 4.0 × 150 = 850 chips = 8.5 BB total
+  ```
+
+  NOT `4.0 × 2.5 BB = 10 BB`. The source of truth is the
+  `_build_action_labels` helper in `poker_solver/blueprint.py`
+  (see `raise_to = opp_contrib + round(mult * prev_bet)` on the reraise
+  branch).
 - Hand resolution: 169 Pio-style canonical classes (pairs, suited,
   offsuit). The True Path B Rust kernel solves natively at this
   resolution; see

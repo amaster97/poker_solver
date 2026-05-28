@@ -33,6 +33,14 @@ ENTRY = str(REPO_ROOT / "scripts" / "pyinstaller_entry.py")
 RUST_SO = str(REPO_ROOT / "poker_solver" / "_rust.cpython-313-darwin.so")
 CHARTS_DIR = str(REPO_ROOT / "poker_solver" / "charts")
 UI_DIR = str(REPO_ROOT / "ui")
+# PR #69 audit fix: the preflop blueprint shards + 169x169 equity table
+# live under assets/ and MUST be bundled so the .app boots in
+# "blueprint-backed" mode. Omitting them silently degrades the app to
+# "live solve only" — every preflop query falls through to a 5-30s solve
+# instead of the <100 ms blueprint lookup, and the chained tab loses its
+# postflop continuation-range derivation path entirely.
+BLUEPRINTS_DIR = str(REPO_ROOT / "assets" / "blueprints")
+EQUITY_NPZ = str(REPO_ROOT / "assets" / "preflop_equity_169x169.npz")
 ICON_PATH = str(REPO_ROOT / "assets" / "poker_solver.icns")
 
 # PR 44 fix: read __version__ dynamically from poker_solver/__init__.py
@@ -98,6 +106,15 @@ a = Analysis(  # noqa: F821
     datas=[
         (CHARTS_DIR, "poker_solver/charts"),
         (UI_DIR, "ui"),
+        # PR #69 audit fix: bundle preflop blueprint shards + 169-class
+        # equity table so the .app launches in blueprint-backed mode.
+        # The destination subdirs mirror the source-tree layout so that
+        # ``from poker_solver.blueprint_loader import default_assets_dir``
+        # (which resolves ``Path(__file__).resolve().parents[1] / "assets"``
+        # at install time and ``sys._MEIPASS / "assets"`` at frozen time)
+        # finds them. See ``scripts/build_macos_dmg.sh`` smoke test.
+        (BLUEPRINTS_DIR, "assets/blueprints"),
+        (EQUITY_NPZ, "assets"),
     ] + datas,
     hiddenimports=hiddenimports + [
         # NiceGUI does a lot of dynamic imports under nicegui.elements
