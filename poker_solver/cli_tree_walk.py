@@ -233,6 +233,8 @@ def walk_tree(
     *,
     include_off_path: bool = False,
     reach_threshold: float = 1e-4,
+    reach_lookup: dict[str, float] | None = None,
+    off_path_keys: frozenset[str] | None = None,
 ) -> list[TreeNode]:
     """Walk the entire decision tree, yielding visited decision nodes.
 
@@ -243,6 +245,17 @@ def walk_tree(
     using only the acting player's own strategy at each step (we do NOT mix
     in opponent probabilities — that's a separate "joint reach" the caller
     can derive from ``probs`` if needed).
+
+    v1.8.2 (#47) — when ``reach_lookup`` is supplied (typically populated
+    by :func:`poker_solver.solver._compute_reach_probabilities` and
+    surfaced via ``SolveResult.reach_probability``), the walker uses the
+    engine-computed joint reach per infoset instead of the per-walk
+    multiplicative heuristic above. This gives a more accurate phantom-
+    node classification because it accounts for opponent strategy +
+    chance prob along the path, not just the acting player's own
+    contribution. When ``off_path_keys`` is also supplied, the walker
+    prefers the engine's off-path set over the ``reach_threshold``
+    parameter. Both fall back to the legacy heuristic when missing.
 
     Returns nodes in pre-order (root first, then deeper subtrees).
     """
@@ -267,6 +280,8 @@ def walk_tree(
         nodes_out=nodes,
         include_off_path=include_off_path,
         reach_threshold=reach_threshold,
+        reach_lookup=reach_lookup,
+        off_path_keys=off_path_keys,
     )
     return nodes
 
@@ -280,6 +295,8 @@ def _walk_recursive(
     nodes_out: list[TreeNode],
     include_off_path: bool,
     reach_threshold: float,
+    reach_lookup: dict[str, float] | None = None,
+    off_path_keys: frozenset[str] | None = None,
 ) -> None:
     if game.is_terminal(state):
         return
@@ -298,6 +315,8 @@ def _walk_recursive(
             nodes_out=nodes_out,
             include_off_path=include_off_path,
             reach_threshold=reach_threshold,
+            reach_lookup=reach_lookup,
+            off_path_keys=off_path_keys,
         )
         return
 
@@ -329,7 +348,20 @@ def _walk_recursive(
     # History string within the current street (matches infoset_key format).
     history = "".join(state.current_street_tokens)
     hole_label = _hole_label(state, cur)
-    off_path = reach <= reach_threshold
+    # v1.8.2 (#47) — prefer engine-computed reach + off-path classification
+    # when available (passed in from ``SolveResult.reach_probability`` /
+    # ``off_path_keys``). The engine walk accounts for joint reach (own
+    # × opp × chance), giving a more accurate phantom classification.
+    # Fall back to the heuristic when the lookup is missing.
+    if reach_lookup is not None:
+        node_reach = reach_lookup.get(infoset_key, 0.0)
+        if off_path_keys is not None:
+            off_path = infoset_key in off_path_keys
+        else:
+            off_path = node_reach < reach_threshold
+    else:
+        node_reach = reach
+        off_path = reach <= reach_threshold
 
     if include_off_path or not off_path:
         nodes_out.append(
@@ -339,15 +371,43 @@ def _walk_recursive(
                 hole_label=hole_label,
                 infoset_key=infoset_key,
                 actions=list(actions),
-                reach_prob=reach,
+                reach_prob=node_reach,
                 off_path=off_path,
             )
         )
 
     for aid, _, p in actions:
         child_reach = reach * p
-        if not include_off_path and child_reach <= reach_threshold:
-            continue
+        if not include_off_path:
+            # Pruning decision: when the engine reach map is supplied, use
+            # the child's engine reach for the cutoff (more accurate than
+            # the per-walk own-player heuristic).
+            if reach_lookup is not None:
+                next_state_peek = game.apply(state, aid)
+                if game.is_terminal(next_state_peek):
+                    continue
+                cur_next = game.current_player(next_state_peek)
+                if cur_next != -1:
+                    child_key = game.infoset_key(next_state_peek, cur_next)
+                    if off_path_keys is not None:
+                        if child_key in off_path_keys:
+                            continue
+                    elif reach_lookup.get(child_key, 0.0) < reach_threshold:
+                        continue
+                _walk_recursive(
+                    game,
+                    next_state_peek,
+                    average_strategy,
+                    reach=child_reach,
+                    nodes_out=nodes_out,
+                    include_off_path=include_off_path,
+                    reach_threshold=reach_threshold,
+                    reach_lookup=reach_lookup,
+                    off_path_keys=off_path_keys,
+                )
+                continue
+            if child_reach <= reach_threshold:
+                continue
         next_state = game.apply(state, aid)
         _walk_recursive(
             game,
@@ -357,6 +417,8 @@ def _walk_recursive(
             nodes_out=nodes_out,
             include_off_path=include_off_path,
             reach_threshold=reach_threshold,
+            reach_lookup=reach_lookup,
+            off_path_keys=off_path_keys,
         )
 
 

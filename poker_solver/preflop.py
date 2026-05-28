@@ -387,7 +387,7 @@ def solve_hunl_preflop(
 
     game_value = _game_value(game, avg) if avg else 0.0
 
-    return PreflopSolveResult(
+    result = PreflopSolveResult(
         average_strategy=avg,
         exploitability_history=history,
         game_value=game_value,
@@ -396,6 +396,13 @@ def solve_hunl_preflop(
         memory_report=report,
         mode="subgame",
     )
+    # v1.8.2 (#47) -- annotate phantom-5% reach. Walks the same equity-
+    # leaf preflop game `_game_value` / `exploitability` used above.
+    if avg:
+        from poker_solver.solver import _annotate_off_path
+
+        _annotate_off_path(result, game)
+    return result
 
 
 def _validate_preflop_config(
