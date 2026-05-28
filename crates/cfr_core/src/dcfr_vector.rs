@@ -574,6 +574,7 @@ impl VectorDCFR {
     ///
     /// Returns per-hand value vector for `update_player` (length
     /// `hand_counts[update_player]`).
+    #[allow(clippy::too_many_arguments)]
     fn traverse(
         &mut self,
         tree: &BettingTree,
