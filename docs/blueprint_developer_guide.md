@@ -88,6 +88,46 @@ The full Phase 1 grid is enforced in `standard_batch_specs()` in
 `poker_solver/blueprint.py` — the 9-depth × 3-ante product is the
 authoritative source.
 
+### Multiplier convention (important)
+
+The infoset key suffix `bN` / `rN` and the user-facing action label
+`raise_to_N` both use the same convention: **N is the TOTAL bet** the
+player puts in this street, including chips already committed (the
+posted blind / open contribution). The engine's reraise multiplier is
+applied to the **last raise increment**, not the opponent's total bet:
+
+```text
+bet_to = opp_total_contribution + multiplier × last_raise_increment
+```
+
+where `last_raise_increment = previous_raise_to − contribution_before_that_raise`
+(the chips added by the most recent raise, NOT the post-raise pot
+contribution). The construction lives in `_build_action_labels`
+(`poker_solver/blueprint.py`) on the `facing_bet` branch:
+
+```python
+prev_bet = max(last_bet_size, big_blind)
+for mult in preflop_reraise_multipliers:
+    increment = round(mult * prev_bet)
+    raise_to = opp_contrib + increment
+```
+
+**Worked example.** SB opens to 2.5 BB (raise_to = 250 chips). The BB
+already has the 100-chip big blind in, so
+`last_raise_increment = 250 − 100 = 150` (SB's total contribution 250
+minus BB's pre-action contribution 100). With reraise multiplier `4.0`,
+the BB's 3-bet is:
+
+```text
+bet_to = 250 + 4.0 × 150 = 850 chips = 8.5 BB total
+```
+
+NOT `4.0 × 2.5 BB = 10 BB` and NOT `4.0 × 250 = 1000 chips`. This is the
+standard "multiplier of last raise" convention used by most modern
+solvers (PioSolver, GTO+); it differs from the "multiplier of total
+opponent bet" used by some older chart sources, which is one common
+source of apparent chart-vs-blueprint divergence at the 3-bet+ frontier.
+
 ## Asset format
 
 ### Layout
