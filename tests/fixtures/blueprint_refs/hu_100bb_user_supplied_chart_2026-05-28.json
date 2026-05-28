@@ -1,0 +1,113 @@
+{
+  "fixture_version": "1.0",
+  "source": "User-supplied published GTO chart, transcribed via cell-by-cell comparison in docs/preflop_100bb_chart_validation_2026-05-28.md (v1) and docs/preflop_100bb_chart_validation_v2_2026-05-28.md (v2). Provenance of the originating chart is not labeled in the validation doc.",
+  "source_kind": "user_supplied",
+  "shippable_in_repo": true,
+  "license_notes": "User-supplied chart; provenance not labeled. If the user identifies this as a commercial-solver export (GTOW / Pio / Snowie), this fixture should be moved to a non-public location pending licensing review (per docs/blueprint_reference_inventory.md §5).",
+  "date_scraped": "2026-05-28",
+  "date_added_to_repo": "2026-05-28",
+  "config": {
+    "stack_depth_bb": 100,
+    "ante_bb": 0.0,
+    "small_blind_bb": 0.5,
+    "big_blind_bb": 1.0,
+    "open_size_bb": 2.5,
+    "three_bet_size_bb": 8.5,
+    "four_bet_size_bb": 22.3,
+    "action_menu_notes": "Chart published with 2.5bb open, 10bb 3-bet, 23bb 4-bet. Engine equivalents (closest discrete sizes) are 2.5bb / 8.5bb / 22.3bb. Sizing mismatch of ~1.5bb at 3-bet and ~0.7bb at 4-bet contributes to documented divergence. Chart does NOT include a SB-limp action; engine's full action set does. See validation doc §'View B' (limp-collapsed view) for the chart-aligned categorization.",
+    "convention_notes": "Engine uses Brown convention for terminal-utility (winner gets pot+c_loser; see feedback_brown_convention_adopt). Chart's underlying solver convention is unknown."
+  },
+  "spots": {
+    "SB_RFI": {
+      "context": "SB_RFI",
+      "action_sequence": "||p|",
+      "actions": ["fold", "call", "open_2.5bb", "all_in"],
+      "expected_strategy": null,
+      "expected_strategy_notes": "Chart publishes dominant-action only, not full strategy distribution. expected_dominant_action below.",
+      "expected_dominant_action": {
+        "AA": "open_2.5bb",
+        "AKs": "open_2.5bb",
+        "AKo": "open_2.5bb",
+        "A5s": "open_2.5bb",
+        "KQs": "open_2.5bb",
+        "JTs": "open_2.5bb",
+        "T9s": "open_2.5bb",
+        "98s": "open_2.5bb",
+        "J7o": "fold",
+        "K9o": "open_2.5bb",
+        "Q5o": "fold",
+        "32o": "fold",
+        "22": "open_2.5bb",
+        "88": "open_2.5bb",
+        "KJo": "open_2.5bb"
+      },
+      "aggregate_frequencies_chart": {
+        "fold": 0.2165,
+        "open_2.5bb": 0.7835
+      },
+      "notes": "15-cell per-cell labels reported in docs/preflop_100bb_chart_validation_2026-05-28.md table 'SB RFI cells'. Chart aggregate is fold 21.65% / open 78.35%. Marginal cells J7o, Q5o are 'fold' on this chart and 'open' on our engine — known Nash-multiplicity at 100bb (validation doc §'Top-3 Cells Where We Disagree Most' row 'J7o/Q5o'). 22 / 98s appear as 'open' on the chart and as 'limp' (call) on our engine View A; under View B (limp-collapsed) the engine matches. SB-limp absent from chart by convention."
+    },
+    "BB_vs_SB_RFI": {
+      "context": "BB_vs_SB_RFI",
+      "action_sequence": "||p|b250",
+      "actions": ["fold", "call", "raise_5.5bb", "raise_5.95bb", "raise_8.5bb", "all_in"],
+      "expected_strategy": null,
+      "expected_strategy_notes": "Chart publishes dominant-action only.",
+      "expected_dominant_action": {
+        "AA": "raise_8.5bb",
+        "KK": "raise_8.5bb",
+        "QQ": "raise_8.5bb",
+        "JJ": "raise_8.5bb",
+        "AKs": "raise_8.5bb",
+        "AKo": "raise_8.5bb",
+        "KQs": "call",
+        "JTs": "call",
+        "A2s": "raise_8.5bb",
+        "A5s": "raise_8.5bb",
+        "76s": "call",
+        "K3o": "fold",
+        "T9s": "call"
+      },
+      "aggregate_frequencies_chart": {
+        "fold": 0.4033,
+        "call": 0.3389,
+        "raise_3bet_plus": 0.2579
+      },
+      "notes": "13-cell per-cell labels in docs/preflop_100bb_chart_validation_2026-05-28.md table 'BB vs SB RFI cells'. Chart's nominal 3-bet target is 10bb; engine's closest discrete size is 8.5bb (r850 token). Suited-ace bluff-3-bet hands (A2s, A5s) on chart vs flat-call on engine — Nash multiplicity in this region (validation doc §'Top-3 Cells' row 'A5s'). KQs flat-call on chart vs over-3-bet on engine — sizing-mismatch hypothesis. K3o defended (call) by engine vs fold on chart — chart is tighter; may close as engine converges (2500-iter run; 25k+ iters should tighten this)."
+    },
+    "SB_vs_BB_3bet": {
+      "context": "SB_vs_BB_3bet",
+      "action_sequence": "||p|b250r850",
+      "actions": ["fold", "call", "raise_20.5bb", "raise_22.3bb", "raise_32.5bb", "all_in"],
+      "expected_strategy": null,
+      "expected_strategy_notes": "Chart publishes dominant-action only.",
+      "expected_dominant_action": {
+        "AA": "all_in",
+        "KK": "raise_32.5bb",
+        "AKs": "raise_32.5bb",
+        "AKo": "raise_32.5bb",
+        "QQ": "raise_32.5bb",
+        "A5s": "raise_4bet_jam",
+        "JTs": "fold",
+        "76s": "fold",
+        "KQs": "call"
+      },
+      "aggregate_frequencies_chart": {
+        "fold": 0.5803,
+        "call": 0.3160,
+        "raise_4bet_plus": 0.1038
+      },
+      "notes": "9-cell per-cell labels in docs/preflop_100bb_chart_validation_2026-05-28.md table 'SB vs BB 3-bet'. Engine matches premium-value spots (AA, KK, AKs, AKo, QQ) cleanly. A5s 4-bet bluff jam matches chart. JTs / 76s defended (call) by engine vs fold on chart — engine sees 8.5bb 3-bet as cheaper than chart's 10bb 3-bet so defense is more profitable; will likely tighten if engine is rerun with chart's exact sizing. KQs jam by engine vs call on chart — similar sizing-mismatch hypothesis."
+    }
+  },
+  "nash_multiplicity_notes": [
+    "Suited-ace bluff region (A2s / A5s / A4s at BB-vs-RFI) — chart prescribes bluff-3-bet, engine prefers flat-call. Both Nash equilibria are valid; the EV differential at 100 BB is <0.15 BB/100. Do NOT flag as a Phase 7 failure if median per-class L1 is dominated by this cluster.",
+    "Marginal SB-open cells (J7o / Q5o / similar bottom-edge offsuit hands) — chart positions them just outside opening range; engine positions them just inside. Equilibrium-selection sensitivity at 100 BB.",
+    "SB-limp asymmetry — chart prohibits limp; engine's full action set finds limp ~= open in EV. Validation doc §'View B' shows that limp-collapsing recovers chart-alignment for cells like 98s / 22. Phase 7 diff-test should report both raw and limp-collapsed views, per the validation doc precedent.",
+    "Sizing mismatch — chart calibrates at 2.5bb / 10bb / 23bb; engine's discrete menu produces 2.5bb / 8.5bb / 22.3bb. The 3-bet sizing gap (10 vs 8.5) is the largest single contributor to BB-vs-RFI divergence per the validation doc."
+  ],
+  "validation_doc_links": [
+    "docs/preflop_100bb_chart_validation_2026-05-28.md",
+    "docs/preflop_100bb_chart_validation_v2_2026-05-28.md"
+  ]
+}
