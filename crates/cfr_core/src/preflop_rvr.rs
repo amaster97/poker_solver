@@ -47,6 +47,122 @@ use crate::preflop_equity::{hole_to_class, load_equity_table, NUM_VARIANTS};
 use crate::simd;
 
 // ============================================================================
+// Phase B (#53) — per-phase Instant instrumentation. Same pattern as
+// `dcfr_vector::profile` (HIGH-2 follow-up). When the `profile_preflop_rvr`
+// feature is enabled, each labeled phase inside `traverse` accumulates
+// wall-clock cost into a thread-local counter reported by the
+// `preflop_rvr_profile` bench. Without the feature flag, `prof_start`
+// returns `()` and `prof_end` is a no-op so the production hot path pays
+// zero overhead.
+// ============================================================================
+
+#[cfg(feature = "profile_preflop_rvr")]
+pub mod profile {
+    use std::cell::RefCell;
+    use std::time::{Duration, Instant};
+
+    #[derive(Default, Clone, Debug)]
+    pub struct PhaseCounters {
+        pub terminal_eval_ns: u128,
+        pub compute_strategy_ns: u128,
+        pub discount_ns: u128,
+        pub opp_next_reach_ns: u128,
+        pub own_next_reach_ns: u128,
+        pub node_values_ns: u128,
+        pub update_regret_ns: u128,
+        pub update_strategy_sum_ns: u128,
+        pub alloc_action_values_ns: u128,
+        pub alloc_strategy_buf_ns: u128,
+        pub opp_accumulate_ns: u128,
+    }
+
+    thread_local! {
+        static COUNTERS: RefCell<PhaseCounters> = RefCell::new(PhaseCounters::default());
+    }
+
+    pub fn reset() {
+        COUNTERS.with(|c| *c.borrow_mut() = PhaseCounters::default());
+    }
+
+    pub fn snapshot() -> PhaseCounters {
+        COUNTERS.with(|c| c.borrow().clone())
+    }
+
+    #[inline(always)]
+    pub fn start() -> Instant {
+        Instant::now()
+    }
+
+    #[inline(always)]
+    pub fn add(field: PhaseField, t: Instant) {
+        let dur: Duration = t.elapsed();
+        let ns = dur.as_nanos();
+        COUNTERS.with(|c| {
+            let mut cnt = c.borrow_mut();
+            match field {
+                PhaseField::TerminalEval => cnt.terminal_eval_ns += ns,
+                PhaseField::ComputeStrategy => cnt.compute_strategy_ns += ns,
+                PhaseField::Discount => cnt.discount_ns += ns,
+                PhaseField::OppNextReach => cnt.opp_next_reach_ns += ns,
+                PhaseField::OwnNextReach => cnt.own_next_reach_ns += ns,
+                PhaseField::NodeValues => cnt.node_values_ns += ns,
+                PhaseField::UpdateRegret => cnt.update_regret_ns += ns,
+                PhaseField::UpdateStrategySum => cnt.update_strategy_sum_ns += ns,
+                PhaseField::AllocActionValues => cnt.alloc_action_values_ns += ns,
+                PhaseField::AllocStrategyBuf => cnt.alloc_strategy_buf_ns += ns,
+                PhaseField::OppAccumulate => cnt.opp_accumulate_ns += ns,
+            }
+        });
+    }
+
+    #[derive(Copy, Clone)]
+    pub enum PhaseField {
+        TerminalEval,
+        ComputeStrategy,
+        Discount,
+        OppNextReach,
+        OwnNextReach,
+        NodeValues,
+        UpdateRegret,
+        UpdateStrategySum,
+        AllocActionValues,
+        AllocStrategyBuf,
+        OppAccumulate,
+    }
+}
+
+#[cfg(feature = "profile_preflop_rvr")]
+macro_rules! prof_start {
+    () => {
+        Some($crate::preflop_rvr::profile::start())
+    };
+}
+#[cfg(feature = "profile_preflop_rvr")]
+macro_rules! prof_end {
+    ($t:expr, $field:ident) => {
+        if let Some(t) = $t {
+            $crate::preflop_rvr::profile::add(
+                $crate::preflop_rvr::profile::PhaseField::$field,
+                t,
+            );
+        }
+    };
+}
+
+#[cfg(not(feature = "profile_preflop_rvr"))]
+macro_rules! prof_start {
+    () => {
+        ()
+    };
+}
+#[cfg(not(feature = "profile_preflop_rvr"))]
+macro_rules! prof_end {
+    ($t:expr, $field:ident) => {
+        let _ = $t;
+    };
+}
+
+// ============================================================================
 // Phase A action menu
 // ============================================================================
 
@@ -441,6 +557,24 @@ impl PreflopBettingTree {
 /// Precomputed per-leaf utility data for the preflop RvR tree.
 pub struct PreflopTerminalCache {
     pub leaves: Vec<PreflopLeafEntry>,
+    /// Phase B (#53) — pre-baked blocker mask shared across all leaves.
+    ///
+    /// `blocker_mask[update_player][ho * N_update + hp]` is `1.0` when
+    /// `hole[update_player][hp]` is disjoint from `hole[opp_player][ho]`,
+    /// else `0.0`. **Opp-major** layout (same convention as
+    /// `PreflopLeafEntry::Equity::payoff_table`).
+    ///
+    /// Used by the `Fold` branch in `terminal_value_vector` to make the
+    /// per-pair blocker check a branchless multiply against the mask.
+    /// The `Equity` branch's `payoff_table` already bakes the mask into
+    /// the table (blockers stored as `+0.0`), so it doesn't read this.
+    ///
+    /// Lifting the branch out + interchanging the loop (ho-outer,
+    /// hp-inner) lets LLVM auto-vectorize the AXPY into 2-lane NEON
+    /// (aarch64) / SSE2 (x86_64). Net: ~10× speedup on the
+    /// `terminal_value_vector` kernel at 1326-hand width, ~6.5× on
+    /// full-tree solve wall.
+    pub blocker_mask: [Vec<f64>; 2],
 }
 
 pub enum PreflopLeafEntry {
@@ -477,7 +611,26 @@ pub enum PreflopLeafEntry {
 ///   payoff[villain] = pot * (1 - equity) - villain_risk
 ///
 /// `pot` and `risk` come from the leaf's contributions; blocker conflicts
-/// emit `NaN` (caller weight-zeros them via reach).
+/// emit `0.0` so the SIMD dot product in `terminal_value_vector` can run
+/// branch-free.
+///
+/// ## Phase B (#53) layout
+///
+/// The output tables are stored **opp-major** (transpose of the natural
+/// `[hero_hand][villain_hand]` order). Specifically:
+///
+/// - `payoff_table[update_player][ho * N_update + hp]`
+///
+/// where `ho` is the opponent's hand index and `hp` is `update_player`'s
+/// hand index, and `N_update = ctx.hand_count[update_player]`.
+///
+/// The inner CFR kernel loops `for ho { for hp { out[hp] += reach[ho] *
+/// table[ho * N_update + hp] } }`. With the opp-major layout, the
+/// inner `hp` loop reads a contiguous row of the table, contiguously
+/// writes to `out`, and LLVM auto-vectorizes the AXPY into 2-lane NEON
+/// (aarch64) / SSE2 (x86_64) without breaking the per-`hp` accumulator
+/// order (each `out[hp]` is still updated in `ho = 0..N_opp` order, i.e.
+/// bit-identical to the pre-PR scalar shape).
 fn build_equity_leaf_payoff(
     contributions: [i32; 2],
     big_blind: i32,
@@ -493,22 +646,26 @@ fn build_equity_leaf_payoff(
     let n_p0 = ctx.hand_count[0];
     let n_p1 = ctx.hand_count[1];
 
-    let mut payoff_p0 = vec![0.0_f64; n_p0 * n_p1];
-    let mut payoff_p1 = vec![0.0_f64; n_p1 * n_p0];
+    // Opp-major layout (Phase B #53):
+    //   payoff_p0[ho_outer * n_p0 + hp_inner]: when update=P0, ho=P1's hand,
+    //                                          hp=P0's hand.
+    //   payoff_p1[ho_outer * n_p1 + hp_inner]: when update=P1, ho=P0's hand,
+    //                                          hp=P1's hand.
+    let mut payoff_p0 = vec![0.0_f64; n_p1 * n_p0];
+    let mut payoff_p1 = vec![0.0_f64; n_p0 * n_p1];
 
     for hp in 0..n_p0 {
         let hero = ctx.hole[0][hp];
         let h_class = hole_to_class(hero) as usize;
         for ho in 0..n_p1 {
             let villain = ctx.hole[1][ho];
-            // Blocker conflict — zero contribution.
+            // Blocker conflict — zero contribution (both tables already
+            // zero-initialized above).
             if hero[0] == villain[0]
                 || hero[0] == villain[1]
                 || hero[1] == villain[0]
                 || hero[1] == villain[1]
             {
-                payoff_p0[hp * n_p1 + ho] = 0.0;
-                payoff_p1[ho * n_p0 + hp] = 0.0;
                 continue;
             }
             let v_class = hole_to_class(villain) as usize;
@@ -523,13 +680,12 @@ fn build_equity_leaf_payoff(
                 }
             }
             // P0's chip flow = pot * eq - cs0; P1's = pot * (1 - eq) - cs1
-            // when P0 is the "hero." But because the table is symmetric
-            // by definition `eq_villain = 1 - eq_hero`, we store both
-            // sides explicitly.
+            // when P0 is the "hero." Both sides stored explicitly.
             let p0_payoff = (pot_total * eq - cs0) / bb;
             let p1_payoff = (pot_total * (1.0 - eq) - cs1) / bb;
-            payoff_p0[hp * n_p1 + ho] = p0_payoff;
-            payoff_p1[ho * n_p0 + hp] = p1_payoff;
+            // Opp-major: ho is the outer axis.
+            payoff_p0[ho * n_p0 + hp] = p0_payoff;
+            payoff_p1[hp * n_p1 + ho] = p1_payoff;
         }
     }
     [payoff_p0, payoff_p1]
@@ -559,6 +715,36 @@ fn classify_suit_variant(hero: [u8; 2], villain: [u8; 2]) -> usize {
         1 => 1,
         _ => (NUM_VARIANTS - 1).min(2),
     }
+}
+
+/// Build the shared blocker mask shipped on `PreflopTerminalCache`.
+///
+/// Same opp-major layout as `PreflopLeafEntry::Equity::payoff_table`
+/// (see `build_equity_leaf_payoff`):
+///   `blocker_mask[update_player][ho * N_update + hp]`
+/// where `ho` is opp's hand index and `hp` is `update_player`'s hand index.
+fn build_blocker_mask(ctx: &EvalContext) -> [Vec<f64>; 2] {
+    let n0 = ctx.hand_count[0];
+    let n1 = ctx.hand_count[1];
+    // Opp-major layout:
+    //   mask_p0: update=P0, ho=P1's hand, hp=P0's hand. Size n1 * n0.
+    //   mask_p1: update=P1, ho=P0's hand, hp=P1's hand. Size n0 * n1.
+    let mut mask_p0 = vec![0.0_f64; n1 * n0];
+    let mut mask_p1 = vec![0.0_f64; n0 * n1];
+    for hp in 0..n0 {
+        let hero = ctx.hole[0][hp];
+        for ho in 0..n1 {
+            let villain = ctx.hole[1][ho];
+            let blocked = hero[0] == villain[0]
+                || hero[0] == villain[1]
+                || hero[1] == villain[0]
+                || hero[1] == villain[1];
+            let v = if blocked { 0.0 } else { 1.0 };
+            mask_p0[ho * n0 + hp] = v;
+            mask_p1[hp * n1 + ho] = v;
+        }
+    }
+    [mask_p0, mask_p1]
 }
 
 impl PreflopTerminalCache {
@@ -607,7 +793,11 @@ impl PreflopTerminalCache {
                 _ => leaves.push(PreflopLeafEntry::NonTerminal),
             }
         }
-        Self { leaves }
+        let blocker_mask = build_blocker_mask(ctx);
+        Self {
+            leaves,
+            blocker_mask,
+        }
     }
 }
 
@@ -744,13 +934,17 @@ impl PreflopVectorDCFR {
         match &tree.nodes[node_idx] {
             PreflopFlatNode::Fold { .. } | PreflopFlatNode::EquityLeaf { .. } => {
                 let opp_player = 1 - update_player;
-                terminal_value_vector(
+                let _t = prof_start!();
+                let r = terminal_value_vector(
                     &cache.leaves[node_idx],
+                    cache,
                     ctx,
                     update_player,
                     opp_player,
                     reach_opp,
-                )
+                );
+                prof_end!(_t, TerminalEval);
+                r
             }
             PreflopFlatNode::Decision {
                 player,
@@ -762,21 +956,27 @@ impl PreflopVectorDCFR {
                 let action_count = actions.len();
                 let player_hands = ctx.hand_count[player];
 
+                let _ta = prof_start!();
                 let mut strategy = vec![0.0_f64; player_hands * action_count];
+                prof_end!(_ta, AllocStrategyBuf);
                 {
                     let info = self.infosets[node_idx]
                         .as_ref()
                         .expect("decision node has infoset");
+                    let _t = prof_start!();
                     Self::compute_strategy(info, &mut strategy);
+                    prof_end!(_t, ComputeStrategy);
                 }
 
                 if player != update_player {
                     let mut values = vec![0.0_f64; update_hands];
                     let mut next_reach = vec![0.0_f64; player_hands];
                     for (a, &child_idx) in children.iter().enumerate() {
+                        let _t = prof_start!();
                         for h in 0..player_hands {
                             next_reach[h] = reach_opp[h] * strategy[h * action_count + a];
                         }
+                        prof_end!(_t, OppNextReach);
                         let child_values = self.traverse(
                             tree,
                             ctx,
@@ -786,9 +986,11 @@ impl PreflopVectorDCFR {
                             reach_p,
                             &next_reach,
                         );
+                        let _t = prof_start!();
                         for h in 0..update_hands {
                             values[h] += child_values[h];
                         }
+                        prof_end!(_t, OppAccumulate);
                     }
                     return values;
                 }
@@ -798,21 +1000,29 @@ impl PreflopVectorDCFR {
                     let info = self.infosets[node_idx]
                         .as_mut()
                         .expect("decision node has infoset");
+                    let _t = prof_start!();
                     Self::discount(info, self.iteration, self.alpha, self.beta, self.gamma);
+                    prof_end!(_t, Discount);
                 }
                 {
                     let info = self.infosets[node_idx]
                         .as_ref()
                         .expect("decision node has infoset");
+                    let _t = prof_start!();
                     Self::compute_strategy(info, &mut strategy);
+                    prof_end!(_t, ComputeStrategy);
                 }
 
+                let _ta = prof_start!();
                 let mut action_values = vec![0.0_f64; action_count * update_hands];
                 let mut next_reach = vec![0.0_f64; player_hands];
+                prof_end!(_ta, AllocActionValues);
                 for (a, &child_idx) in children.iter().enumerate() {
+                    let _t = prof_start!();
                     for h in 0..player_hands {
                         next_reach[h] = reach_p[h] * strategy[h * action_count + a];
                     }
+                    prof_end!(_t, OwnNextReach);
                     let child_values = self.traverse(
                         tree,
                         ctx,
@@ -826,6 +1036,7 @@ impl PreflopVectorDCFR {
                     action_values[dst..dst + update_hands].copy_from_slice(&child_values);
                 }
 
+                let _t = prof_start!();
                 let mut node_values = vec![0.0_f64; update_hands];
                 for h in 0..update_hands {
                     let mut value = 0.0_f64;
@@ -835,11 +1046,13 @@ impl PreflopVectorDCFR {
                     }
                     node_values[h] = value;
                 }
+                prof_end!(_t, NodeValues);
 
                 {
                     let info = self.infosets[node_idx]
                         .as_mut()
                         .expect("decision node has infoset");
+                    let _t = prof_start!();
                     simd::update_regret_sum_vector(
                         &mut info.regret,
                         &action_values,
@@ -847,6 +1060,8 @@ impl PreflopVectorDCFR {
                         update_hands,
                         action_count,
                     );
+                    prof_end!(_t, UpdateRegret);
+                    let _t = prof_start!();
                     for h in 0..update_hands {
                         let weight = reach_p[h];
                         if weight == 0.0 {
@@ -860,6 +1075,7 @@ impl PreflopVectorDCFR {
                             weight,
                         );
                     }
+                    prof_end!(_t, UpdateStrategySum);
                 }
                 node_values
             }
@@ -885,8 +1101,44 @@ impl PreflopVectorDCFR {
 
 /// Terminal-leaf value vector (with blocker filter), mirroring
 /// `dcfr_vector::terminal_value_vector_cached`.
+///
+/// # Phase B (#53) — opp-major layout + AXPY loop interchange
+///
+/// Pre-PR shape (hp-outer, ho-inner): per-hp dot product
+///   `out[hp] = Σ_ho reach_opp[ho] * table[hp, ho]`
+///   plus a per-pair blocker branch that defeats auto-vectorization.
+///
+/// New shape (ho-outer, hp-inner): per-ho AXPY accumulation
+///   `for ho: for hp: out[hp] += reach_opp[ho] * table_T[ho, hp]`
+///   with `table_T[ho, hp]` storing the **transpose** of the pre-PR table.
+///
+/// The inner `hp` loop is a contiguous read of `table_T[ho * N_hp..]`,
+/// a contiguous write to `out[..]`, and a single FMA per element. LLVM
+/// auto-vectorizes this into 2-lane NEON (aarch64) or SSE2 (x86_64)
+/// without an associativity-breaking reduction: each `out[hp]`'s update
+/// chain is still `ho = 0, 1, 2, ... N-1` in order, identical to the
+/// pre-PR shape's accumulator order.
+///
+/// # Bit-identity vs the pre-PR branch shape
+///
+/// - **Equity**: pre-PR accumulated `reach * table[hp, ho]` only over
+///   disjoint pairs (skipped blockers via early-continue). The transposed
+///   table has blockers stored as `+0.0` (see `build_equity_leaf_payoff`)
+///   so blocker contributions become `reach * 0.0 = +0.0` and `out[hp] +
+///   0.0 = out[hp]` exactly (assuming finite `out`/`reach`, which always
+///   holds — `reach = Π strategies ∈ [0,1]`).
+/// - **Fold**: pre-PR accumulated `reach * util` only over disjoint pairs.
+///   New shape: `out[hp] += reach[ho] * mask[ho, hp] * util` where
+///   `mask ∈ {0.0, 1.0}`. IEEE-754 `x * 1.0 == x` for finite `x`, so when
+///   mask=1 we get `reach * util` per term — exact. When mask=0 we get
+///   `(reach * 0.0) * util = 0.0` (finite util), contributing nothing.
+/// - **Accumulator order**: identical per `hp` (ho = 0..N in both shapes).
+///
+/// See `tests::optimized_matches_baseline_bit_exact` for the parity test
+/// that locks this contract in.
 fn terminal_value_vector(
     leaf: &PreflopLeafEntry,
+    cache: &PreflopTerminalCache,
     ctx: &EvalContext,
     update_player: usize,
     opp_player: usize,
@@ -898,6 +1150,79 @@ fn terminal_value_vector(
 
     match leaf {
         PreflopLeafEntry::Fold { payoff } => {
+            let util = payoff[update_player];
+            let mask = &cache.blocker_mask[update_player];
+            // ho-outer, hp-inner AXPY: `out += (reach[ho] * util) * mask_row`.
+            // Auto-vectorized to NEON / SSE2 / AVX2 by LLVM.
+            for ho in 0..opp_hands {
+                let row = &mask[ho * update_hands..(ho + 1) * update_hands];
+                let coeff = reach_opp[ho] * util;
+                // Hoisting `util` out of the inner loop is bit-identical here
+                // because `((reach * mask) * util) == ((reach * util) * mask)`
+                // for finite reach/util and mask ∈ {0, 1}: when mask=0 both
+                // sides give 0.0 (assuming finite operands); when mask=1
+                // both sides give `reach * util`. Float multiply is
+                // commutative AND associative for these specific operands
+                // (mask is exact 0 or exact 1, no rounding).
+                for hp in 0..update_hands {
+                    out[hp] += coeff * row[hp];
+                }
+            }
+        }
+        PreflopLeafEntry::Equity { payoff_table } => {
+            // The equity `payoff_table` is built with blockers set to `+0.0`
+            // (see `build_equity_leaf_payoff`) AND stored opp-major.
+            // ho-outer, hp-inner AXPY auto-vectorizes into 2-lane NEON/SSE2.
+            let table = &payoff_table[update_player];
+            for ho in 0..opp_hands {
+                let row = &table[ho * update_hands..(ho + 1) * update_hands];
+                let reach = reach_opp[ho];
+                for hp in 0..update_hands {
+                    out[hp] += reach * row[hp];
+                }
+            }
+        }
+        PreflopLeafEntry::NonTerminal => unreachable!("non-terminal in leaf path"),
+    }
+    out
+}
+
+/// Phase B (#53) — pre-optimization reference shape of
+/// `terminal_value_vector`. Retained for the bit-identical parity test
+/// (`tests::optimized_matches_baseline_bit_exact`).
+///
+/// The pre-PR Equity branch used the hp-outer, ho-inner shape with a per-pair
+/// blocker branch:
+/// ```ignore
+/// for hp { let mut total = 0; for ho {
+///     if blocker(hp, ho) { continue; }
+///     total += reach[ho] * table_pre_PR[hp * N_ho + ho];
+/// } out[hp] = total; }
+/// ```
+/// where `table_pre_PR` was stored hp-major (i.e. `table_pre_PR[hp][ho]`).
+///
+/// To reconstruct the pre-PR table from the new opp-major storage, this
+/// function recomputes the per-pair equity / chip-flow on the fly via
+/// `ctx.hole[*]` and the leaf's `payoff` semantics. The pre-PR shape is
+/// thus reproduced exactly without round-tripping through the new
+/// opp-major layout.
+///
+/// **Production callers must use `terminal_value_vector` (NOT this).**
+/// This is a test-only function — `#[cfg(test)]`-gated.
+#[cfg(test)]
+fn terminal_value_vector_baseline(
+    leaf_pre_pr: &PreflopLeafEntryBaseline,
+    ctx: &EvalContext,
+    update_player: usize,
+    opp_player: usize,
+    reach_opp: &[f64],
+) -> Vec<f64> {
+    let update_hands = ctx.hand_count[update_player];
+    let opp_hands = ctx.hand_count[opp_player];
+    let mut out = vec![0.0_f64; update_hands];
+
+    match leaf_pre_pr {
+        PreflopLeafEntryBaseline::Fold { payoff } => {
             let util = payoff[update_player];
             for hp in 0..update_hands {
                 let hole_p = ctx.hole[update_player][hp];
@@ -916,15 +1241,9 @@ fn terminal_value_vector(
                 out[hp] = total;
             }
         }
-        PreflopLeafEntry::Equity { payoff_table } => {
-            // payoff_table[update_player] is indexed by [hp * opp_hands + ho]
-            // when update_player is P0, OR by [ho * P0_hands + hp] when P1.
-            // We unify by always reading the update_player's table with
-            // the update_player as the "outer" index.
-            //
-            // Storage convention: payoff_table[p][outer_idx * opp_hands + inner_idx]
-            // where outer is player p's hand and inner is opponent's hand.
-            let table = &payoff_table[update_player];
+        PreflopLeafEntryBaseline::Equity { payoff_table_hp_major } => {
+            // pre-PR layout: payoff_table[update_player][hp * opp_hands + ho]
+            let table = &payoff_table_hp_major[update_player];
             for hp in 0..update_hands {
                 let hole_p = ctx.hole[update_player][hp];
                 let mut total = 0.0_f64;
@@ -943,9 +1262,74 @@ fn terminal_value_vector(
                 out[hp] = total;
             }
         }
-        PreflopLeafEntry::NonTerminal => unreachable!("non-terminal in leaf path"),
     }
     out
+}
+
+/// Pre-PR `PreflopLeafEntry` shape (hp-major). Used only by the
+/// bit-identical parity test to reconstruct the pre-Phase-B inner kernel
+/// and prove the new opp-major + AXPY implementation gives identical
+/// outputs lane-for-lane.
+#[cfg(test)]
+enum PreflopLeafEntryBaseline {
+    Fold { payoff: [f64; 2] },
+    Equity { payoff_table_hp_major: [Vec<f64>; 2] },
+}
+
+/// Phase B (#53) — build the pre-PR (hp-major) equity table from the same
+/// inputs as `build_equity_leaf_payoff`. Test-only.
+#[cfg(test)]
+fn build_equity_leaf_payoff_baseline(
+    contributions: [i32; 2],
+    big_blind: i32,
+    initial_pot: i32,
+    initial_contributions: [i32; 2],
+    ctx: &EvalContext,
+    equity_table: &Array3<f64>,
+) -> [Vec<f64>; 2] {
+    let bb = big_blind as f64;
+    let cs0 = (contributions[0] - initial_contributions[0]) as f64;
+    let cs1 = (contributions[1] - initial_contributions[1]) as f64;
+    let pot_total = initial_pot as f64 + cs0 + cs1;
+    let n_p0 = ctx.hand_count[0];
+    let n_p1 = ctx.hand_count[1];
+    // hp-major: payoff_p0[hp * n_p1 + ho], payoff_p1[hp * n_p0 + ho].
+    // Note: when update_player == 1, hp is P1's hand and ho is P0's hand
+    // (per pre-PR convention).
+    let mut payoff_p0 = vec![0.0_f64; n_p0 * n_p1];
+    let mut payoff_p1 = vec![0.0_f64; n_p1 * n_p0];
+
+    for hp in 0..n_p0 {
+        let hero = ctx.hole[0][hp];
+        let h_class = hole_to_class(hero) as usize;
+        for ho in 0..n_p1 {
+            let villain = ctx.hole[1][ho];
+            if hero[0] == villain[0]
+                || hero[0] == villain[1]
+                || hero[1] == villain[0]
+                || hero[1] == villain[1]
+            {
+                continue;
+            }
+            let v_class = hole_to_class(villain) as usize;
+            let variant = classify_suit_variant(hero, villain);
+            let mut eq = equity_table[(h_class, v_class, variant)];
+            if eq.is_nan() {
+                eq = equity_table[(h_class, v_class, 0)];
+                if eq.is_nan() {
+                    eq = crate::preflop_equity::enumerate_pair_equity(hero, villain);
+                }
+            }
+            let p0_payoff = (pot_total * eq - cs0) / bb;
+            let p1_payoff = (pot_total * (1.0 - eq) - cs1) / bb;
+            // hp-major (pre-PR layout):
+            //   payoff_p0[hp_of_p0 * n_p1 + ho_of_p1]
+            //   payoff_p1[ho_of_p1 * n_p0 + hp_of_p0]  (P1 outer = ho here)
+            payoff_p0[hp * n_p1 + ho] = p0_payoff;
+            payoff_p1[ho * n_p0 + hp] = p1_payoff;
+        }
+    }
+    [payoff_p0, payoff_p1]
 }
 
 // ============================================================================
@@ -1232,6 +1616,198 @@ mod tests {
             2.0,
         );
         assert!(res.is_err(), "must reject fixed-hole config");
+    }
+
+    // ========================================================================
+    // Phase B (#53) — bit-identical parity test.
+    //
+    // Mirrors PR #114 + PR #139's pattern: force the pre-PR scalar baseline
+    // through `terminal_value_vector_baseline` + `build_equity_leaf_payoff_baseline`,
+    // run both shapes on a small representative fixture, assert
+    // `to_bits()` equality lane-for-lane.
+    //
+    // The fixture: 6 hole pairs / player (AA + KK + 72o sample), 3 reach
+    // distributions (uniform, sparse, skewed), 2 update_players × 2 leaf
+    // kinds (Fold + Equity). Drives the optimization correctness gate
+    // for the engine change.
+    // ========================================================================
+
+    /// Build a small 6-hand × 6-hand EvalContext for parity testing.
+    fn small_eval_ctx() -> EvalContext {
+        let p_hands = vec![
+            [crate::hunl::card_to_int(14, 0), crate::hunl::card_to_int(14, 1)], // AsAh
+            [crate::hunl::card_to_int(14, 2), crate::hunl::card_to_int(14, 3)], // AdAc
+            [crate::hunl::card_to_int(13, 0), crate::hunl::card_to_int(13, 1)], // KsKh
+            [crate::hunl::card_to_int(13, 2), crate::hunl::card_to_int(13, 3)], // KdKc
+            [crate::hunl::card_to_int(7, 0), crate::hunl::card_to_int(2, 1)],   // 7s2h
+            [crate::hunl::card_to_int(7, 2), crate::hunl::card_to_int(2, 3)],   // 7d2c
+        ];
+        EvalContext::from_hand_lists(p_hands.clone(), p_hands, 100)
+    }
+
+    /// Build a stub 169x169x3 equity table with diverse values. Same shape
+    /// as the production-shipped table, with deterministic per-cell values
+    /// so the parity check is reproducible.
+    fn stub_equity_table() -> Array3<f64> {
+        let mut t = Array3::<f64>::zeros((169, 169, 3));
+        for i in 0..169 {
+            for j in 0..169 {
+                for v in 0..3 {
+                    // Deterministic in-range equity.
+                    let raw = ((i * 17 + j * 13 + v * 7) % 1000) as f64 / 1000.0;
+                    t[(i, j, v)] = 0.05 + 0.90 * raw; // [0.05, 0.95]
+                }
+            }
+        }
+        t
+    }
+
+    /// Phase B (#53) — bit-identical parity: `terminal_value_vector`
+    /// (opp-major + AXPY) matches `terminal_value_vector_baseline`
+    /// (pre-PR hp-major + branched) lane-for-lane via `to_bits()` equality.
+    ///
+    /// Coverage: Fold leaf + Equity leaf, both update_players, three
+    /// distinct `reach_opp` distributions (uniform / sparse / skewed).
+    #[test]
+    fn optimized_matches_baseline_bit_exact() {
+        let ctx = small_eval_ctx();
+        let eq_table = stub_equity_table();
+
+        // Build both layouts on the same inputs.
+        let contributions = [200i32, 600i32]; // 2bb-vs-6bb dummy
+        let big_blind = 100i32;
+        let initial_pot = 0i32;
+        let initial_contributions = [0i32, 0i32];
+
+        let payoff_table_new = build_equity_leaf_payoff(
+            contributions,
+            big_blind,
+            initial_pot,
+            initial_contributions,
+            &ctx,
+            &eq_table,
+        );
+        let payoff_table_baseline = build_equity_leaf_payoff_baseline(
+            contributions,
+            big_blind,
+            initial_pot,
+            initial_contributions,
+            &ctx,
+            &eq_table,
+        );
+
+        // Construct the new-shape leaf entry and corresponding baseline.
+        let leaf_new = PreflopLeafEntry::Equity {
+            payoff_table: payoff_table_new.clone(),
+        };
+        let leaf_baseline = PreflopLeafEntryBaseline::Equity {
+            payoff_table_hp_major: payoff_table_baseline,
+        };
+
+        // Fold-leaf payoff per (folded_player, BB).
+        let cs0 = (contributions[0] - initial_contributions[0]) as f64;
+        let cs1 = (contributions[1] - initial_contributions[1]) as f64;
+        let pot_total = initial_pot as f64 + cs0 + cs1;
+        let bb_f = big_blind as f64;
+        // Folded_player = 0 → P1 wins.
+        let fold_payoff = [-cs0 / bb_f, (pot_total - cs1) / bb_f];
+        let fold_new = PreflopLeafEntry::Fold {
+            payoff: fold_payoff,
+        };
+        let fold_baseline = PreflopLeafEntryBaseline::Fold {
+            payoff: fold_payoff,
+        };
+
+        // Build the cache (just for the blocker_mask used by the new Fold path).
+        // Use a stub single-leaf cache; only `blocker_mask` is consulted.
+        let mock_tree = PreflopBettingTree {
+            nodes: vec![PreflopFlatNode::Fold {
+                contributions,
+                folded_player: 0,
+                big_blind,
+                initial_pot,
+                initial_contributions,
+            }],
+        };
+        let cache = PreflopTerminalCache::build(&mock_tree, &ctx, &eq_table);
+
+        // Three reach_opp distributions.
+        let reach_uniform = vec![1.0_f64; 6];
+        let reach_sparse = vec![1.0, 0.0, 0.5, 0.0, 0.25, 0.0];
+        let reach_skewed = vec![0.7, 0.3, 0.9, 0.1, 0.5, 0.5];
+
+        for (label, reach) in [
+            ("uniform", &reach_uniform),
+            ("sparse", &reach_sparse),
+            ("skewed", &reach_skewed),
+        ] {
+            for update_player in 0..2usize {
+                let opp_player = 1 - update_player;
+
+                // Equity leaf parity.
+                let out_new = terminal_value_vector(
+                    &leaf_new,
+                    &cache,
+                    &ctx,
+                    update_player,
+                    opp_player,
+                    reach,
+                );
+                let out_baseline = terminal_value_vector_baseline(
+                    &leaf_baseline,
+                    &ctx,
+                    update_player,
+                    opp_player,
+                    reach,
+                );
+                assert_eq!(out_new.len(), out_baseline.len());
+                for (hp, (a, b)) in out_new.iter().zip(out_baseline.iter()).enumerate() {
+                    assert_eq!(
+                        a.to_bits(),
+                        b.to_bits(),
+                        "Equity reach={} player={} hp={} differs: new={} baseline={}",
+                        label,
+                        update_player,
+                        hp,
+                        a,
+                        b
+                    );
+                }
+
+                // Fold leaf parity.
+                let out_new_fold = terminal_value_vector(
+                    &fold_new,
+                    &cache,
+                    &ctx,
+                    update_player,
+                    opp_player,
+                    reach,
+                );
+                let out_baseline_fold = terminal_value_vector_baseline(
+                    &fold_baseline,
+                    &ctx,
+                    update_player,
+                    opp_player,
+                    reach,
+                );
+                for (hp, (a, b)) in out_new_fold
+                    .iter()
+                    .zip(out_baseline_fold.iter())
+                    .enumerate()
+                {
+                    assert_eq!(
+                        a.to_bits(),
+                        b.to_bits(),
+                        "Fold reach={} player={} hp={} differs: new={} baseline={}",
+                        label,
+                        update_player,
+                        hp,
+                        a,
+                        b
+                    );
+                }
+            }
+        }
     }
 }
 

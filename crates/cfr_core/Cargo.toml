@@ -35,6 +35,11 @@ force_scalar = []
 # production hot path).
 profile_rvr = []
 
+# Phase B (#53) — per-phase Instant instrumentation inside
+# `preflop_rvr::traverse`. Mirrors `profile_rvr` for the preflop full-tree
+# engine. Used by `preflop_rvr_profile` bench; compiles to no-ops otherwise.
+profile_preflop_rvr = []
+
 [dependencies]
 pyo3 = { version = "0.23" }
 # PR 6 — HUNL postflop port additions. All MIT/Apache 2.0 dual-licensed;
@@ -67,3 +72,10 @@ path = "benches/dcfr_bench.rs"
 name = "rvr_profile"
 harness = false
 path = "benches/rvr_profile.rs"
+
+# Phase B (task #53) — preflop full-tree RvR per-phase profile bench.
+# Run with `cargo bench --bench preflop_rvr_profile --features profile_preflop_rvr`.
+[[bench]]
+name = "preflop_rvr_profile"
+harness = false
+path = "benches/preflop_rvr_profile.rs"
