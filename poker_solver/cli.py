@@ -803,13 +803,106 @@ def _cmd_river(args: argparse.Namespace) -> int:
     v1.8.2 — new presentation modes via ``--walk-tree`` / ``--node`` /
     ``--format``. With NO new flags, the legacy first-decision aggregate
     output is preserved byte-for-byte (backward-compat invariant).
+
+    Task #51 — kept as a thin wrapper that delegates to
+    ``_run_subgame_solve`` with the river street pinned. The new
+    ``subgame`` subcommand generalizes this to flop/turn/river; the
+    ``river`` command remains a deprecated-but-functional alias so
+    existing scripts (USAGE.md §7a, fixture invocations) keep working.
+    """
+    from poker_solver.hunl import Street
+
+    # ``show_street_line=False`` preserves the legacy ``river`` preamble
+    # byte-for-byte (no extra "Street: river" line). The ``subgame`` command
+    # opts in.
+    return _run_subgame_solve(args, street=Street.RIVER, show_street_line=False)
+
+
+def _cmd_subgame(args: argparse.Namespace) -> int:
+    """Task #51 — generalized subgame solve for flop/turn/river.
+
+    Same engine + presentation pipeline as ``river``, parameterized on
+    ``--street`` so the user can solve any postflop spot from the same CLI
+    entry point. ``solve_hunl_postflop`` already supports all three streets
+    via ``starting_street`` + ``initial_board`` (3/4/5 cards = flop/turn/
+    river); this is purely a CLI surface that picks the right ``Street``
+    enum and asserts the board-card count matches the requested street.
+
+    Sample usage::
+
+        poker-solver subgame --street flop --board "As 7c 2d" \\
+            --hero AhKh --villain-range "QQ,JJ,AKs" --iters 200
+        poker-solver subgame --street turn --board "As 7c 2d Kh" \\
+            --hero AhKh --villain-range "QQ" --iters 50
+        poker-solver subgame --street river --board "As 7c 2d Kh 5s" \\
+            --hero AhKh --villain-range "QQ" --iters 50
+
+    All v1.8.2 presentation knobs (``--walk-tree`` / ``--node`` /
+    ``--format``) work uniformly across streets.
+    """
+    from poker_solver.hunl import Street
+
+    street_map = {
+        "flop": Street.FLOP,
+        "turn": Street.TURN,
+        "river": Street.RIVER,
+    }
+    street_name = str(getattr(args, "street", "river")).lower()
+    if street_name not in street_map:
+        raise ValueError(
+            f"--street must be one of flop/turn/river; got {street_name!r}"
+        )
+    return _run_subgame_solve(
+        args, street=street_map[street_name], show_street_line=True
+    )
+
+
+def _expected_board_count(street) -> int:
+    """Number of board cards required for ``street`` (flop=3, turn=4, river=5)."""
+    from poker_solver.hunl import Street
+
+    if street == Street.FLOP:
+        return 3
+    if street == Street.TURN:
+        return 4
+    if street == Street.RIVER:
+        return 5
+    raise ValueError(f"unsupported subgame street: {street!r}")
+
+
+def _run_subgame_solve(
+    args: argparse.Namespace, *, street, show_street_line: bool = True
+) -> int:
+    """Shared core for ``river`` (deprecated alias) and ``subgame`` (#51).
+
+    Loops the villain range, runs ``solve_hunl_postflop`` for each combo
+    with hero hole cards pinned and the requested ``starting_street``,
+    then either emits the legacy first-decision aggregate (default) or
+    routes into the v1.8.2 walk-tree / drill-down / JSON / CSV formatters
+    when one of the new flags is set.
+
+    ``show_street_line`` gates the new ``"Street: <name>"`` preamble line.
+    The ``river`` alias passes ``False`` to keep its v1.8.2 output exactly
+    as it shipped (the walk-tree tests assert no new markers in default
+    mode); ``subgame`` passes ``True`` so the user can see which street
+    was solved.
     """
     from poker_solver.hunl import HUNLConfig, HUNLPoker, Street
     from poker_solver.hunl_solver import solve_hunl_postflop
 
+    expected_count = _expected_board_count(street)
+    street_label = {
+        Street.FLOP: "flop",
+        Street.TURN: "turn",
+        Street.RIVER: "river",
+    }[street]
+
     board_cards = parse_board(args.board)
-    if len(board_cards) != 5:
-        raise ValueError(f"--board must specify 5 river cards; got {len(board_cards)}")
+    if len(board_cards) != expected_count:
+        raise ValueError(
+            f"--board must specify {expected_count} {street_label} card"
+            f"{'s' if expected_count != 1 else ''}; got {len(board_cards)}"
+        )
 
     hero_cards = parse_hand(args.hero)
     if len(hero_cards) != 2:
@@ -839,7 +932,7 @@ def _cmd_river(args: argparse.Namespace) -> int:
             "in --villain-range shares a card with hero or the board)."
         )
 
-    # Per-spot accounting: 100 BB symmetric, dead-money river pot of 10 BB
+    # Per-spot accounting: 100 BB symmetric, dead-money pot of 10 BB
     # (matches the USAGE.md §3b convention; users can rebuild a custom config
     # in Python for non-standard stacks).
     big_blind = 100
@@ -865,6 +958,8 @@ def _cmd_river(args: argparse.Namespace) -> int:
     # CSV modes suppress preamble so the output is parser-friendly.
     if fmt == "text":
         print(f"Board:        {' '.join(str(c) for c in board_cards)}")
+        if show_street_line:
+            print(f"Street:       {street_label}")
         print(f"Hero:         {' '.join(str(c) for c in hero_pair)}")
         print(
             f"Villain range: {args.villain_range} "
@@ -888,7 +983,7 @@ def _cmd_river(args: argparse.Namespace) -> int:
             starting_stack=starting_stack,
             small_blind=big_blind // 2,
             big_blind=big_blind,
-            starting_street=Street.RIVER,
+            starting_street=street,
             initial_board=tuple(board_cards),
             initial_pot=initial_pot,
             initial_contributions=(half, half),
@@ -1685,7 +1780,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     rv = sub.add_parser(
         "river",
-        help="Solve a river spot with fixed hero cards vs a villain range.",
+        help=(
+            "Solve a river spot with fixed hero cards vs a villain range. "
+            "[DEPRECATED] Use 'subgame --street river ...' for new scripts; "
+            "this alias is retained for backward compat (task #51)."
+        ),
     )
     rv.add_argument(
         "--board",
@@ -1783,6 +1882,128 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     rv.set_defaults(func=_cmd_river)
+
+    # ---- Task #51: generalized subgame command for flop/turn/river ----
+    # The engine's ``solve_hunl_postflop`` already supports all postflop
+    # streets via ``starting_street`` + ``initial_board`` (3/4/5 cards =
+    # flop/turn/river); this is purely a CLI surface that lets the user
+    # pick the street explicitly. The legacy ``river`` subcommand
+    # continues to work as a deprecated-but-functional alias so existing
+    # scripts don't break.
+    sg = sub.add_parser(
+        "subgame",
+        help=(
+            "Solve a postflop subgame (flop/turn/river) with fixed hero "
+            "cards vs a villain range. Generalizes the deprecated `river` "
+            "command (task #51)."
+        ),
+    )
+    sg.add_argument(
+        "--street",
+        choices=("flop", "turn", "river"),
+        required=True,
+        help=(
+            "Which postflop street to solve. The --board card count must "
+            "match: 3 for flop, 4 for turn, 5 for river."
+        ),
+    )
+    sg.add_argument(
+        "--board",
+        type=str,
+        required=True,
+        help=(
+            "Community cards: 3 for flop ('As 7c 2d'), 4 for turn "
+            "('As 7c 2d Kh'), 5 for river ('As 7c 2d Kh 5s')."
+        ),
+    )
+    sg.add_argument(
+        "--hero",
+        type=str,
+        required=True,
+        help="Hero's 2-card hole, e.g. 'AhKh'.",
+    )
+    sg.add_argument(
+        "--villain-range",
+        type=str,
+        required=True,
+        help="Villain range in PioSolver notation, e.g. 'QQ,JJ,AKs'.",
+    )
+    sg.add_argument(
+        "--iters",
+        type=int,
+        default=200,
+        help="DCFR iterations per per-combo solve (default: 200).",
+    )
+    sg.add_argument(
+        "--pot-bb",
+        type=int,
+        default=10,
+        help="Starting pot in BB (default: 10).",
+    )
+    sg.add_argument(
+        "--stack-bb",
+        type=int,
+        default=100,
+        help="Per-player effective stack in BB (default: 100).",
+    )
+    # v1.8.2 — tree-walk presentation modes (same set as `river`).
+    sg.add_argument(
+        "--walk-tree",
+        action="store_true",
+        help=(
+            "Walk the full decision tree and print every on-path node "
+            "(reach prob > 1e-4) with action-label decoding and ASCII bar "
+            "charts. Default: off (legacy first-decision aggregate)."
+        ),
+    )
+    sg.add_argument(
+        "--full-tree",
+        action="store_true",
+        help=(
+            "When combined with --walk-tree, also emit off-path phantom "
+            "nodes (reach prob <= 1e-4) marked [OFF-PATH]. Default: off."
+        ),
+    )
+    sg.add_argument(
+        "--node",
+        type=str,
+        default=None,
+        help=(
+            "Drill into a specific decision node by its history string "
+            "(e.g. 'xb750' = villain checks, hero bets 750). For range "
+            "queries, prints per-hand-class strategy at that node."
+        ),
+    )
+    sg.add_argument(
+        "--top-n",
+        type=int,
+        default=12,
+        help=(
+            "When --node selects a per-class drill-down, show only the "
+            "top-N hand classes by Shannon entropy (mixing hands ranked "
+            "first). Default: 12."
+        ),
+    )
+    sg.add_argument(
+        "--full-classes",
+        action="store_true",
+        help=(
+            "With --node, show ALL hand classes (no top-N truncation). "
+            "Default: off."
+        ),
+    )
+    sg.add_argument(
+        "--format",
+        choices=("text", "json", "csv"),
+        default="text",
+        help=(
+            "Output format. 'text' (default) prints the pretty tree; "
+            "'json' dumps the full strategy dict per combo/node/action; "
+            "'csv' emits (combo, node_history, action_label, probability, "
+            "reach_prob) rows with a header."
+        ),
+    )
+    sg.set_defaults(func=_cmd_subgame)
 
     pp = sub.add_parser(
         "parity",
