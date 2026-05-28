@@ -149,6 +149,13 @@ class CellSummary:
     every combo of a class is blocked by the board the cell renders as
     ``blocked``; when total weight is 0 the cell renders as
     ``out_of_range`` (faded grey em-dash per spec §3.3).
+
+    ``avg_weight`` (B10 Phase C) is the mean per-combo intensity across
+    the surviving (non-blocker) combos in the class. All-1.0 ranges have
+    ``avg_weight == 1.0``; a class with two combos at 1.0 and two at 0.0
+    contributes ``avg_weight == 0.5``. The matrix renderer fades the
+    cell color toward grey when this value drops below 1.0 so users can
+    see fractional ranges at a glance.
     """
 
     fold: float = 0.0
@@ -161,6 +168,9 @@ class CellSummary:
     # True when ANY combo in the class is board-blocked, even if other
     # combos survive (smoke 15 / pr10a_spec.md §10.3 item 15).
     has_blocker: bool = False
+    # B10 Phase C: avg per-combo weight across survivors; used by
+    # ``cell_color`` to fade fractional ranges toward grey.
+    avg_weight: float = 1.0
 
 
 # Duck-typed snapshot interface (see prompt comment): ``infoset_key`` is
@@ -269,6 +279,7 @@ def cell_strategy_summary(
     survivors = 0
     in_range_total = 0
     all_blocked = True
+    survivor_weight_sum = 0.0  # B10 Phase C: track raw weights of survivors
 
     for combo in combos:
         weight = float(range_.frequency_of(combo))
@@ -280,6 +291,7 @@ def cell_strategy_summary(
             continue
         all_blocked = False
         survivors += 1
+        survivor_weight_sum += weight
         if state is None or not legal_actions:
             # No game-state context -> can only report combo count.
             total_weight += weight
@@ -303,6 +315,11 @@ def cell_strategy_summary(
         summary.combo_count = 0
         return summary
     summary.combo_count = survivors
+    # B10 Phase C: mean per-combo weight across survivors. By construction
+    # ``0 < survivor_weight_sum`` here (every survivor contributed
+    # ``weight > 0``), so the divide is safe. All-1.0 ranges yield 1.0.
+    if survivors > 0:
+        summary.avg_weight = max(0.0, min(1.0, survivor_weight_sum / survivors))
     if total_weight > 0.0:
         summary.fold = weighted_fold / total_weight
         summary.call = weighted_call / total_weight
@@ -405,6 +422,12 @@ def cell_color(summary: CellSummary) -> str:
         g = fold*40  + call*200 + raise_*180
         b = fold*40  + call*40  + raise_*60
     Blocked / empty / out-of-range cells return the faded-grey sentinel.
+
+    B10 Phase C: when ``summary.avg_weight < 1.0`` the cell saturates
+    toward the faded-grey sentinel (``#3a3a3a``, ~``(58, 58, 58)``)
+    proportionally — a fully grey cell at ``avg_weight == 0`` and the
+    canonical Pio blend at ``avg_weight == 1.0``. All-1.0 ranges are
+    bit-for-bit back-compatible with PR 10's locked palette.
     """
 
     if summary.blocked or summary.out_of_range or summary.empty:
@@ -412,6 +435,15 @@ def cell_color(summary: CellSummary) -> str:
     r = summary.fold * 220 + summary.call * 220 + summary.raise_ * 40
     g = summary.fold * 40 + summary.call * 200 + summary.raise_ * 180
     b = summary.fold * 40 + summary.call * 40 + summary.raise_ * 60
+    # B10 Phase C: lerp toward the grey sentinel by (1 - avg_weight).
+    # Clamp defensively in case a caller hands us a stale CellSummary
+    # with an out-of-band value.
+    intensity = max(0.0, min(1.0, summary.avg_weight))
+    if intensity < 1.0:
+        grey = 58.0  # matches the ``#3a3a3a`` blocked sentinel.
+        r = r * intensity + grey * (1.0 - intensity)
+        g = g * intensity + grey * (1.0 - intensity)
+        b = b * intensity + grey * (1.0 - intensity)
     return f"rgb({int(r)},{int(g)},{int(b)})"
 
 
