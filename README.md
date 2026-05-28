@@ -17,7 +17,8 @@ locking. Goalpost: PioSolver-class HU local solving on a MacBook.
   [`CHANGELOG.md`](CHANGELOG.md). v1.6.1 engine bundle shipped
   piecewise on `origin/main` and is folded into v1.8.0 (see
   [`docs/v1_7_1_tag_decision_2026-05-26.md`](docs/v1_7_1_tag_decision_2026-05-26.md)
-  for the tag-strategy decision).
+  for the tag-strategy decision). Post-v1.8.0 user-facing additions
+  land in v1.8.2 — see "Recent changes (since v1.8.0)" below.
 - **License:** MIT.
 - **Platforms:** macOS (Apple Silicon primary), Linux. Intel Mac is
   source-build only.
@@ -40,6 +41,49 @@ locking. Goalpost: PioSolver-class HU local solving on a MacBook.
 Apple silicon (arm64) only. See
 [`docs/dmg_install_guide.md`](docs/dmg_install_guide.md) (relevant once
 the .dmg is safe to launch again).
+
+## Recent changes (since v1.8.0)
+
+User-facing additions on `main` after the v1.8.0 tag, queued for the
+v1.8.2 release. All seven are merged on `origin/main` today.
+
+- **CLI walk-tree (PR #123)** — `poker-solver solve ... --walk-tree`
+  walks the full decision tree instead of returning only the
+  first-decision aggregate. Pair with `--node <infoset_key>` to drill
+  into a specific node, and `--format json|csv` to pipe into your own
+  tooling. Replaces the "first-decision aggregate only" limitation
+  on the river / subgame commands. See USAGE.md §7a.
+- **CLI subgame (PR #127)** — `poker-solver subgame --street flop|turn|river`
+  generalizes the previous river-only command to flop and turn boards
+  (3-, 4-, and 5-card `--board` accepted). The legacy
+  `poker-solver river` subcommand remains for backwards compatibility.
+  See USAGE.md §7a.
+- **CLI `--version` (PR #116)** — `poker-solver --version` prints
+  `poker-solver 1.8.0` (the version string updates with the package).
+  Resolves the HIGH-deferred ergonomic gap from the PR #107 audit.
+- **DCFR α-guard (PR #113)** — `solve(..., alpha=0)` now raises a
+  clear `ValueError` instead of silently producing a non-Nash
+  strategy. Values in `(0, 0.5)` emit a deprecation `WARN`. Default
+  remains the Brown & Sandholm 2019 paper value (`alpha=1.5`).
+- **TerminalCache 213× river RvR speedup (PR #114)** —
+  `solve_range_vs_range_nash` on a river spot now runs at roughly
+  0.13 sec/iteration vs. 28 sec/iteration previously (terminal-leaf
+  hand-strength caching). Interactive river joint-Nash queries on
+  ≥6-class ranges are now realistic. Turn and flop perf are also
+  improved but remain governed by tree size (see "When to use
+  blueprint vs true Nash" in USAGE.md §5.6).
+- **Marcus EV display (PR #125)** — `get_pushfold_strategy(...,
+  return_ev=True)` returns a `{"strategy": prob, "ev_bb": ev}` dict
+  instead of just the frequency. EV is in big blinds; lets push/fold
+  UIs surface "how much does deviating cost?" alongside the chart
+  cell.
+- **Off-path infoset annotation (PR #129)** —
+  `SolveResult.reach_probability` (a `{infoset_key: float}` map)
+  and `SolveResult.off_path_keys` (a set) expose which infosets are
+  actually on the equilibrium reach path. Filter `average_strategy`
+  by these to drop phantom strategies at unreachable nodes (a common
+  source of "why is hero raising 100% here?" confusion on deep trees).
+  See USAGE.md §5 for the filter pattern.
 
 ## Install (from source)
 
@@ -126,6 +170,12 @@ poker-solver pushfold --stack 8 --position bb_call_vs_jam --full-range --json
 ```python
 from poker_solver import get_pushfold_strategy, get_full_range
 print(get_pushfold_strategy(stack_bb=10, position="sb_jam", hand="AKs"))
+
+# v1.8.2: pass return_ev=True to get jam EV alongside the frequency.
+# Returned dict is {"strategy": prob, "ev_bb": ev_in_big_blinds}.
+print(get_pushfold_strategy(stack_bb=10, position="sb_jam",
+                            hand="AKs", return_ev=True))
+
 chart = get_full_range(stack_bb=8, position="bb_call_vs_jam")
 ```
 
@@ -205,6 +255,32 @@ The two range-vs-range entry points solve **different objects**:
 See [`docs/aggregator_vs_true_nash_explainer.md`](docs/aggregator_vs_true_nash_explainer.md)
 for when to use which, and [`USAGE.md`](USAGE.md) for custom subgames,
 library mode, and asymmetric-contribution examples.
+
+**Filtering off-path infosets (v1.8.2).** Deep trees accumulate
+strategies at infosets that are never actually reached under the
+equilibrium — phantom mass that can confuse downstream consumers.
+`SolveResult` now exposes the reach annotation directly:
+
+```python
+result = solve_hunl_postflop(cfg, iterations=500)
+
+# Drop unreachable nodes before consuming the strategy:
+on_path = {
+    k: v for k, v in result.average_strategy.items()
+    if k not in result.off_path_keys
+}
+
+# Or weight by reach probability if you want a continuous filter:
+weighted = {
+    k: (v, result.reach_probability[k])
+    for k, v in result.average_strategy.items()
+}
+```
+
+**DCFR α-guard (v1.8.2).** `solve(..., alpha=0)` now raises `ValueError`
+(was a silent non-Nash bug). Values in `(0, 0.5)` emit a deprecation
+warning; the Brown & Sandholm 2019 paper default `alpha=1.5` remains
+recommended.
 
 ## UI
 
