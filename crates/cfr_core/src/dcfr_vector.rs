@@ -576,264 +576,6 @@ impl VectorDCFR {
         info.last_discount_iter = t;
     }
 
-    /// Vector-form recursive traversal.
-    ///
-    /// Direct port of Brown's `Trainer::traverse` (`trainer.cpp:138-240`,
-    /// MIT) with one Rust idiom adaptation: instead of a mutable scratch
-    /// vector per frame, we allocate per-call. This is the conservative
-    /// path that prioritizes correctness for v1.5.0; v1.5.x can switch to
-    /// a pre-allocated scratch arena (matching `trainer.cpp:48-53`) once
-    /// the diff test is established.
-    ///
-    /// Returns per-hand value vector for `update_player` (length
-    /// `hand_counts[update_player]`).
-    #[allow(clippy::too_many_arguments)]
-    fn traverse(
-        &mut self,
-        tree: &BettingTree,
-        eval_ctx: &EvalContext,
-        terminal_cache: &TerminalCache,
-        node_idx: usize,
-        update_player: usize,
-        reach_p: &[f64],
-        reach_opp: &[f64],
-    ) -> Vec<f64> {
-        let node = &tree.nodes[node_idx];
-        let update_hands = eval_ctx.hand_count[update_player];
-
-        match node {
-            FlatNode::Fold { .. } | FlatNode::Showdown { .. } => {
-                // Terminal — compute the per-hand utility weighted by
-                // opponent's reach. Per Brown's `Trainer::traverse`
-                // (`trainer.cpp:147-159`, MIT): the returned value for
-                // `update_player` is the cf-utility, i.e. sum over
-                // opponent hands of `opp_reach * value_per_pair`.
-                let opp_player = 1 - update_player;
-                let _t = prof_start!();
-                let r = if std::env::var("CFR_VECTOR_NO_TERMINAL_CACHE").is_ok() {
-                    // HIGH-2 follow-up: profile-comparison knob. When the
-                    // env var is set we route through the uncached path
-                    // (calls `evaluate_7` per pair, every iter) for
-                    // baseline measurement. Production has it unset.
-                    terminal_value_vector(node, eval_ctx, update_player, opp_player, reach_opp)
-                } else {
-                    terminal_value_vector_cached(
-                        &terminal_cache.leaves[node_idx],
-                        eval_ctx,
-                        update_player,
-                        opp_player,
-                        reach_opp,
-                    )
-                };
-                prof_end!(_t, TerminalEval);
-                r
-            }
-            FlatNode::Chance { prob, children } => {
-                // Board-card chance node (postflop run-out). Per Brown's
-                // pattern, chance children at the betting layer are
-                // weight-summed: value = Σ_c prob * traverse(c, ...).
-                let mut values = vec![0.0_f64; update_hands];
-                for &c in children {
-                    let child_values = self.traverse(
-                        tree,
-                        eval_ctx,
-                        terminal_cache,
-                        c,
-                        update_player,
-                        reach_p,
-                        reach_opp,
-                    );
-                    let _t = prof_start!();
-                    for (i, v) in child_values.iter().enumerate() {
-                        values[i] += *prob * v;
-                    }
-                    prof_end!(_t, ChanceAccumulate);
-                }
-                values
-            }
-            FlatNode::Decision { player, actions, children, .. } => {
-                let player = *player as usize;
-                let action_count = actions.len();
-
-                // Compute the per-hand current strategy from regret-matching.
-                let player_hands = eval_ctx.hand_count[player];
-                let _ta = prof_start!();
-                let mut strategy = vec![0.0_f64; player_hands * action_count];
-                prof_end!(_ta, AllocStrategyBuf);
-                {
-                    let info = self.infosets[node_idx]
-                        .as_ref()
-                        .expect("decision node must have an infoset slot");
-                    let _t = prof_start!();
-                    Self::compute_strategy(info, &mut strategy);
-                    prof_end!(_t, ComputeStrategy);
-                }
-
-                if player != update_player {
-                    // Opponent node — propagate their reach via current
-                    // strategy and accumulate update_player values. Pass
-                    // `terminal_cache` down so terminal children use the
-                    // precomputed strengths.
-                    // Mirrors `trainer.cpp:166-181` (MIT).
-                    //
-                    // Sizing note: at this branch the current-node player
-                    // is the opponent of `update_player`, so `reach_opp`
-                    // (the opponent's reach) and `strategy` are indexed by
-                    // `player_hands`, NOT `opp_hands` (which equals
-                    // hand_count[update_player]). Conflating the two
-                    // panics with an index-out-of-bounds at line 363
-                    // whenever the two players have asymmetric combo
-                    // counts (e.g. hero {AA,KK}=12 vs villain
-                    // {72o,83o}=24). Same family as PR 51's terminal-leaf
-                    // wrong-player-count fix at line 651.
-                    let mut values = vec![0.0_f64; update_hands];
-                    let mut next_reach = vec![0.0_f64; player_hands];
-                    for (a, &child_idx) in children.iter().enumerate() {
-                        // next_reach[h] = reach_opp[h] * strategy[h, a]
-                        let _t = prof_start!();
-                        for h in 0..player_hands {
-                            next_reach[h] = reach_opp[h] * strategy[h * action_count + a];
-                        }
-                        prof_end!(_t, OppNextReach);
-                        let child_values = self.traverse(
-                            tree,
-                            eval_ctx,
-                            terminal_cache,
-                            child_idx,
-                            update_player,
-                            reach_p,
-                            &next_reach,
-                        );
-                        let _t = prof_start!();
-                        for h in 0..update_hands {
-                            values[h] += child_values[h];
-                        }
-                        prof_end!(_t, ChanceAccumulate);
-                    }
-                    return values;
-                }
-
-                // Own (update_player) node. Mirrors `trainer.cpp:184-238`
-                // (MIT). Apply DCFR discount, gather per-action child
-                // values, compute node value as `Σ_a strategy[h,a] *
-                // action_value[a,h]`, then update regret + strategy_sum.
-                {
-                    let info = self.infosets[node_idx]
-                        .as_mut()
-                        .expect("decision node must have an infoset slot");
-                    let _t = prof_start!();
-                    Self::discount(info, self.iteration, self.alpha, self.beta, self.gamma);
-                    prof_end!(_t, Discount);
-                }
-                // Recompute strategy after the discount (the prior
-                // `strategy` was based on pre-discount regrets — Brown's
-                // C++ does the same flow at `trainer.cpp:186-188`).
-                {
-                    let info = self.infosets[node_idx]
-                        .as_ref()
-                        .expect("decision node must have an infoset slot");
-                    let _t = prof_start!();
-                    Self::compute_strategy(info, &mut strategy);
-                    prof_end!(_t, ComputeStrategy);
-                }
-
-                let _ta = prof_start!();
-                let mut action_values = vec![0.0_f64; action_count * update_hands];
-                let mut next_reach = vec![0.0_f64; player_hands];
-                prof_end!(_ta, AllocActionValues);
-                for (a, &child_idx) in children.iter().enumerate() {
-                    // next_reach[h] = reach_p[h] * strategy[h, a]
-                    let _t = prof_start!();
-                    for h in 0..player_hands {
-                        next_reach[h] = reach_p[h] * strategy[h * action_count + a];
-                    }
-                    prof_end!(_t, OwnNextReach);
-                    let child_values = self.traverse(
-                        tree,
-                        eval_ctx,
-                        terminal_cache,
-                        child_idx,
-                        update_player,
-                        &next_reach,
-                        reach_opp,
-                    );
-                    let dst = a * update_hands;
-                    action_values[dst..dst + update_hands].copy_from_slice(&child_values);
-                }
-
-                // node_values[h] = Σ_a strategy[h,a] * action_values[a,h]
-                let _t = prof_start!();
-                let mut node_values = vec![0.0_f64; update_hands];
-                for h in 0..update_hands {
-                    let mut value = 0.0_f64;
-                    let s_offset = h * action_count;
-                    for a in 0..action_count {
-                        value += strategy[s_offset + a] * action_values[a * update_hands + h];
-                    }
-                    node_values[h] = value;
-                }
-                prof_end!(_t, NodeValues);
-
-                // Update regret + strategy_sum. Brown's update is
-                // `regret[h,a] += (action_value[a,h] - node_value[h])`
-                // (`trainer.cpp:211-224`, MIT) — note the cf-utility is
-                // already opp-reach-weighted by the terminal-leaf
-                // return path, so no extra opp_reach multiplier here.
-                // This is the key difference vs the scalar `dcfr.rs`
-                // path, which carries reach separately and multiplies
-                // at the leaf.
-                let regret_weight = 1.0_f64; // DCFR uses `regret_weight = 1` (`trainer.cpp:354-355`).
-                let avg_weight = 1.0_f64; // DCFR uses `avg_weight = 1` (`trainer.cpp:355`).
-                let _ = regret_weight; // folded into the SIMD kernel (== 1.0).
-                {
-                    let info = self.infosets[node_idx]
-                        .as_mut()
-                        .expect("decision node must have an infoset slot");
-                    // PR 63 (v1.8 Phase 2): cross-platform SIMD update.
-                    // Replaces the scalar double-loop. Bit-exact vs scalar
-                    // (covered by `simd::tests::update_regret_sum_vector_*`).
-                    // Shape: `info.regret` is hand-major (`[h][a]`),
-                    // `action_values` is action-major (`[a][h]`).
-                    let _t = prof_start!();
-                    simd::update_regret_sum_vector(
-                        &mut info.regret,
-                        &action_values,
-                        &node_values,
-                        update_hands,
-                        action_count,
-                    );
-                    prof_end!(_t, UpdateRegret);
-                    // strategy_sum[h,a] += reach_p[h] * avg_weight * strategy[h,a]
-                    // Mirrors `trainer.cpp:226-237` (MIT).
-                    //
-                    // PR 70 (v1.8 Phase 3): the inner `a` loop is routed
-                    // through `simd::update_strategy_sum`, which dispatches
-                    // to NEON (aarch64, compile-time) / AVX2 (x86_64,
-                    // runtime-detected) / SSE2 (x86_64 baseline) / scalar.
-                    // The kernel is bit-identical to the prior scalar inner
-                    // loop on each lane (two roundings, no FMA).
-                    let _t = prof_start!();
-                    for h in 0..update_hands {
-                        let weight = reach_p[h] * avg_weight;
-                        if weight == 0.0 {
-                            continue;
-                        }
-                        let offset = h * action_count;
-                        let row_end = offset + action_count;
-                        crate::simd::update_strategy_sum(
-                            &mut info.strategy_sum[offset..row_end],
-                            &strategy[offset..row_end],
-                            weight,
-                        );
-                    }
-                    prof_end!(_t, UpdateStrategySum);
-                }
-
-                node_values
-            }
-        }
-    }
-
     /// Drive `iterations` iterations of vector-form DCFR. Alternates
     /// player updates per iteration to match Brown's `Trainer::run`
     /// (`trainer.cpp:343-369`, MIT).
@@ -890,14 +632,365 @@ impl VectorDCFR {
             ),
         };
         let terminal_cache = TerminalCache::build(tree, eval_ctx);
+        // v1.10 PR-4 — dispatch on the `CFR_RAYON_CHANCE` env var ONCE
+        // per solve (not per iter). When set, the FIRST multi-child
+        // `FlatNode::Chance` encountered during each iteration's
+        // traversal gets parallelized (the rest of the tree stays
+        // sequential to avoid oversubscription). Default (env var
+        // unset) is bit-identical to pre-PR-4.
+        let rayon_enabled = crate::dcfr_vector_parallel::parallel_chance_enabled();
         for _ in 0..iterations {
             self.iteration += 1;
+            let iteration = self.iteration;
+            let alpha = self.alpha;
+            let beta = self.beta;
+            let gamma = self.gamma;
             // Update player 0.
-            self.traverse(tree, eval_ctx, &terminal_cache, 0, 0, &reach_p0, &reach_p1);
+            traverse_recursive_with_parallel(
+                tree,
+                eval_ctx,
+                &terminal_cache,
+                0,
+                0,
+                iteration,
+                alpha,
+                beta,
+                gamma,
+                &reach_p0,
+                &reach_p1,
+                &mut self.infosets,
+                0,
+                rayon_enabled,
+            );
             // Update player 1.
-            self.traverse(tree, eval_ctx, &terminal_cache, 0, 1, &reach_p1, &reach_p0);
+            traverse_recursive_with_parallel(
+                tree,
+                eval_ctx,
+                &terminal_cache,
+                0,
+                1,
+                iteration,
+                alpha,
+                beta,
+                gamma,
+                &reach_p1,
+                &reach_p0,
+                &mut self.infosets,
+                0,
+                rayon_enabled,
+            );
         }
     }
+}
+
+/// Slice-based recursive traversal — the load-bearing body extracted
+/// from `VectorDCFR::traverse` (v1.10 PR-4 refactor).
+///
+/// Walks the betting tree starting at global `node_idx`, mutating the
+/// `infosets` slice in-place. The slice represents a CONTIGUOUS
+/// sub-range of `VectorDCFR::infosets` starting at global index `offset`
+/// (so `infosets[i]` corresponds to global node_idx `offset + i`).
+///
+/// For the sequential path `offset = 0` and `infosets.len() ==
+/// tree.nodes.len()`, recovering the original `&mut self` behavior
+/// bit-identically.
+///
+/// For the parallel path, each worker calls into this function with
+/// `offset = child.start` and `infosets.len() = child.end - child.start`,
+/// so its `node_idx` accesses translate to local slice positions
+/// `node_idx - offset` that stay inside its own shard.
+///
+/// **Invariant**: every `node_idx` reached during the walk must satisfy
+/// `offset <= node_idx < offset + infosets.len()`. The DFS-built tree
+/// guarantees this for child-subtree starts — the recursion never
+/// crosses out of its own contiguous range.
+///
+/// `allow_parallel`: when `true` AND we encounter a multi-child
+/// `FlatNode::Chance`, dispatch to
+/// `dcfr_vector_parallel::parallel_traverse_chance` and pass
+/// `allow_parallel = false` down to children to avoid nested
+/// parallelism (oversubscription). When `false`, the chance branch
+/// walks sequentially. The caller from `VectorDCFR::solve` sets this
+/// to `true` only when `CFR_RAYON_CHANCE` is set in the env.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn traverse_recursive_with_parallel(
+    tree: &BettingTree,
+    eval_ctx: &EvalContext,
+    terminal_cache: &TerminalCache,
+    node_idx: usize,
+    update_player: usize,
+    iteration: u32,
+    alpha: f64,
+    beta: f64,
+    gamma: f64,
+    reach_p: &[f64],
+    reach_opp: &[f64],
+    infosets: &mut [Option<VectorInfosetData>],
+    offset: usize,
+    allow_parallel: bool,
+) -> Vec<f64> {
+    let node = &tree.nodes[node_idx];
+    let update_hands = eval_ctx.hand_count[update_player];
+    let local_idx = node_idx.wrapping_sub(offset);
+    debug_assert!(
+        local_idx < infosets.len(),
+        "traverse_recursive: node_idx {node_idx} out of slice range \
+         [{offset}, {}); local_idx={local_idx}, slice.len()={}",
+        offset + infosets.len(),
+        infosets.len(),
+    );
+
+    match node {
+        FlatNode::Fold { .. } | FlatNode::Showdown { .. } => {
+            let opp_player = 1 - update_player;
+            let _t = prof_start!();
+            let r = if std::env::var("CFR_VECTOR_NO_TERMINAL_CACHE").is_ok() {
+                terminal_value_vector(node, eval_ctx, update_player, opp_player, reach_opp)
+            } else {
+                terminal_value_vector_cached(
+                    &terminal_cache.leaves[node_idx],
+                    eval_ctx,
+                    update_player,
+                    opp_player,
+                    reach_opp,
+                )
+            };
+            prof_end!(_t, TerminalEval);
+            r
+        }
+        FlatNode::Chance { prob, children } => {
+            // Decide: parallel dispatch or sequential walk?
+            if allow_parallel && children.len() >= 2 {
+                // Dispatch to the rayon parallel walker. Set
+                // `allow_parallel = false` for child subtrees to
+                // prevent nested parallelism (oversubscription).
+                return crate::dcfr_vector_parallel::parallel_traverse_chance(
+                    tree,
+                    eval_ctx,
+                    terminal_cache,
+                    node_idx,
+                    children,
+                    *prob,
+                    update_player,
+                    iteration,
+                    alpha,
+                    beta,
+                    gamma,
+                    reach_p,
+                    reach_opp,
+                    infosets,
+                    offset,
+                );
+            }
+            let mut values = vec![0.0_f64; update_hands];
+            for &c in children {
+                let child_values = traverse_recursive_with_parallel(
+                    tree,
+                    eval_ctx,
+                    terminal_cache,
+                    c,
+                    update_player,
+                    iteration,
+                    alpha,
+                    beta,
+                    gamma,
+                    reach_p,
+                    reach_opp,
+                    infosets,
+                    offset,
+                    false,
+                );
+                let _t = prof_start!();
+                for (i, v) in child_values.iter().enumerate() {
+                    values[i] += *prob * v;
+                }
+                prof_end!(_t, ChanceAccumulate);
+            }
+            values
+        }
+        FlatNode::Decision { player, actions, children, .. } => {
+            let player = *player as usize;
+            let action_count = actions.len();
+            let player_hands = eval_ctx.hand_count[player];
+            let _ta = prof_start!();
+            let mut strategy = vec![0.0_f64; player_hands * action_count];
+            prof_end!(_ta, AllocStrategyBuf);
+            {
+                let info = infosets[local_idx]
+                    .as_ref()
+                    .expect("decision node must have an infoset slot");
+                let _t = prof_start!();
+                VectorDCFR::compute_strategy(info, &mut strategy);
+                prof_end!(_t, ComputeStrategy);
+            }
+
+            if player != update_player {
+                let mut values = vec![0.0_f64; update_hands];
+                let mut next_reach = vec![0.0_f64; player_hands];
+                for (a, &child_idx) in children.iter().enumerate() {
+                    let _t = prof_start!();
+                    for h in 0..player_hands {
+                        next_reach[h] = reach_opp[h] * strategy[h * action_count + a];
+                    }
+                    prof_end!(_t, OppNextReach);
+                    let child_values = traverse_recursive_with_parallel(
+                        tree,
+                        eval_ctx,
+                        terminal_cache,
+                        child_idx,
+                        update_player,
+                        iteration,
+                        alpha,
+                        beta,
+                        gamma,
+                        reach_p,
+                        &next_reach,
+                        infosets,
+                        offset,
+                        allow_parallel,
+                    );
+                    let _t = prof_start!();
+                    for h in 0..update_hands {
+                        values[h] += child_values[h];
+                    }
+                    prof_end!(_t, ChanceAccumulate);
+                }
+                return values;
+            }
+
+            {
+                let info = infosets[local_idx]
+                    .as_mut()
+                    .expect("decision node must have an infoset slot");
+                let _t = prof_start!();
+                VectorDCFR::discount(info, iteration, alpha, beta, gamma);
+                prof_end!(_t, Discount);
+            }
+            {
+                let info = infosets[local_idx]
+                    .as_ref()
+                    .expect("decision node must have an infoset slot");
+                let _t = prof_start!();
+                VectorDCFR::compute_strategy(info, &mut strategy);
+                prof_end!(_t, ComputeStrategy);
+            }
+
+            let _ta = prof_start!();
+            let mut action_values = vec![0.0_f64; action_count * update_hands];
+            let mut next_reach = vec![0.0_f64; player_hands];
+            prof_end!(_ta, AllocActionValues);
+            for (a, &child_idx) in children.iter().enumerate() {
+                let _t = prof_start!();
+                for h in 0..player_hands {
+                    next_reach[h] = reach_p[h] * strategy[h * action_count + a];
+                }
+                prof_end!(_t, OwnNextReach);
+                let child_values = traverse_recursive_with_parallel(
+                    tree,
+                    eval_ctx,
+                    terminal_cache,
+                    child_idx,
+                    update_player,
+                    iteration,
+                    alpha,
+                    beta,
+                    gamma,
+                    &next_reach,
+                    reach_opp,
+                    infosets,
+                    offset,
+                    allow_parallel,
+                );
+                let dst = a * update_hands;
+                action_values[dst..dst + update_hands].copy_from_slice(&child_values);
+            }
+
+            let _t = prof_start!();
+            let mut node_values = vec![0.0_f64; update_hands];
+            for h in 0..update_hands {
+                let mut value = 0.0_f64;
+                let s_offset = h * action_count;
+                for a in 0..action_count {
+                    value += strategy[s_offset + a] * action_values[a * update_hands + h];
+                }
+                node_values[h] = value;
+            }
+            prof_end!(_t, NodeValues);
+
+            let regret_weight = 1.0_f64;
+            let avg_weight = 1.0_f64;
+            let _ = regret_weight;
+            {
+                let info = infosets[local_idx]
+                    .as_mut()
+                    .expect("decision node must have an infoset slot");
+                let _t = prof_start!();
+                simd::update_regret_sum_vector(
+                    &mut info.regret,
+                    &action_values,
+                    &node_values,
+                    update_hands,
+                    action_count,
+                );
+                prof_end!(_t, UpdateRegret);
+                let _t = prof_start!();
+                for h in 0..update_hands {
+                    let weight = reach_p[h] * avg_weight;
+                    if weight == 0.0 {
+                        continue;
+                    }
+                    let offset_ha = h * action_count;
+                    let row_end = offset_ha + action_count;
+                    crate::simd::update_strategy_sum(
+                        &mut info.strategy_sum[offset_ha..row_end],
+                        &strategy[offset_ha..row_end],
+                        weight,
+                    );
+                }
+                prof_end!(_t, UpdateStrategySum);
+            }
+
+            node_values
+        }
+    }
+}
+
+/// Thin `pub(crate)` entry point for `dcfr_vector_parallel.rs` to enter
+/// the slice-based traversal at the start of a worker thread's subtree.
+/// Always passes `allow_parallel = false` — nested parallelism would
+/// oversubscribe the Rayon thread pool and degrade perf.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn traverse_with_infosets(
+    tree: &BettingTree,
+    eval_ctx: &EvalContext,
+    terminal_cache: &TerminalCache,
+    node_idx: usize,
+    update_player: usize,
+    iteration: u32,
+    alpha: f64,
+    beta: f64,
+    gamma: f64,
+    reach_p: &[f64],
+    reach_opp: &[f64],
+    infosets: &mut [Option<VectorInfosetData>],
+    offset: usize,
+) -> Vec<f64> {
+    traverse_recursive_with_parallel(
+        tree,
+        eval_ctx,
+        terminal_cache,
+        node_idx,
+        update_player,
+        iteration,
+        alpha,
+        beta,
+        gamma,
+        reach_p,
+        reach_opp,
+        infosets,
+        offset,
+        /* allow_parallel = */ false,
+    )
 }
 
 /// Per-hand bookkeeping used by `VectorDCFR::traverse` for terminal-leaf
