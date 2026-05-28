@@ -940,21 +940,32 @@ def _default_equity_table_path() -> str:
 
 def _holes_from_range_override(
     range_override: Range | None, hero_player: int
-) -> tuple[list[tuple[str, str]] | None, list[tuple[str, str]] | None]:
+) -> tuple[list[list[int]] | None, list[list[int]] | None]:
     """Map a per-combo Range override to the engine's hole-card arguments.
 
     The Rust engine accepts optional ``p0_holes`` / ``p1_holes`` arguments
     that restrict each player's combo enumeration. ``None`` = full 1326.
+    Each "hole" is a 2-element list of integer card IDs (per
+    :func:`poker_solver.card.card_to_int`).
 
     Returns ``(p0_holes, p1_holes)``. The non-hero player runs full 1326.
+
+    NOTE: per-combo weight (B10) is not yet propagated to the engine —
+    we only restrict the combo enumeration. Weighted live-solve is a
+    follow-up (the engine kernel needs a vector input path). For now,
+    a Range override with non-uniform weights produces a uniform-within-
+    enumeration live solve — strictly better than blueprint
+    interpolation (which can't represent per-combo variation at all)
+    but not yet full B10 fidelity.
     """
     if range_override is None:
         return (None, None)
-    holes_list: list[tuple[str, str]] = []
+    from poker_solver.card import card_to_int
+
+    holes_list: list[list[int]] = []
     for combo in range_override:
         c0, c1 = combo.cards
-        # Engine expects 2-char ``rank+suit`` strings (e.g. "As", "Kh").
-        holes_list.append((str(c0), str(c1)))
+        holes_list.append([card_to_int(c0), card_to_int(c1)])
     if hero_player == 0:
         return (holes_list, None)
     return (None, holes_list)
