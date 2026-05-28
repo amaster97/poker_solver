@@ -54,6 +54,13 @@ from poker_solver.blueprint_loader import (
     normalize_action_history,
     normalize_ante,
 )
+from poker_solver.blueprint_subgame import (
+    BlueprintContinuationRanges,
+    BlueprintPostflopResult,
+    derive_continuation_ranges_from_blueprint,
+    expand_classes_to_range,
+    solve_postflop_from_blueprint,
+)
 from poker_solver.card import (
     RANKS,
     SUITS,
@@ -179,6 +186,11 @@ __all__ = [
     "RangeVsRangeResult",
     "solve_range_vs_range",
     "solve_range_vs_range_nash",
+    "BlueprintContinuationRanges",
+    "BlueprintPostflopResult",
+    "derive_continuation_ranges_from_blueprint",
+    "expand_classes_to_range",
+    "solve_postflop_from_blueprint",
     "BoardTuple",
     "ChainedSolveResult",
     "ContinuationRanges",
