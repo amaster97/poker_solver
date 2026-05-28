@@ -689,15 +689,19 @@ def _cmd_library_stats(args: argparse.Namespace) -> int:
 
 
 def _cmd_batch_solve(args: argparse.Namespace) -> int:
-    """Delegate to ``scripts.batch_solve`` (Agent C).
+    """Delegate to ``scripts.batch_solve`` (Agent C, extended in W2.4 / #59).
 
     PR 11 keeps the CLI wiring here; the CSV-driven loop is owned by
     ``scripts/batch_solve.py``. If Agent C's file isn't on PYTHONPATH
     yet, we fall back to an explicit "not yet wired" error rather than
     a confusing ``ImportError`` traceback.
+
+    W2.4 (#59): forwards ``--backend {python,rust}`` so per-row dispatch
+    can route through the Rust vector backend (``solve_range_vs_range_nash``)
+    instead of Python ``solve_hunl_postflop``, unblocking the 180s CLI
+    timeout that Sarah hit on 1-row × iter=10 runs.
     """
     try:
-        # TODO(agent-c): scripts.batch_solve.run() is the expected entry point.
         from scripts.batch_solve import run as _run  # type: ignore[import-not-found]
     except ImportError:
         print(
@@ -718,6 +722,7 @@ def _cmd_batch_solve(args: argparse.Namespace) -> int:
             max_memory_gb=args.max_memory_gb,
             dry_run=args.dry_run,
             library_path=resolved,
+            backend=getattr(args, "backend", "python"),
         )
     )
 
@@ -2099,6 +2104,20 @@ def build_parser() -> argparse.ArgumentParser:
     bs.add_argument("--workers", type=int, default=1)
     bs.add_argument("--max-memory-gb", type=float, default=14.0)
     bs.add_argument("--dry-run", action="store_true")
+    # W2.4 (#59): backend dispatch. Default ``python`` keeps PR 11 Agent C's
+    # original overnight-solve behavior identical; ``rust`` routes per-row
+    # through ``solve_range_vs_range_nash`` for the ~213× river speedup
+    # that lifts the 180s CLI timeout Sarah hit on iter=10 runs.
+    bs.add_argument(
+        "--backend",
+        choices=("python", "rust"),
+        default="python",
+        help="Solver backend: 'python' (default, DCFR reference via "
+        "solve_hunl_postflop) or 'rust' (W2.4, solve_range_vs_range_nash, "
+        "~213x faster on river per PR 114). Use 'rust' when the CSV row "
+        "specifies hero_range/villain_range columns (optional; broad "
+        "defaults apply otherwise).",
+    )
     _add_library_path_flag(bs)
     bs.set_defaults(func=_cmd_batch_solve)
 
