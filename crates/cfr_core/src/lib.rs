@@ -63,6 +63,13 @@ pub mod dcfr_vector;
 // for the safety / concurrency model.
 pub mod dcfr_vector_parallel;
 
+// v1.10 PR-1 — thread-local bump arena for `dcfr_vector::traverse_*`
+// scratch buffers. Replaces per-call `vec![0.0_f64; N]` allocations
+// with LIFO-disciplined slots in a single reusable `Vec<f64>` (per
+// worker thread). Safe Rust (no `unsafe`); see `arena.rs` module
+// docs for the invariant + API.
+pub mod arena;
+
 // Phase A (full-tree preflop RvR) — preflop 169x169 equity leaf table
 // (`preflop_equity`) and the vector-form preflop solver driver
 // (`preflop_rvr`). The equity table is precomputed once via
