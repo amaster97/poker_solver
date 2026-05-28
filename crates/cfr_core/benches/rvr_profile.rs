@@ -25,6 +25,7 @@ use cfr_core::hunl::{HUNLConfig, Street};
 #[cfg(feature = "profile_rvr")]
 use cfr_core::dcfr_vector::profile;
 
+#[allow(dead_code)]
 fn ns_to_s(ns: u128) -> f64 {
     ns as f64 / 1_000_000_000.0
 }
