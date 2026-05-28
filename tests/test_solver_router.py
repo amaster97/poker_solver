@@ -646,6 +646,48 @@ def test_force_route_overrides_dispatch(tmp_path: Path) -> None:
 
 
 @needs_rust
+@pytest.mark.timeout(60)
+def test_custom_live_solve_via_range_override_end_to_end(
+    tmp_path: Path,
+) -> None:
+    """Range override dispatches to live-solve AND the engine accepts
+    the (overridden, full_1326) hole-card pair without API errors.
+
+    This is a regression test for the engine's contract that both
+    ``p0_holes`` and ``p1_holes`` must be set together (not mixed
+    with ``None``). The router constructs a full 1326 enumeration
+    for the non-overridden player to satisfy that contract.
+
+    Fast (~0.05s) because the range override collapses one side to
+    a single combo, so the engine only enumerates 1 × 1326 = 1326
+    combo pairs (vs the full 1326 × 1326).
+    """
+    rng = Range()
+    rng.add((Card.from_str("As"), Card.from_str("Ah")), weight=1.0)
+    router = _build_router(tmp_path, depths=[40])
+    router.live_solve_iterations = 5
+    result = router.solve(
+        stack_bb=15,
+        ante="none",
+        hand="AA",
+        action_history="",
+        range_override=rng,
+        action_menu=ActionMenu(
+            preflop_open_sizes_bb=(),
+            preflop_reraise_multipliers=(),
+            preflop_raise_cap=1,
+        ),
+    )
+    assert result.route == "custom_live_solve"
+    assert result.meta["range_override_active"] is True
+    # Strategy may be empty if the engine emitted no rows for this
+    # particular combo + history; either way no exception is the
+    # contract.
+    if result.strategy is not None:
+        assert result.strategy.sum() == pytest.approx(1.0, abs=1e-3)
+
+
+@needs_rust
 @pytest.mark.slow
 @pytest.mark.timeout(300)
 def test_custom_live_solve_runs_via_force_route(tmp_path: Path) -> None:

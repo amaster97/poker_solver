@@ -944,11 +944,16 @@ def _holes_from_range_override(
     """Map a per-combo Range override to the engine's hole-card arguments.
 
     The Rust engine accepts optional ``p0_holes`` / ``p1_holes`` arguments
-    that restrict each player's combo enumeration. ``None`` = full 1326.
+    that restrict each player's combo enumeration. The engine requires
+    these to be supplied together (both ``None`` for full 1326, OR both
+    set to specific lists). When a range override is provided for one
+    player, the OTHER player gets the full 1326 represented as an
+    explicit enumeration.
+
     Each "hole" is a 2-element list of integer card IDs (per
     :func:`poker_solver.card.card_to_int`).
 
-    Returns ``(p0_holes, p1_holes)``. The non-hero player runs full 1326.
+    Returns ``(p0_holes, p1_holes)``.
 
     NOTE: per-combo weight (B10) is not yet propagated to the engine —
     we only restrict the combo enumeration. Weighted live-solve is a
@@ -960,15 +965,23 @@ def _holes_from_range_override(
     """
     if range_override is None:
         return (None, None)
-    from poker_solver.card import card_to_int
+    from poker_solver.card import card_to_int, full_deck
 
-    holes_list: list[list[int]] = []
+    overridden: list[list[int]] = []
     for combo in range_override:
         c0, c1 = combo.cards
-        holes_list.append([card_to_int(c0), card_to_int(c1)])
+        overridden.append([card_to_int(c0), card_to_int(c1)])
+
+    # Full 1326-combo enumeration for the non-overridden side.
+    deck = full_deck()
+    full_1326: list[list[int]] = []
+    for i in range(len(deck)):
+        for j in range(i + 1, len(deck)):
+            full_1326.append([card_to_int(deck[i]), card_to_int(deck[j])])
+
     if hero_player == 0:
-        return (holes_list, None)
-    return (None, holes_list)
+        return (overridden, full_1326)
+    return (full_1326, overridden)
 
 
 def _aggregate_live_solve_to_class(
