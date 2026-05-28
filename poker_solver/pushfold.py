@@ -12,11 +12,12 @@ equilibria via DCFR and writes the JSON; this module only reads it.
 from __future__ import annotations
 
 import json
-from functools import lru_cache
+import random
+from functools import cache, lru_cache
 from importlib import resources
 from typing import TYPE_CHECKING, Final, Literal, cast
 
-from poker_solver.card import RANK_VALUE
+from poker_solver.card import RANK_VALUE, Card
 
 if TYPE_CHECKING:
     from poker_solver.hunl import HUNLConfig
@@ -30,6 +31,15 @@ PUSHFOLD_CHART_VERSIONS: Final[frozenset[str]] = frozenset({"v1"})
 _EXPLOITABILITY_GATE_BB_PER_100: Final[float] = 0.05
 _VALID_POSITIONS: Final[frozenset[str]] = frozenset({"sb_jam", "bb_call_vs_jam"})
 _CHART_RESOURCE: Final[str] = "pushfold_v1.json"
+
+# Blind sizes (BB units). Matches scripts/generate_pushfold_charts.py.
+_SMALL_BLIND_BB: Final[float] = 0.5
+_BIG_BLIND_BB: Final[float] = 1.0
+
+# Default Monte Carlo iterations for EV computation. Tuned for ~0.01 BB
+# resolution per hand at depths in [2, 15].
+_EV_DEFAULT_ITERATIONS: Final[int] = 20_000
+_EV_RNG_SEED: Final[int] = 0xC0FFEE
 
 
 class PushFoldChartUnavailable(ValueError):
@@ -122,7 +132,13 @@ def _validate_stack_and_position(stack_bb: int, position: str) -> Position:
     return cast(Position, position)
 
 
-def get_pushfold_strategy(stack_bb: int, position: str, hand: str) -> float:
+def get_pushfold_strategy(
+    stack_bb: int,
+    position: str,
+    hand: str,
+    *,
+    return_ev: bool = False,
+) -> float | dict[str, float]:
     """Return the equilibrium aggressive-action frequency for `hand`.
 
     Args:
@@ -130,10 +146,18 @@ def get_pushfold_strategy(stack_bb: int, position: str, hand: str) -> float:
         position: "sb_jam" (frequency SB shoves) or "bb_call_vs_jam"
             (frequency BB calls a SB jam).
         hand: hand-class string like "AA", "AKs", "AKo". Case-insensitive.
+        return_ev: if False (default), returns the frequency as a float
+            (backward compat). If True, returns a dict
+            ``{"strategy": prob, "ev_bb": ev}`` where ``ev_bb`` is the EV
+            (in BB units) of the aggressive action (jam for ``sb_jam``,
+            call for ``bb_call_vs_jam``) against the equilibrium opposing
+            chart range at this depth. The EV is computed by Monte Carlo
+            equity sampling and includes the blinds posted by both players.
 
     Returns:
-        Frequency in [0.0, 1.0]. Hands valid in notation but absent from the
-        chart cell return 0.0 (sparse format default).
+        - ``return_ev=False``: frequency in [0.0, 1.0]. Hands absent from
+          the chart cell return 0.0 (sparse default).
+        - ``return_ev=True``: ``{"strategy": prob, "ev_bb": ev_bb}`` dict.
 
     Raises:
         ValueError: hand is malformed (bad ranks, missing suit indicator, etc).
@@ -143,7 +167,11 @@ def get_pushfold_strategy(stack_bb: int, position: str, hand: str) -> float:
     canonical = _canonicalize_hand(hand)
     chart = _get_chart_cell(stack_bb, pos)
     value = chart.get(canonical, 0.0)
-    return float(value)
+    prob = float(value)
+    if not return_ev:
+        return prob
+    ev_bb = _compute_aggressive_ev_bb(stack_bb, pos, canonical)
+    return {"strategy": prob, "ev_bb": ev_bb}
 
 
 def get_full_range(stack_bb: int, position: str) -> dict[str, float]:
@@ -276,6 +304,166 @@ def _get_chart_cell(stack_bb: int, position: Position) -> dict[str, float]:
             f"Chart file missing depth {stack_bb} BB for position {position!r}."
         )
     return cell
+
+
+# ---------------------------------------------------------------------------
+# EV computation (for ``return_ev=True`` lookups).
+# ---------------------------------------------------------------------------
+
+
+def _expand_combos(hand: str) -> list[tuple[Card, Card]]:
+    """Return all concrete 2-card combos for a canonical hand class."""
+    if len(hand) == 2:
+        rank = RANK_VALUE[hand[0]]
+        return [
+            (Card(rank, s1), Card(rank, s2))
+            for s1 in range(4)
+            for s2 in range(s1 + 1, 4)
+        ]
+    hi = RANK_VALUE[hand[0]]
+    lo = RANK_VALUE[hand[1]]
+    suit_flag = hand[2]
+    combos: list[tuple[Card, Card]] = []
+    if suit_flag == "s":
+        for s in range(4):
+            combos.append((Card(hi, s), Card(lo, s)))
+    else:  # offsuit
+        for s1 in range(4):
+            for s2 in range(4):
+                if s1 != s2:
+                    combos.append((Card(hi, s1), Card(lo, s2)))
+    return combos
+
+
+def _equity_combo_vs_combo(
+    a: tuple[Card, Card],
+    b: tuple[Card, Card],
+    rng: random.Random,
+    boards: int,
+) -> float | None:
+    """SB combo equity vs BB combo across `boards` random runouts.
+
+    Returns ``None`` if the two combos share a card (incompatible).
+    """
+    # Lazy import to avoid a circular import: equity.py -> range.py -> ... at
+    # module load; pushfold.py is imported during the package init.
+    from poker_solver.evaluator import evaluate
+
+    if a[0] == b[0] or a[0] == b[1] or a[1] == b[0] or a[1] == b[1]:
+        return None
+    used = {a[0], a[1], b[0], b[1]}
+    deck = [Card(r, s) for r in range(2, 15) for s in range(4) if Card(r, s) not in used]
+    a_hand = list(a)
+    b_hand = list(b)
+    wins = 0
+    ties = 0
+    sample = rng.sample
+    for _ in range(boards):
+        board = sample(deck, 5)
+        sa = evaluate(a_hand + board)
+        sb = evaluate(b_hand + board)
+        if sa > sb:
+            wins += 1
+        elif sa == sb:
+            ties += 1
+    return (wins + 0.5 * ties) / boards
+
+
+@cache
+def _compute_aggressive_ev_bb(stack_bb: int, position: Position, hand: str) -> float:
+    """EV (in BB) of the aggressive action (jam / call vs jam) for `hand`.
+
+    Computed by Monte Carlo equity sampling against the equilibrium opposing
+    chart range at this depth, then combined with the chart's payoff structure
+    (blinds + showdown EV). Results are cached per ``(stack_bb, position, hand)``
+    so repeat lookups are O(1) after the first call.
+
+    The aggressive-action EV is well-defined for any hand even if its strategy
+    probability is 0 — it answers "what would this hand earn if it took the
+    aggressive line?" which is what Marcus's chart-lookup persona wants.
+
+    For SB ``sb_jam`` at depth D BB:
+        EV_jam(h) = sum_{h'} P(h') * [
+            p_call(h') * D*(2*equity(h, h') - 1)        # showdown branch
+          + (1 - p_call(h')) * BIG_BLIND                 # BB folds branch
+        ]
+
+    For BB ``bb_call_vs_jam`` at depth D BB:
+        EV_call(h) = sum_{h'} P(h' | h' jammed) * (-1) * D*(2*equity(h', h) - 1)
+        (BB's showdown EV = - SB's showdown EV; conditioning on SB having
+        jammed via Bayes' rule using the SB jam-frequency vector.)
+    """
+    opp_position: Position = (
+        "bb_call_vs_jam" if position == "sb_jam" else "sb_jam"
+    )
+    opp_chart = _get_chart_cell(stack_bb, opp_position)
+
+    # Combo-weighted opposing range. For ``sb_jam`` (we're SB, opp is BB), we
+    # treat all BB hands as equally likely a priori (combo-count weighted);
+    # the call/fold split is handled inside the payoff sum below. For
+    # ``bb_call_vs_jam`` (we're BB facing SB's jam) we condition the opp prior
+    # on SB having jammed via Bayes' rule: P(h_sb | jammed) ∝ p_jam(h_sb) * combos.
+    classes = _all_hand_classes()
+    if position == "sb_jam":
+        opp_prior: dict[str, float] = {h: float(_combo_count(h)) for h in classes}
+    else:
+        opp_prior = {
+            h: float(_combo_count(h)) * float(opp_chart.get(h, 0.0))
+            for h in classes
+        }
+    prior_sum = sum(opp_prior.values())
+    if prior_sum <= 0:
+        # Pathological: opp never jams (or chart is empty). Fall back to the
+        # uncontested branch only.
+        return _BIG_BLIND_BB if position == "sb_jam" else -_BIG_BLIND_BB
+
+    rng = random.Random(_EV_RNG_SEED ^ hash((stack_bb, position, hand)))
+    hand_combos = _expand_combos(hand)
+    total_ev = 0.0
+    total_w = 0.0
+    # Allocate boards-per-opp-class evenly across nonzero-prior opp classes,
+    # with a floor for rare classes. Total Monte Carlo budget is bounded by
+    # _EV_DEFAULT_ITERATIONS.
+    min_boards = 50
+    weighted_opps = [(h, w) for h, w in opp_prior.items() if w > 0.0]
+    base = max(min_boards, _EV_DEFAULT_ITERATIONS // max(1, len(weighted_opps)))
+    for opp_hand, opp_w in weighted_opps:
+        opp_combos = _expand_combos(opp_hand)
+        boards = max(min_boards, int(base))
+        equity_sample: float | None = None
+        for _attempt in range(8):
+            combo_a = rng.choice(hand_combos)
+            combo_b = rng.choice(opp_combos)
+            eq = _equity_combo_vs_combo(combo_a, combo_b, rng, boards)
+            if eq is not None:
+                equity_sample = eq
+                break
+        if equity_sample is None:
+            # No card-compatible (combo_hero, combo_opp); skip this class.
+            continue
+        if position == "sb_jam":
+            # opp = BB. EV depends on whether BB calls (showdown) or folds.
+            p_call_opp = float(opp_chart.get(opp_hand, 0.0))
+            showdown_ev = float(stack_bb) * (2.0 * equity_sample - 1.0)
+            ev_this = (
+                p_call_opp * showdown_ev
+                + (1.0 - p_call_opp) * _BIG_BLIND_BB
+            )
+        else:
+            # opp = SB (prior already conditioned on SB jamming). BB's
+            # showdown EV mirrors SB's: ev_bb = D*(2*equity_bb - 1).
+            ev_this = float(stack_bb) * (2.0 * equity_sample - 1.0)
+        total_ev += opp_w * ev_this
+        total_w += opp_w
+    if total_w <= 0:
+        return _BIG_BLIND_BB if position == "sb_jam" else -_BIG_BLIND_BB
+    return total_ev / total_w
+
+
+@cache
+def _combo_count(hand: str) -> int:
+    """Number of concrete combos in a canonical hand-class string (6/4/12)."""
+    return len(_expand_combos(hand))
 
 
 __all__ = [
