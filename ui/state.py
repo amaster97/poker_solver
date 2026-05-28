@@ -68,7 +68,7 @@ from typing import TYPE_CHECKING, Any
 
 from poker_solver.card import RANKS, Card
 from poker_solver.hunl import HUNLConfig, HUNLPoker, Street, _serialize_hunl_config
-from poker_solver.range import Combo, Range, parse_range
+from poker_solver.range import Range, parse_range
 from poker_solver.range_aggregator import (
     HandClass,
     RangeVsRangeNashResult,
@@ -80,6 +80,14 @@ if TYPE_CHECKING:
     from poker_solver.profiler.memory import MemoryReport
 
 logger = logging.getLogger(__name__)
+
+# B10 Phase A: ``Combo`` is now a ``tuple`` subclass carrying a ``weight``
+# attribute. The UI layer historically treated combos as bare 2-tuples;
+# annotate that explicitly so type checks remain happy while runtime stays
+# polymorphic across both forms (a ``Combo`` IS-A ``tuple[Card, Card]``).
+# Phase C will migrate ``RangeWithFreqs.frequencies`` into ``Range._weight``
+# and drop this alias.
+_CardPair = tuple[Card, Card]
 
 # --------------------------------------------------------------------------- #
 # Hand-class enumeration helpers
@@ -152,7 +160,7 @@ def enumerate_hand_classes() -> list[tuple[int, int, str]]:
     return out
 
 
-def enumerate_combos(hand_class: str) -> list[Combo]:
+def enumerate_combos(hand_class: str) -> list[_CardPair]:
     """Return the concrete (Card, Card) combos for a hand-class label.
 
     - Pair ``"XX"``: 6 combos (C(4, 2)), sorted by (suit_hi, suit_lo).
@@ -177,7 +185,7 @@ def enumerate_combos(hand_class: str) -> list[Combo]:
             raise ValueError(
                 f"pair token must not carry a suit indicator: {hand_class!r}"
             )
-        out: list[Combo] = []
+        out: list[_CardPair] = []
         for s1 in range(4):
             for s2 in range(s1 + 1, 4):
                 out.append((Card(hi, s1), Card(hi, s2)))
@@ -305,13 +313,13 @@ def _action_labels_for_count(count: int) -> list[str]:
 # --------------------------------------------------------------------------- #
 
 
-def _full_range_combos() -> list[Combo]:
+def _full_range_combos() -> list[_CardPair]:
     """All 1326 unordered combos as canonical (Card, Card) tuples.
 
     Cards within each combo are ordered (higher rank first; ties broken by
     suit ascending) to match ``Range.add``'s sort key.
     """
-    out: list[Combo] = []
+    out: list[_CardPair] = []
     for r1 in range(2, 15):
         for s1 in range(4):
             for r2 in range(2, 15):
@@ -366,9 +374,9 @@ class RangeWithFreqs:
     """
 
     base_range: Range = field(default_factory=Range)
-    frequencies: dict[Combo, float] = field(default_factory=dict)
+    frequencies: dict[_CardPair, float] = field(default_factory=dict)
 
-    def frequency_of(self, combo: Combo) -> float:
+    def frequency_of(self, combo: _CardPair) -> float:
         """Return the frequency of ``combo``.
 
         Default 1.0 if combo is in ``base_range`` and absent from
@@ -380,7 +388,7 @@ class RangeWithFreqs:
             return 1.0
         return 0.0
 
-    def set_frequency(self, combo: Combo, freq: float) -> None:
+    def set_frequency(self, combo: _CardPair, freq: float) -> None:
         """Set ``frequencies[combo] = freq`` (clamped to ``[0.0, 1.0]``).
 
         Adds ``combo`` to ``base_range`` if not already present.
@@ -394,14 +402,14 @@ class RangeWithFreqs:
     def from_string(cls, range_str: str) -> RangeWithFreqs:
         """Parse ``range_str`` via ``parse_range``; every combo at 1.0."""
         base = parse_range(range_str)
-        freqs: dict[Combo, float] = {combo: 1.0 for combo in base.combos}
+        freqs: dict[_CardPair, float] = {combo: 1.0 for combo in base.combos}
         return cls(base_range=base, frequencies=freqs)
 
     @classmethod
     def full(cls) -> RangeWithFreqs:
         """Construct a ``RangeWithFreqs`` containing all 1326 combos at 1.0."""
         base = _full_range()
-        freqs: dict[Combo, float] = {combo: 1.0 for combo in base.combos}
+        freqs: dict[_CardPair, float] = {combo: 1.0 for combo in base.combos}
         return cls(base_range=base, frequencies=freqs)
 
     @classmethod
@@ -1110,7 +1118,9 @@ class SolveRunner:
                 self.status = "error"
             return
         except BaseException as exc:  # noqa: BLE001
-            logger.exception("preflop chart: solve_hunl_preflop_rvr raised unexpected exception")
+            logger.exception(
+                "preflop chart: solve_hunl_preflop_rvr raised unexpected exception"
+            )
             with self._lock:
                 self.error = exc
                 self.status = "error"
