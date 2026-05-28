@@ -189,6 +189,168 @@ if ! echo "$RUST_SO_FILE_OUT" | grep -q "arm64" || ! echo "$RUST_SO_FILE_OUT" | 
 fi
 echo "[preflight] _rust.so: universal2 (arm64 + x86_64) — OK"
 
+# ---------------------------------------------------------------------------
+# _rust.so source-currency check (PR #140 stale-.so gap mitigation).
+#
+# Why this exists: the v1.8.0 .dmg shipped with a STALE _rust.so that did
+# NOT contain the PR #16 hand-count fix at dcfr_vector.rs. End-users
+# running asymmetric-range fixtures on that .dmg crash with
+# `index out of bounds: 65 but index 70` at `dcfr_vector.rs:651`. The
+# source-tree .so on the build host was current; the .so picked up by
+# PyInstaller (via `.venv/lib/python3.13/site-packages/poker_solver/...`)
+# was stale — `pip install -e .` had been run BEFORE the most recent
+# `maturin develop --release`, so PyInstaller embedded the pre-PR-#16
+# build into the .app.
+#
+# Two-layer verification:
+#   (1) STATIC source check: confirm `crates/cfr_core/src/dcfr_vector.rs`
+#       contains the post-PR-#16 pattern (`next_reach = vec![...; player_hands]`
+#       at the opponent-decision branch). If the source LACKS the fix,
+#       the .so cannot have it either — hard-fail with "the source tree
+#       is pre-PR-#16; pull main".
+#   (2) BEHAVIORAL .so check: run an in-process smoke that triggers the
+#       asymmetric-combo branch. Pre-fix .so panics with
+#       index-out-of-bounds; post-fix .so completes. This is the
+#       authoritative check — it tests what is ACTUALLY loaded, not what
+#       happens to be on disk.
+#
+# Bypass: NO_SO_CURRENCY_CHECK=1 (DANGEROUS — only for emergency
+# pre-PR-#16 archeology builds).
+# ---------------------------------------------------------------------------
+if [[ "${NO_SO_CURRENCY_CHECK:-0}" == "1" ]]; then
+    echo "[preflight] _rust.so source-currency check SKIPPED via NO_SO_CURRENCY_CHECK=1 (DANGEROUS)."
+else
+    # (1) Static source pattern check. The post-PR-#16 fix sizes
+    # `next_reach` by `player_hands` (the current node's player) at the
+    # opponent-decision branch in `traverse`. Pre-fix code sized it by
+    # `opp_hands` (= hand_count[update_player]); the now-unused
+    # `opp_hands` binding was removed at the top of the Decision branch.
+    DCFR_VECTOR_SRC="crates/cfr_core/src/dcfr_vector.rs"
+    if [[ ! -f "$DCFR_VECTOR_SRC" ]]; then
+        err "$DCFR_VECTOR_SRC not found — cannot verify .so is source-current. This script must run from the repo root."
+    fi
+    # The fix introduces TWO instances of `next_reach = vec![0.0_f64; player_hands]`:
+    # one in the opponent-decision branch, one in the own-update branch.
+    # Pre-PR-#16 code had `opp_hands` in the opponent-decision branch.
+    POSTFIX_HITS=$(grep -c 'next_reach = vec!\[0\.0_f64; player_hands\]' "$DCFR_VECTOR_SRC" || true)
+    PREFIX_HITS=$(grep -c 'next_reach = vec!\[0\.0_f64; opp_hands\]' "$DCFR_VECTOR_SRC" || true)
+    if [[ "$POSTFIX_HITS" -lt 2 ]]; then
+        err "$DCFR_VECTOR_SRC does NOT contain the post-PR-#16 hand-count fix (\
+expected >=2 'next_reach = vec![0.0_f64; player_hands]' occurrences, got $POSTFIX_HITS).\n\
+This source tree is PRE-PR-#16. Pull origin/main (PR #16 = 2d7ea58) before building, or the .dmg will crash on asymmetric-range fixtures.\n\
+See docs/dmg_build_runbook_2026-05-26.md."
+    fi
+    if [[ "$PREFIX_HITS" -gt 0 ]]; then
+        err "$DCFR_VECTOR_SRC still contains the PRE-PR-#16 'next_reach = vec![0.0_f64; opp_hands]' pattern ($PREFIX_HITS hit(s)).\n\
+This source tree is inconsistent — the fix is partially applied. Pull origin/main (PR #16 = 2d7ea58) and re-build."
+    fi
+    echo "[preflight] dcfr_vector.rs: post-PR-#16 fix present ($POSTFIX_HITS player_hands sites, 0 opp_hands sites) — OK"
+
+    # (2) Behavioral .so check. The smoke triggers the opponent-decision
+    # branch with asymmetric combo counts (AA+KK = 12 vs 72o+83o = 24).
+    # Pre-PR-#16 .so panics with `index out of bounds` inside the Rust
+    # extension; post-fix .so completes the solve. This is the
+    # authoritative check — it tests the .so that PyInstaller would
+    # actually embed.
+    #
+    # The smoke is intentionally tiny (50 iters, river-only, 5 cards
+    # already on the board) to keep it well under 5 s on M-series. We
+    # only care about "does this code path NOT panic" — not convergence.
+    echo "[preflight] running .so source-currency behavioral smoke (asymmetric 12-vs-24 fixture)..."
+    SO_SMOKE_LOG="$(mktemp -t dmg_so_smoke.XXXXXX)"
+    set +e
+    python - >"$SO_SMOKE_LOG" 2>&1 <<'PY'
+"""Build-prerequisite smoke: asymmetric-combo Nash path must NOT panic.
+
+Pre-PR-#16 _rust.so panics at dcfr_vector.rs with `index out of bounds`
+when the opponent-decision branch is reached with hand_count[P0] !=
+hand_count[P1]. This smoke uses hero {AA,KK} (12 combos) vs villain
+{72o,83o} (24 combos) — the original PR #16 panic fixture.
+
+Exit 0 if the solve completes (any result is fine — we only check the
+panic does not fire). Exit 1 with a clear diagnostic otherwise.
+"""
+import sys
+import traceback
+
+try:
+    from poker_solver import (
+        HUNLConfig,
+        Street,
+        parse_board,
+        solve_range_vs_range_nash,
+    )
+except Exception as exc:  # noqa: BLE001 - defensive
+    print(f"[so-smoke] FAIL: cannot import poker_solver: {exc!r}", file=sys.stderr)
+    sys.exit(1)
+
+# Dry rainbow river — same fixture as tests/test_asymmetric_range_sanity.
+BOARD = tuple(parse_board("Tc 9d 4h Jc 6s"))
+cfg = HUNLConfig(
+    starting_stack=10_000,
+    starting_street=Street.RIVER,
+    initial_board=BOARD,
+    initial_pot=200,
+    initial_contributions=(100, 100),
+    bet_size_fractions=(0.5, 1.0),
+    include_all_in=False,
+    postflop_raise_cap=2,
+)
+try:
+    # The KEY discriminator: 12-vs-24 asymmetric combo counts.
+    # Pre-PR-#16 .so panics here; post-fix .so completes.
+    result = solve_range_vs_range_nash(
+        config_template=cfg,
+        hero_range=["AA", "KK"],            # 12 combos
+        villain_range=["72o", "83o"],       # 24 combos (asymmetric)
+        iterations=50,                       # tiny — we only care about no-panic
+        hero_player=1,
+        compute_exploitability_at_end=False,
+    )
+except Exception as exc:  # noqa: BLE001 - defensive
+    # Pre-PR-#16 .so will surface here with "index out of bounds" from Rust.
+    msg = str(exc)
+    if "index out of bounds" in msg or "panicked at" in msg:
+        print(
+            f"[so-smoke] FAIL: loaded _rust.so PANICKED on asymmetric-combo fixture: {msg}",
+            file=sys.stderr,
+        )
+        print(
+            "[so-smoke] This is the PR #140 stale-.so symptom. The .so was built "
+            "from PRE-PR-#16 source. Rebuild with: maturin develop --release",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    # Any other exception is also a hard fail — the smoke is supposed to complete.
+    print(f"[so-smoke] FAIL: unexpected exception: {exc!r}", file=sys.stderr)
+    traceback.print_exc(file=sys.stderr)
+    sys.exit(1)
+
+# Reaching here = the asymmetric-combo branch executed without panicking.
+# We do NOT check strategy semantics here (that's tests/test_asymmetric_range_sanity);
+# the build-prerequisite smoke only verifies the .so is post-PR-#16.
+print("[so-smoke] OK — _rust.so handles asymmetric-combo branch without panicking")
+sys.exit(0)
+PY
+    SMOKE_RC=$?
+    set -e
+    if [[ $SMOKE_RC -ne 0 ]]; then
+        cat "$SO_SMOKE_LOG" >&2 || true
+        rm -f "$SO_SMOKE_LOG"
+        err "_rust.so source-currency BEHAVIORAL smoke FAILED.\n\
+The loaded .so is STALE — built from PRE-PR-#16 source. PyInstaller would embed this stale binary into the .app, which would crash users on asymmetric-range fixtures (PR #140 stale-.so symptom).\n\
+\n\
+Fix: rebuild the .so from the current source tree:\n\
+    maturin develop --release --target universal2-apple-darwin\n\
+\n\
+then re-run this build script.  See docs/dmg_build_runbook_2026-05-26.md."
+    fi
+    # Surface the success line for the build log.
+    grep -E '^\[so-smoke\]' "$SO_SMOKE_LOG" || true
+    rm -f "$SO_SMOKE_LOG"
+    echo "[preflight] _rust.so: post-PR-#16 (behavioral smoke PASS) — OK"
+fi
+
 # ui/app.py entry exists (PR 10 prerequisite per spec decision 13.13).
 if [[ ! -f "ui/app.py" ]]; then
     err "ui/app.py not found — PR 10 (NiceGUI scaffold) is a prerequisite."

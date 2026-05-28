@@ -54,6 +54,15 @@
 #     in release notes is verified against `git ls-tree -r HEAD`; untracked
 #     files would 404 in the tag tree. Bypass: SKIP_PHASE_C_7=1.
 #     Rule: feedback_release_cited_doc_tracking.md
+#   - Phase C.8: _rust.so source-currency audit (PR #140 stale-.so gap).
+#     Two-layer: (a) static grep of crates/cfr_core/src/dcfr_vector.rs for
+#     the post-PR-#16 'next_reach = vec![...; player_hands]' pattern;
+#     (b) behavioral asymmetric-combo Nash smoke (12-vs-24 fixture) that
+#     would panic on a pre-fix .so. Catches the case where the loaded
+#     .so was built from an older source tree (silent ship-blocker:
+#     v1.8.0 .dmg shipped with a stale .so missing PR #16's hand-count
+#     fix; users crashed on asymmetric ranges).
+#     Bypass: SKIP_PHASE_C_8=1.
 #
 # SMOKE TEST: SMOKE_TEST=1 REPO=<worktree-path> bash <script> --dry-run
 #   Bypasses Phase A (branch=main) + Phase B (origin sync) so the hazard
@@ -195,6 +204,7 @@ SKIP_BASH_VERSION_CHECK="${SKIP_BASH_VERSION_CHECK:-0}"   # feedback_bash3_2_emp
 SKIP_PHASE_C_2="${SKIP_PHASE_C_2:-0}"                     # feedback_release_check_specificity
 SKIP_PHASE_C_6="${SKIP_PHASE_C_6:-0}"                     # feedback_pr_naming_collision
 SKIP_PHASE_C_7="${SKIP_PHASE_C_7:-0}"                     # feedback_release_cited_doc_tracking
+SKIP_PHASE_C_8="${SKIP_PHASE_C_8:-0}"                     # PR #140 stale-.so gap
 
 # Smoke-test escape hatch: bypass Phase A (branch=main) + Phase B (origin sync)
 # checks. ONLY for testing the hazard guards in a worktree / feature branch.
@@ -602,6 +612,126 @@ See feedback_release_cited_doc_tracking.md."
                 fi
             fi
         fi
+    fi
+
+    # -------------------------------------------------------------------------
+    # Phase C.8: _rust.so source-currency audit (PR #140 stale-.so gap)
+    # -------------------------------------------------------------------------
+    # Hazard: the .dmg picks up whatever `_rust.so` PyInstaller can find in
+    # the build venv (typically `.venv/lib/python3.13/site-packages/
+    # poker_solver/_rust*.so`). If `pip install -e .` was run BEFORE the
+    # most recent `maturin develop --release`, the installed .so lags
+    # behind the source tree — silently shipping pre-fix Rust binary in
+    # the .dmg.
+    #
+    # v1.8.0 shipped with a STALE .so missing PR #16's hand-count fix.
+    # End-users on that .dmg crash on asymmetric-range fixtures with
+    # `index out of bounds: 65 but index 70` at dcfr_vector.rs:651.
+    # The source-current .so worked fine; the embedded one did not.
+    #
+    # Two-layer check:
+    #   (a) Static source: confirm `crates/cfr_core/src/dcfr_vector.rs`
+    #       has the post-PR-#16 pattern (>=2 'next_reach = vec![...;
+    #       player_hands]' occurrences and 0 pre-fix 'opp_hands' sites).
+    #   (b) Behavioral .so: run the asymmetric-combo (12-vs-24) Nash
+    #       smoke. Pre-fix .so panics; post-fix .so completes.
+    #
+    # Memory rule:
+    #   ~/.claude/projects/-Users-ashen-Desktop-poker-solver/memory/
+    #     feedback_dotso_arch_check.md  (sibling hazard cluster)
+    # Bypass: SKIP_PHASE_C_8=1 (DANGEROUS — only for emergency archeology)
+    # -------------------------------------------------------------------------
+    if [[ "${SKIP_PHASE_C_8:-0}" == "1" ]]; then
+        warn "Phase C.8 SKIPPED via SKIP_PHASE_C_8=1 — see PR #140 stale-.so gap"
+    else
+        log "=== Phase C.8: _rust.so source-currency audit ==="
+        DCFR_VECTOR_SRC_C8="crates/cfr_core/src/dcfr_vector.rs"
+        if [[ ! -f "$DCFR_VECTOR_SRC_C8" ]]; then
+            fail "Phase C.8 — $DCFR_VECTOR_SRC_C8 not found; cannot audit .so currency."
+        fi
+        # (a) Static source pattern.
+        C8_POSTFIX_HITS=$(grep -c 'next_reach = vec!\[0\.0_f64; player_hands\]' "$DCFR_VECTOR_SRC_C8" || true)
+        C8_PREFIX_HITS=$(grep -c 'next_reach = vec!\[0\.0_f64; opp_hands\]' "$DCFR_VECTOR_SRC_C8" || true)
+        if [[ "$C8_POSTFIX_HITS" -lt 2 ]]; then
+            fail "Phase C.8 (a) — $DCFR_VECTOR_SRC_C8 does NOT have the post-PR-#16 fix \
+(expected >=2 'next_reach = vec![0.0_f64; player_hands]' sites, got $C8_POSTFIX_HITS). \
+This source tree is PRE-PR-#16. Pull origin/main (PR #16 = 2d7ea58) before tagging the release."
+        fi
+        if [[ "$C8_PREFIX_HITS" -gt 0 ]]; then
+            fail "Phase C.8 (a) — $DCFR_VECTOR_SRC_C8 still contains PRE-PR-#16 \
+'next_reach = vec![0.0_f64; opp_hands]' pattern ($C8_PREFIX_HITS hits). Partial-fix state — \
+pull origin/main and verify."
+        fi
+        log "Phase C.8 (a) — dcfr_vector.rs has post-PR-#16 fix ($C8_POSTFIX_HITS sites, 0 pre-fix): OK"
+
+        # (b) Behavioral .so check. Same fixture as build_macos_dmg.sh
+        # preflight: 12-vs-24 asymmetric combo Nash solve, 50 iters.
+        log "Phase C.8 (b) — running .so behavioral smoke (asymmetric 12-vs-24)..."
+        C8_SMOKE_LOG="$(mktemp -t release_v1_8_0_so_smoke.XXXXXX)"
+        set +e
+        python3 - >"$C8_SMOKE_LOG" 2>&1 <<'PYEOF'
+"""Phase C.8 (b): asymmetric-combo Nash smoke (must not panic)."""
+import sys, traceback
+try:
+    from poker_solver import (
+        HUNLConfig, Street, parse_board, solve_range_vs_range_nash,
+    )
+except Exception as exc:  # noqa: BLE001
+    print(f"[c8-smoke] FAIL: cannot import poker_solver: {exc!r}", file=sys.stderr)
+    sys.exit(1)
+board = tuple(parse_board("Tc 9d 4h Jc 6s"))
+cfg = HUNLConfig(
+    starting_stack=10_000,
+    starting_street=Street.RIVER,
+    initial_board=board,
+    initial_pot=200,
+    initial_contributions=(100, 100),
+    bet_size_fractions=(0.5, 1.0),
+    include_all_in=False,
+    postflop_raise_cap=2,
+)
+try:
+    # 12-vs-24 asymmetric Nash solve — the PR #16 panic fixture.
+    solve_range_vs_range_nash(
+        config_template=cfg,
+        hero_range=["AA", "KK"],
+        villain_range=["72o", "83o"],
+        iterations=50,
+        hero_player=1,
+        compute_exploitability_at_end=False,
+    )
+except Exception as exc:  # noqa: BLE001
+    msg = str(exc)
+    if "index out of bounds" in msg or "panicked at" in msg:
+        print(
+            f"[c8-smoke] FAIL: loaded _rust.so PANICKED — STALE .so detected: {msg}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    print(f"[c8-smoke] FAIL: unexpected exception: {exc!r}", file=sys.stderr)
+    traceback.print_exc(file=sys.stderr)
+    sys.exit(1)
+print("[c8-smoke] OK — _rust.so post-PR-#16 (asymmetric Nash smoke PASS)")
+sys.exit(0)
+PYEOF
+        C8_SMOKE_RC=$?
+        set -e
+        if [[ "$C8_SMOKE_RC" -ne 0 ]]; then
+            cat "$C8_SMOKE_LOG" >&2 || true
+            rm -f "$C8_SMOKE_LOG"
+            fail "Phase C.8 (b) — _rust.so behavioral smoke FAILED. The loaded .so is STALE \
+(built from PRE-PR-#16 source). Tagging this release would ship a .dmg that crashes on \
+asymmetric-range fixtures. \
+\
+Fix: rebuild from current source before tagging: \
+    maturin develop --release --target universal2-apple-darwin \
+\
+See docs/dmg_build_runbook_2026-05-26.md."
+        fi
+        # Surface the success line.
+        grep -E '^\[c8-smoke\]' "$C8_SMOKE_LOG" | head -3 || true
+        rm -f "$C8_SMOKE_LOG"
+        log "Phase C.8 (b) — _rust.so behavioral smoke: OK"
     fi
 fi
 
