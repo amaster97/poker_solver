@@ -52,6 +52,19 @@
 //!   v1.5.1 will plug EMD bucketing into the hand-vector dimension.
 //! - Python `solve_range_vs_range` aggregator is NOT rewired here (Q3
 //!   default); the new entrypoint exists alongside as a PyO3 surface.
+//!
+//! ## B10 Phase B — per-combo fractional weights (2026-05-28)
+//!
+//! Adds an optional `hand_weights: Option<[Vec<f64>; 2]>` parameter to
+//! `solve_range_vs_range_postflop_with_hands` (and the PyO3 wrapper
+//! `solve_range_vs_range_rust` via the `p0_weights` / `p1_weights`
+//! kwargs in `lib.rs`). When supplied, each `w[i]` aligns positionally
+//! with `pN_holes[i]` and becomes the initial reach into the root
+//! infoset for that hand. **Multiplicative factor only**: the
+//! regret-matching / strategy-update / discount loops are bit-identical
+//! to the pre-Phase-B code. All-ones weights (the default) reproduce
+//! the legacy behavior exactly. See
+//! `docs/b10_per_combo_frequency_plan_2026-05-28.md` §3.
 
 // The vector-form CFR inner loops index per-(hand, action) into multiple
 // parallel arrays (regret, strategy, action_values, reach), so the
@@ -828,20 +841,54 @@ impl VectorDCFR {
     /// HIGH-2 follow-up: builds a `TerminalCache` once before iteration
     /// so per-pair `evaluate_7` work happens only once per leaf for the
     /// whole solve, not per iter.
+    ///
+    /// **B10 Phase B — per-combo weights.** When `hand_weights` is
+    /// supplied (`Some([w0, w1])`), the initial reach vectors are set to
+    /// the supplied per-hand weights instead of the all-ones default.
+    /// This is the **multiplicative-only** wiring of per-combo fractional
+    /// frequencies into the kernel: the regret/strategy update path is
+    /// unchanged; only the initial reach into the root infoset is scaled.
+    /// Each `w[i]` aligns positionally with `eval_ctx.hole[p][i]` (and
+    /// hence with the `p{p}_holes` list that built the `EvalContext`).
+    /// All-ones weights are bit-identical to the legacy `None` path.
     pub(crate) fn solve(
         &mut self,
         tree: &BettingTree,
         eval_ctx: &EvalContext,
         iterations: u32,
+        hand_weights: Option<[Vec<f64>; 2]>,
     ) {
-        // Uniform reach vectors per player. Brown's reference
-        // initializes from `hand_weights_ptr_` (the per-hand range
-        // weights from the `RiverGame`); for true RvR with uniform
-        // ranges we use `1.0` per hand. Future enhancement (v1.5.x)
-        // can plug in non-uniform Sklansky-like ranges through this
-        // same vector.
-        let reach_p0: Vec<f64> = vec![1.0; eval_ctx.hand_count[0]];
-        let reach_p1: Vec<f64> = vec![1.0; eval_ctx.hand_count[1]];
+        // Initial reach vectors per player. Brown's reference initializes
+        // from `hand_weights_ptr_` (the per-hand range weights from the
+        // `RiverGame`); we now plug per-combo fractional weights from
+        // Python through this same vector. Default = ones (legacy
+        // back-compat, bit-identical to pre-B10-Phase-B).
+        let (reach_p0, reach_p1) = match hand_weights {
+            Some([w0, w1]) => {
+                // Defensive length check — the Python binding aligns these
+                // with `p0_holes`/`p1_holes`, but a misaligned call could
+                // silently produce garbage. Hard-fail instead.
+                assert_eq!(
+                    w0.len(),
+                    eval_ctx.hand_count[0],
+                    "p0_weights length {} != hand_count[0] {}",
+                    w0.len(),
+                    eval_ctx.hand_count[0],
+                );
+                assert_eq!(
+                    w1.len(),
+                    eval_ctx.hand_count[1],
+                    "p1_weights length {} != hand_count[1] {}",
+                    w1.len(),
+                    eval_ctx.hand_count[1],
+                );
+                (w0, w1)
+            }
+            None => (
+                vec![1.0; eval_ctx.hand_count[0]],
+                vec![1.0; eval_ctx.hand_count[1]],
+            ),
+        };
         let terminal_cache = TerminalCache::build(tree, eval_ctx);
         for _ in 0..iterations {
             self.iteration += 1;
@@ -1184,7 +1231,7 @@ pub fn solve_range_vs_range_postflop(
     gamma: f64,
 ) -> Result<VectorSolveOutput, String> {
     solve_range_vs_range_postflop_with_hands(
-        config, None, iterations, alpha, beta, gamma, 0.0, 0,
+        config, None, iterations, alpha, beta, gamma, 0.0, 0, None,
     )
 }
 
@@ -1199,6 +1246,15 @@ pub fn solve_range_vs_range_postflop(
 /// `hand_lists`: `Some(([p0_holes], [p1_holes]))` to specify hands
 /// explicitly; `None` to enumerate the full C(deck minus board, 2)
 /// per player (the production path).
+///
+/// **B10 Phase B contract — `hand_weights`.** When supplied, the kernel
+/// uses these per-hand fractional weights as the initial reach vectors
+/// (in place of the all-ones default). `hand_weights = Some([w0, w1])`
+/// requires `w0.len() == p0_holes.len()` and `w1.len() == p1_holes.len()`;
+/// each `w[i]` aligns positionally with `p{p}_holes[i]`. All-ones is
+/// bit-identical to `None`. This is the **only** algorithmic touch
+/// point — the per-(hand, action) regret/strategy update path is
+/// unchanged.
 #[allow(clippy::too_many_arguments)]
 pub fn solve_range_vs_range_postflop_with_hands(
     config: &HUNLConfig,
@@ -1209,6 +1265,7 @@ pub fn solve_range_vs_range_postflop_with_hands(
     gamma: f64,
     regret_init_noise: f64,
     rng_seed: u64,
+    hand_weights: Option<[Vec<f64>; 2]>,
 ) -> Result<VectorSolveOutput, String> {
     if config.initial_hole_cards.is_some() {
         return Err(
@@ -1263,7 +1320,7 @@ pub fn solve_range_vs_range_postflop_with_hands(
         regret_init_noise,
         rng_seed,
     );
-    solver.solve(&tree, &eval_ctx, iterations);
+    solver.solve(&tree, &eval_ctx, iterations, hand_weights);
 
     // Final discount catch-up to mirror `dcfr.rs::DCFRSolver::solve`
     // tail-discount semantics + Python's `_discount` final pass.
@@ -1545,6 +1602,7 @@ mod tests {
             2.0,
             0.0,
             0,
+            None,
         )
         .expect("asymmetric range solve must not panic post-fix");
         assert_eq!(out.hand_count_per_player, [12, 24]);
@@ -1570,11 +1628,11 @@ mod tests {
     fn regret_init_noise_zero_is_reproducible() {
         let cfg = tiny_river_rvr();
         let out_a = solve_range_vs_range_postflop_with_hands(
-            &cfg, None, 3, 1.5, 0.0, 2.0, 0.0, 0,
+            &cfg, None, 3, 1.5, 0.0, 2.0, 0.0, 0, None,
         )
         .expect("solve must complete");
         let out_b = solve_range_vs_range_postflop_with_hands(
-            &cfg, None, 3, 1.5, 0.0, 2.0, 0.0, 0,
+            &cfg, None, 3, 1.5, 0.0, 2.0, 0.0, 0, None,
         )
         .expect("solve must complete");
         assert_eq!(out_a.average_strategy.len(), out_b.average_strategy.len());
@@ -1616,11 +1674,11 @@ mod tests {
         cfg.include_all_in = true;
         let noise = 1e-9_f64;
         let out_zero = solve_range_vs_range_postflop_with_hands(
-            &cfg, None, 3, 1.5, 0.0, 2.0, 0.0, 1,
+            &cfg, None, 3, 1.5, 0.0, 2.0, 0.0, 1, None,
         )
         .expect("baseline solve must complete");
         let out_eps = solve_range_vs_range_postflop_with_hands(
-            &cfg, None, 3, 1.5, 0.0, 2.0, noise, 1,
+            &cfg, None, 3, 1.5, 0.0, 2.0, noise, 1, None,
         )
         .expect("perturbed solve must complete");
         // Same infoset key set (tree shape is identical regardless of
@@ -1674,11 +1732,11 @@ mod tests {
         cfg.include_all_in = true;
         let noise = 1e-9_f64;
         let out_seed1 = solve_range_vs_range_postflop_with_hands(
-            &cfg, None, 3, 1.5, 0.0, 2.0, noise, 1,
+            &cfg, None, 3, 1.5, 0.0, 2.0, noise, 1, None,
         )
         .expect("solve must complete");
         let out_seed2 = solve_range_vs_range_postflop_with_hands(
-            &cfg, None, 3, 1.5, 0.0, 2.0, noise, 2,
+            &cfg, None, 3, 1.5, 0.0, 2.0, noise, 2, None,
         )
         .expect("solve must complete");
         let mut any_diff = false;

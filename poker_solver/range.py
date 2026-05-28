@@ -312,10 +312,14 @@ class Range:
     def sample_excluding(self, excluded: set[Card], rng: random.Random) -> Combo | None:
         """Pick a random combo whose cards are not in ``excluded``.
 
-        Weighted by per-combo weight. When all weights are 1.0 (the common
-        case), takes a uniform fast path with rejection sampling — matches
-        the legacy behavior to keep call-site semantics identical.
-        Returns None when no combo in the range is compatible.
+        Weighted by per-combo weight when any combo has weight != 1.0;
+        otherwise takes a uniform fast path with rejection sampling
+        (matches the pre-Phase-A behavior bit-for-bit so equity.py call
+        sites that don't use fractional weights see no statistical
+        change). Returns None when no combo in the range is compatible.
+
+        B10 Phase B: the weighted path uses ``random.choices`` with
+        ``weights=[c.weight, ...]`` per the original feature spec.
         """
         if not self.combos:
             return None
@@ -332,7 +336,9 @@ class Range:
             if not valid:
                 return None
             return rng.choice(valid)
-        # Weighted path: filter then sample proportional to weight.
+        # Weighted path: filter then sample proportional to weight using
+        # `random.choices`. Per the B10 Phase B spec: "uses random.choices
+        # with weights=... when any weight != 1.0".
         feasible = [
             c for c in self.combos if c[0] not in excluded and c[1] not in excluded
         ]
@@ -342,13 +348,10 @@ class Range:
         total = sum(weights)
         if total <= 0.0:
             return rng.choice(feasible)
-        r = rng.random() * total
-        acc = 0.0
-        for c, w in zip(feasible, weights):
-            acc += w
-            if r <= acc:
-                return c
-        return feasible[-1]
+        # `random.choices(population, weights=...)` returns a 1-element
+        # list; index 0 is the sample. Bound to the same `rng` instance
+        # so the call inherits the caller's seed / reproducibility.
+        return rng.choices(feasible, weights=weights, k=1)[0]
 
     # ------------------------------------------------------------------
     # Round-trip serialization

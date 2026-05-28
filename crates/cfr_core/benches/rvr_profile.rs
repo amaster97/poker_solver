@@ -178,6 +178,7 @@ fn main() {
         2.0, // gamma
         0.0, // regret_init_noise
         0,
+        None, // hand_weights (B10 Phase B; None = all-1.0 reach, legacy)
     )
     .expect("solve failed");
     let total = started.elapsed();
