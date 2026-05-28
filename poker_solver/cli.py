@@ -880,11 +880,27 @@ def _run_subgame_solve(
 ) -> int:
     """Shared core for ``river`` (deprecated alias) and ``subgame`` (#51).
 
-    Loops the villain range, runs ``solve_hunl_postflop`` for each combo
-    with hero hole cards pinned and the requested ``starting_street``,
-    then either emits the legacy first-decision aggregate (default) or
-    routes into the v1.8.2 walk-tree / drill-down / JSON / CSV formatters
-    when one of the new flags is set.
+    Dispatch policy (post-2026-05-27 follow-up to PR #61):
+
+      - **Single-combo villain range** (e.g. ``--villain-range QdQh``):
+        stays on the diagnostic fixed-hand path via ``solve_hunl_postflop``
+        with ``initial_hole_cards = (hero_pair, villain_pair)``. True Nash
+        is unnecessary in the 1v1 case (joint solve degenerates to a
+        fixed-hand subgame).
+      - **Multi-combo villain range, default**: route to
+        :func:`poker_solver.range_aggregator.solve_range_vs_range_nash`
+        once over the full villain range. Mathematically correct joint
+        imperfect-information Nash; post-PR-114 (``TerminalCache``, ~213×
+        speedup on river) it is competitive with — often faster than —
+        the per-combo blueprint loop.
+      - **--legacy-blueprint flag**: forces the original PR 39 / task #51
+        behavior (per-combo loop + combo-weighted aggregate). Kept for
+        backward-compat with pre-2026-05-27 outputs and for fast approximate
+        13x13-style displays on dry boards.
+      - **v1.8.2 presentation modes** (``--walk-tree`` / ``--node`` /
+        ``--format=json|csv``) always go through the per-combo loop
+        regardless of ``--legacy-blueprint``, because the tree-walk
+        formatters require a full ``SolveResult`` per villain combo.
 
     ``show_street_line`` gates the new ``"Street: <name>"`` preamble line.
     The ``river`` alias passes ``False`` to keep its v1.8.2 output exactly
@@ -958,6 +974,36 @@ def _run_subgame_solve(
     full_classes: bool = bool(getattr(args, "full_classes", False))
     top_n: int = int(getattr(args, "top_n", 12) or 12)
     new_mode = walk_tree_flag or node_history is not None or fmt != "text"
+
+    legacy_blueprint: bool = bool(getattr(args, "legacy_blueprint", False))
+
+    # Dispatch table (see docstring above):
+    #   - single-combo villain range -> fixed-hand path (diagnostic)
+    #   - multi-combo + new-mode (walk-tree/json/csv) -> per-combo loop
+    #     (tree walkers need a SolveResult per combo)
+    #   - multi-combo + --legacy-blueprint -> per-combo loop
+    #   - multi-combo, default text mode, no legacy flag -> true Nash
+    use_true_nash = (
+        len(villain_combos) >= 2
+        and not legacy_blueprint
+        and not new_mode
+    )
+
+    if use_true_nash:
+        return _run_subgame_true_nash(
+            hero_pair=hero_pair,
+            board_cards=board_cards,
+            street=street,
+            street_label=street_label,
+            show_street_line=show_street_line,
+            villain_range_spec=args.villain_range,
+            villain_combos=villain_combos,
+            starting_stack=starting_stack,
+            big_blind=big_blind,
+            initial_pot=initial_pot,
+            half=half,
+            iters=args.iters,
+        )
 
     # When in text mode (default formatter), emit the legacy preamble. JSON /
     # CSV modes suppress preamble so the output is parser-friendly.
@@ -1051,6 +1097,103 @@ def _run_subgame_solve(
     for k in sorted(aggregate):
         print(f"  {k:<10}  {aggregate[k]:.6f}")
     print(f"\nMean game value (BB, P0 perspective): {ev_sum / total_weight:+.6f}")
+    return 0
+
+
+def _run_subgame_true_nash(
+    *,
+    hero_pair: tuple,
+    board_cards: list,
+    street,
+    street_label: str,
+    show_street_line: bool,
+    villain_range_spec: str,
+    villain_combos: list,
+    starting_stack: int,
+    big_blind: int,
+    initial_pot: int,
+    half: int,
+    iters: int,
+) -> int:
+    """Default multi-combo dispatch (post-2026-05-27): route to true joint-Nash.
+
+    Builds a single ``HUNLConfig`` whose ``initial_hole_cards`` is the empty
+    tuple (vector-form CFR's required convention; the solver enumerates
+    hands per-player internally), constructs a hero "range" containing just
+    ``hero_pair`` and a villain range containing every board-feasible combo
+    from ``--villain-range``, then dispatches to
+    :func:`poker_solver.range_aggregator.solve_range_vs_range_nash`.
+
+    The output format mirrors the legacy per-combo loop's text mode for
+    backward compatibility: a "Board / Hero / Villain range / Iterations"
+    preamble followed by a hero first-decision frequency table.  The keys
+    in the frequency table are the engine's action labels (e.g. ``fold`` /
+    ``check`` / ``bet_75``) rather than the positional ``action_0`` /
+    ``action_1`` keys the legacy loop emits; callers parsing the output
+    should consume the engine labels (preferred) or pass
+    ``--legacy-blueprint`` for the positional keys.
+    """
+    from poker_solver.hunl import HUNLConfig
+    from poker_solver.range import Range
+    from poker_solver.range_aggregator import solve_range_vs_range_nash
+
+    cfg = HUNLConfig(
+        starting_stack=starting_stack,
+        small_blind=big_blind // 2,
+        big_blind=big_blind,
+        starting_street=street,
+        initial_board=tuple(board_cards),
+        initial_pot=initial_pot,
+        initial_contributions=(half, half),
+        # vector-form CFR requires empty hole cards; the solver enumerates
+        # hands per-player from the supplied ranges.
+        initial_hole_cards=(),
+    )
+
+    hero_range_obj = Range()
+    hero_range_obj.add(hero_pair)
+    villain_range_obj = Range()
+    for combo in villain_combos:
+        villain_range_obj.add(combo)
+
+    print(f"Board:        {' '.join(str(c) for c in board_cards)}")
+    if show_street_line:
+        print(f"Street:       {street_label}")
+    print(f"Hero:         {' '.join(str(c) for c in hero_pair)}")
+    print(
+        f"Villain range: {villain_range_spec} "
+        f"({len(villain_combos)} combos after card removal)"
+    )
+    print(f"Iterations:   {iters}")
+    print(f"Backend:      true_nash (solve_range_vs_range_nash)")
+    print()
+
+    result = solve_range_vs_range_nash(
+        cfg,
+        hero_range_obj,
+        villain_range_obj,
+        iterations=iters,
+        hero_player=0,
+        compute_exploitability_at_end=False,
+    )
+
+    # The projection produces hero's first-decision strategy per hand class;
+    # the hero range contains exactly one combo so the per_class_strategy
+    # has one entry whose action map is hero's strategy at the root.
+    aggregate: dict[str, float] = dict(result.range_aggregate)
+
+    print("Hero first-decision aggregate (range-vs-range Nash):")
+    if aggregate:
+        for k in sorted(aggregate):
+            print(f"  {k:<10}  {aggregate[k]:.6f}")
+    else:
+        print("  (no first-decision strategy found — hero may never reach a")
+        print("   decision on the betting tree's modal villain line.)")
+    # range_aggregate doesn't carry a hero game-value field; the headline
+    # game value lives on the solver-internal exploitability path. Emit the
+    # backend tag so callers can disambiguate from the legacy loop output.
+    print()
+    print(f"Backend reported: {result.backend}  wall_clock={result.wall_clock_s:.3f}s")
     return 0
 
 
@@ -1895,6 +2038,22 @@ def build_parser() -> argparse.ArgumentParser:
             "reach_prob) rows with a header."
         ),
     )
+    rv.add_argument(
+        "--legacy-blueprint",
+        action="store_true",
+        help=(
+            "Force the legacy per-combo blueprint-shape loop (the original "
+            "PR 39 behavior): solve each (hero, villain_combo) as an "
+            "independent 1v1 subgame and aggregate the resulting hero-action "
+            "frequencies by combo weight. Default (off) routes multi-combo "
+            "villain ranges through `solve_range_vs_range_nash` for a "
+            "joint-Nash solve (mathematically correct, faster post PR #114). "
+            "Use this flag for backward-compat with pre-2026-05-27 outputs "
+            "or for fast approximate 13x13-style displays on dry boards. "
+            "Single-combo villain ranges always use the diagnostic "
+            "fixed-hand path (`solve_hunl_postflop`) regardless of this flag."
+        ),
+    )
     rv.set_defaults(func=_cmd_river)
 
     # ---- Task #51: generalized subgame command for flop/turn/river ----
@@ -2015,6 +2174,14 @@ def build_parser() -> argparse.ArgumentParser:
             "'json' dumps the full strategy dict per combo/node/action; "
             "'csv' emits (combo, node_history, action_label, probability, "
             "reach_prob) rows with a header."
+        ),
+    )
+    sg.add_argument(
+        "--legacy-blueprint",
+        action="store_true",
+        help=(
+            "Force the legacy per-combo blueprint-shape loop. Same semantics "
+            "as the `river --legacy-blueprint` flag (see that flag's help)."
         ),
     )
     sg.set_defaults(func=_cmd_subgame)
