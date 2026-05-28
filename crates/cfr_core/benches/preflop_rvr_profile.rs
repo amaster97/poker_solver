@@ -67,22 +67,23 @@ fn default_preflop_config() -> HUNLConfig {
 /// 3-class fixture: 12 hand instances (4 AA + 4 KK + 4 72o combos) per player.
 /// Approximates the "3-class range" scale referenced by the user.
 fn three_class_hands() -> [Vec<[u8; 2]>; 2] {
-    let mut h = Vec::new();
-    // AA: 4 combos.
-    h.push([card_to_int(14, 0), card_to_int(14, 1)]);
-    h.push([card_to_int(14, 0), card_to_int(14, 2)]);
-    h.push([card_to_int(14, 0), card_to_int(14, 3)]);
-    h.push([card_to_int(14, 1), card_to_int(14, 2)]);
-    // KK: 4 combos.
-    h.push([card_to_int(13, 0), card_to_int(13, 1)]);
-    h.push([card_to_int(13, 0), card_to_int(13, 2)]);
-    h.push([card_to_int(13, 0), card_to_int(13, 3)]);
-    h.push([card_to_int(13, 1), card_to_int(13, 2)]);
-    // 72o: 4 combos.
-    h.push([card_to_int(7, 0), card_to_int(2, 1)]);
-    h.push([card_to_int(7, 0), card_to_int(2, 2)]);
-    h.push([card_to_int(7, 1), card_to_int(2, 2)]);
-    h.push([card_to_int(7, 2), card_to_int(2, 3)]);
+    let h = vec![
+        // AA: 4 combos.
+        [card_to_int(14, 0), card_to_int(14, 1)],
+        [card_to_int(14, 0), card_to_int(14, 2)],
+        [card_to_int(14, 0), card_to_int(14, 3)],
+        [card_to_int(14, 1), card_to_int(14, 2)],
+        // KK: 4 combos.
+        [card_to_int(13, 0), card_to_int(13, 1)],
+        [card_to_int(13, 0), card_to_int(13, 2)],
+        [card_to_int(13, 0), card_to_int(13, 3)],
+        [card_to_int(13, 1), card_to_int(13, 2)],
+        // 72o: 4 combos.
+        [card_to_int(7, 0), card_to_int(2, 1)],
+        [card_to_int(7, 0), card_to_int(2, 2)],
+        [card_to_int(7, 1), card_to_int(2, 2)],
+        [card_to_int(7, 2), card_to_int(2, 3)],
+    ];
     [h.clone(), h]
 }
 
@@ -129,7 +130,7 @@ fn main() {
     let hand_lists = match mode.as_str() {
         "full" => full_deck_hands(),
         "mid" => mid_deck_hands(),
-        "3class" | _ => three_class_hands(),
+        _ => three_class_hands(),
     };
     let cfg = default_preflop_config();
 
