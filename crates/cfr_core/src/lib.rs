@@ -57,6 +57,16 @@ pub mod exploit;
 // (Kuhn, Leduc, fixed-combo HUNL postflop/preflop) are unchanged.
 pub mod dcfr_vector;
 
+// Phase A (full-tree preflop RvR) — preflop 169x169 equity leaf table
+// (`preflop_equity`) and the vector-form preflop solver driver
+// (`preflop_rvr`). The equity table is precomputed once via
+// `examples/build_preflop_equity.rs` and shipped as
+// `assets/preflop_equity_169x169.npz`; the solver loads it at runtime and
+// uses it to collapse the postflop chance subtree into a constant equity
+// leaf per (hero_class, villain_class, suit_variant).
+pub mod preflop_equity;
+pub mod preflop_rvr;
+
 use crate::solver::SolveOutput;
 
 /// Build-time version smoke check.
@@ -551,6 +561,106 @@ fn solve_range_vs_range_rust(
     Ok(dict.into())
 }
 
+/// Phase A — Full-tree preflop range-vs-range solver, exposed to Python as
+/// `_rust.solve_hunl_preflop_rvr`.
+///
+/// Differs from `solve_hunl_preflop` (the fixed-hole subgame path) by
+/// taking `initial_hole_cards = None` and solving the FULL preflop tree
+/// with all 1326 hole-card combos per player active. Postflop runouts are
+/// collapsed to a single equity-leaf value per (hero_class, villain_class,
+/// suit_variant) via the precomputed 169x169x3 table at
+/// `assets/preflop_equity_169x169.npz`.
+///
+/// User-confirmed action menu:
+///   - `preflop_open_sizes_bb`: absolute BB amounts for opens (default
+///     `[2.0, 3.0, 4.0, 5.0]`).
+///   - `preflop_reraise_multipliers`: 3-bet+ multipliers of the previous
+///     bet (default `[2.0, 3.0, 4.0, 5.0]`).
+///   - All-in always available.
+///   - Raise cap from `HUNLConfig.preflop_raise_cap` (default 4).
+#[pyfunction]
+#[pyo3(signature = (
+    config_json,
+    equity_table_path,
+    iterations,
+    alpha,
+    beta,
+    gamma,
+    preflop_open_sizes_bb=None,
+    preflop_reraise_multipliers=None,
+    p0_holes=None,
+    p1_holes=None,
+))]
+#[allow(clippy::too_many_arguments)]
+fn solve_hunl_preflop_rvr(
+    py: Python<'_>,
+    config_json: &str,
+    equity_table_path: &str,
+    iterations: u32,
+    alpha: f64,
+    beta: f64,
+    gamma: f64,
+    preflop_open_sizes_bb: Option<Vec<f64>>,
+    preflop_reraise_multipliers: Option<Vec<f64>>,
+    p0_holes: Option<Vec<[u8; 2]>>,
+    p1_holes: Option<Vec<[u8; 2]>>,
+) -> PyResult<PyObject> {
+    let config: hunl::HUNLConfig = serde_json::from_str(config_json)
+        .map_err(|e| PyValueError::new_err(format!("invalid HUNLConfig JSON: {e}")))?;
+    let opens = preflop_open_sizes_bb.unwrap_or_else(|| vec![2.0, 3.0, 4.0, 5.0]);
+    let mults = preflop_reraise_multipliers.unwrap_or_else(|| vec![2.0, 3.0, 4.0, 5.0]);
+    let table_path = std::path::PathBuf::from(equity_table_path);
+    let hand_lists: Option<[Vec<[u8; 2]>; 2]> = match (p0_holes, p1_holes) {
+        (Some(p0), Some(p1)) => Some([p0, p1]),
+        (None, None) => None,
+        _ => {
+            return Err(PyValueError::new_err(
+                "p0_holes and p1_holes must both be supplied or both omitted",
+            ));
+        }
+    };
+
+    let started = std::time::Instant::now();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        py.allow_threads(|| {
+            preflop_rvr::solve_hunl_preflop_rvr_with_hands(
+                &config,
+                &table_path,
+                hand_lists,
+                &opens,
+                &mults,
+                iterations,
+                alpha,
+                beta,
+                gamma,
+            )
+        })
+    }));
+    let result = result.map_err(|payload| PyValueError::new_err(panic_message(&payload)))?;
+    let out = result.map_err(PyValueError::new_err)?;
+    let wallclock_seconds = started.elapsed().as_secs_f64();
+
+    let dict = PyDict::new(py);
+    let strat = PyDict::new(py);
+    for (key, probs) in &out.average_strategy {
+        strat.set_item(key, probs.clone())?;
+    }
+    dict.set_item("average_strategy", strat)?;
+    dict.set_item("iterations", out.iterations)?;
+    dict.set_item("wallclock_seconds", wallclock_seconds)?;
+    dict.set_item("decision_node_count", out.decision_node_count)?;
+    dict.set_item("strategy_entry_count", out.strategy_entry_count)?;
+    dict.set_item(
+        "hand_count_per_player",
+        [
+            out.hand_count_per_player[0] as u32,
+            out.hand_count_per_player[1] as u32,
+        ],
+    )?;
+    dict.set_item("backend", "rust_preflop_rvr")?;
+    Ok(dict.into())
+}
+
 #[pymodule]
 fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_version, m)?)?;
@@ -560,5 +670,6 @@ fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(solve_hunl_preflop, m)?)?;
     m.add_function(wrap_pyfunction!(compute_exploitability, m)?)?;
     m.add_function(wrap_pyfunction!(solve_range_vs_range_rust, m)?)?;
+    m.add_function(wrap_pyfunction!(solve_hunl_preflop_rvr, m)?)?;
     Ok(())
 }
