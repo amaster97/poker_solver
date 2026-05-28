@@ -27,14 +27,18 @@ Daniel W3.1-3.5, Priya W4.1-4.3). Measurement-only; no code changes.
 
 | Category | Count | Workflows |
 |---|---|---|
-| **PASS** | **13** | W1.1, W1.2, W1.3, W1.4, **W1.5** (↑ via PR #125), W2.5, W3.1, W3.2, W3.3, W3.4 (caveated), W3.5 (no-flush PoC setup; class-name API informational), W4.1, W4.2, W4.3 (strict) |
-| **PARTIAL** | **3** | W2.1, W2.2, W2.4 |
+| **PASS** | **14** | W1.1, W1.2, W1.3, W1.4, **W1.5** (↑ via PR #125), **W2.4** (↑ via PR #133 — `--backend rust`), W2.5, W3.1, W3.2, W3.3, W3.4 (caveated), W3.5 (no-flush PoC setup; class-name API informational), W4.1, W4.2, W4.3 (strict) |
+| **PARTIAL** | **2** | W2.1, W2.2 |
 | **BLOCKED** | 1 | W2.3 |
 | **FAIL** | 0 | — |
 
-**Net delta:** PASS 12→**13** (+1), PARTIAL 4→**3** (-1), BLOCKED 1→1 (=), FAIL 0→0 (=).
+**Net delta vs prior snapshot (`persona_status_post_v1_8_0_shipped_2026-05-27.md`):** PASS 12→**14** (+2), PARTIAL 4→**2** (-2), BLOCKED 1→1 (=), FAIL 0→0 (=).
 
-**Single reclassification today:** **W1.5 PARTIAL → PASS** via PR #125 (`return_ev=True` keyword unblocks the structural Type C-NICE gap).
+**Net delta vs initial 2026-05-28 snapshot row (this doc as merged in PR #135):** PASS 13→**14** (+1), PARTIAL 3→**2** (-1).
+
+**Reclassifications today:**
+- **W1.5 PARTIAL → PASS** via PR #125 (`return_ev=True` keyword unblocks the structural Type C-NICE gap).
+- **W2.4 PARTIAL → PASS** via PR #133 (`batch-solve --backend rust` routes per-row through `solve_range_vs_range_nash`; 3-row CSV completes in **2.01s** vs prior >20-min CLI kill-switch).
 
 ---
 
@@ -52,14 +56,14 @@ All measurements taken on the worktree (`261fb7e` + worktree-local `_rust.cpytho
 | W1.4 | **PASS (scoped)** | 12.88 s | `solve_hunl_preflop(starting_stack=10000, ...)` with `initial_hole_cards=(AhKh, TdTc)`, iter=50 → game_value=-0.5027 BB. PR 9 subgame mode functional. |
 | W1.5 | **PASS** ↑ from PARTIAL | 0.16 s | `get_pushfold_strategy(10, 'sb_jam', '76s', return_ev=True)` returns `{'strategy': 1.0, 'ev_bb': -0.207}`. **PR #125 unblocks the Type C-NICE keyword gap** that held W1.5 at PARTIAL through v1.8.0. |
 
-### Sarah (W2.x) — 1/5 PASS / 3 PARTIAL / 1 BLOCKED *(unchanged)*
+### Sarah (W2.x) — 2/5 PASS / 2 PARTIAL / 1 BLOCKED *(W2.4 moved post-PR-133)*
 
 | ID | Verdict | Wall | Assertion that succeeded / failed |
 |---|---|---|---|
 | W2.1 | **PARTIAL** | <1 ms | `solve_hunl_preflop(HUNLConfig(starting_stack=10000), iterations=100)` raises `ValueError: solve_hunl_preflop requires initial_hole_cards to be set (subgame mode). PR 9 ships subgame-only; full-tree preflop (unfixed hole cards via the 1.6M-combo chance enum) is intractable without a hand-class abstraction — reserved for a post-v1 follow-up.` Structural blocker unchanged; not perf. PR #114 (perf) does not address structural gap. |
 | W2.2 | **PARTIAL** | 0.25 ms | `parse_range('AA,KK,QQ').diff(parse_range('AA,KK,JJ'))` returns 6 combos via set-membership (works). `Range.combos` exposes per-combo list; no per-combo frequency methods on Range (`dir(Range) = ['add', 'combos', 'diff', 'sample_excluding']`). B10 (Range fractional refactor) still blocker. |
 | W2.3 | **BLOCKED** | NOT RE-RUN per task constraint (>5 min) | Prior post-v1.8.0 result: >1200 s kill switch on 8-class symmetric turn fixture (Qs7h2d5c, 200BB, iter=500). PR #50 (BR-walk caching) still in flight. PR #114 TerminalCache improvements (213× faster on vector-RvR per `c4a7d6b`) may help; not re-measured today per task brief. |
-| W2.4 | **PARTIAL** | (CLI: >20 min prior; library: <10 ms) | CLI `poker-solver batch-solve --help` exists with proper schema. Library-direct path PASSes (prior retest 3/3 round-trip <10 ms). CLI `batch-solve` on 3-row CSV (river spots, iter=100) still times out at 20-min kill switch (prior retest). Co-blocked with W2.3 perf wall. |
+| W2.4 | **PASS** ↑ from PARTIAL | **2.01 s** | CLI `poker-solver batch-solve --backend rust --input scripts_retest/w2_4_test_spots.csv` (3 river rows, iter=100) completes 3/3 OK in **2.01 s wall** (per-row 0.58–0.68 s, backend=rust). All 3 spots land in the temp library with deterministic spot IDs. **149× safety margin** under Sarah's 5-min gate. PR #133 (`feat(cli): route batch-solve through Rust vector backend (W2.4 unblock, #59)`) is the unblocker — pre-PR-133 the CLI defaulted to the per-history `solve_hunl_postflop` Python path which timed out at 20-min on the same 3-row CSV. **Build caveat:** measured against worktree-local `_rust.cpython-313-darwin.so` rebuilt via `maturin develop --release` against `e6df209` source. The "main install" v1.8.0 wheel (May 23 build, pre-PR #16) panics on this fixture (`index out of bounds: the len is 65 but the index is 70` at `dcfr_vector.rs:651`); the source-current build includes the PR #16 / PR 51 asymmetric-range hand-count fix and the panic is resolved. Buildable-from-source state passes; **stale-binary state hard-fails** (next .dmg rebuild needs to include source-current .so to land this for end users). |
 | W2.5 | **PASS** | 12.17 s | `solve_hunl_preflop(HUNLConfig(starting_stack=3000, initial_hole_cards=(AhKs, QdQc)), iterations=50)` → game_value=-0.5017 BB. Subgame-mode preflop functional. |
 
 ### Daniel (W3.x) — 5/5 PASS *(W3.5 reclassified per PR #130; no movement today)*
@@ -99,9 +103,9 @@ This is a quality improvement (helps Daniel/Sarah filter phantom 5% infosets) bu
 - BLOCKED: 1 (W2.3)
 - FAIL: 0
 
-**Today (this snapshot, post-PR #125 + #129 + earlier):**
-- PASS: **13** (+1: W1.5)
-- PARTIAL: **3** (W2.1, W2.2, W2.4)
+**Today (this snapshot, post-PR #125 + #129 + #133 + earlier):**
+- PASS: **14** (+2: W1.5, W2.4)
+- PARTIAL: **2** (W2.1, W2.2)
 - BLOCKED: 1 (W2.3)
 - FAIL: 0
 
@@ -110,6 +114,7 @@ This is a quality improvement (helps Daniel/Sarah filter phantom 5% infosets) bu
 | Workflow | Prior | Today | PR / driver |
 |---|---|---|---|
 | **W1.5** Marcus push/fold sanity (76s @ 10 BB) | PARTIAL | **PASS** | **PR #125** (`f098e1f`) — `return_ev=True` keyword shipped; returns `{'strategy': 1.0, 'ev_bb': -0.207}` (matches Type C-NICE structural blocker described in spec §W1.5) |
+| **W2.4** Sarah batch-solve CSV schema | PARTIAL | **PASS** | **PR #133** (`e09dac4`) — `batch-solve --backend rust` routes per-row through `solve_range_vs_range_nash`. 3-row river fixture completes in 2.01 s wall (vs prior >20-min CLI kill-switch on the Python `solve_hunl_postflop` path). Sarah's 5-min session gate satisfied with 149× margin. Source-built .so required (stale v1.8.0 wheel panics — needs .dmg rebuild for end-user delivery). |
 
 ### Personas that should NOT have moved (and didn't)
 
@@ -122,12 +127,13 @@ This is a quality improvement (helps Daniel/Sarah filter phantom 5% infosets) bu
 
 ### Unexpected reclassifications
 
-**None.** All 4 named-PR effects landed as expected:
-- PR #125 → W1.5 PARTIAL→PASS ✓ (single net delta this snapshot)
+**None.** All 5 named-PR effects landed as expected:
+- PR #125 → W1.5 PARTIAL→PASS ✓
 - PR #128 → W4.2 reclassification ✓ (already absorbed into prior baseline)
 - PR #129 → off-path annotation present on SolveResult ✓ (quality, no persona move)
 - PR #130 → W3.5 reclassification ✓ (already absorbed into prior baseline)
-- PR #114 → vector-RvR perf gain ✓ (not enough to unblock W2.3 turn fixture, which is the next perf gate)
+- PR #133 → W2.4 PARTIAL→PASS ✓ (verified post-merge in `docs/persona-w2-4-verify-post-133` worktree)
+- PR #114 → vector-RvR perf gain ✓ (also load-bearing for W2.4 since `_solve_row_rust` calls into the TerminalCache-accelerated path; not enough to unblock W2.3 turn fixture, which is the next perf gate)
 
 ---
 
@@ -147,11 +153,15 @@ This is a quality improvement (helps Daniel/Sarah filter phantom 5% infosets) bu
 - Prior snapshot: `docs/persona_status_post_v1_8_0_shipped_2026-05-27.md` (post-PR #128 + #130)
 - Persona spec: `docs/pr13_prep/persona_acceptance_spec.md` (untracked working-tree file)
 - W1.5 PR: PR #125 (`f098e1f`) — `feat(pushfold): return_ev=True parameter for Marcus W1.5 persona (#48)`
+- W2.4 PR: PR #133 (`e09dac4`) — `feat(cli): route batch-solve through Rust vector backend (W2.4 unblock, #59)`
 - W3.5 amendment PR: PR #130 (`27e6b1d`)
 - W4.2 amendment PR: PR #128 (`f64ad5a`)
 - Off-path annotation PR: PR #129 (`5fec960`)
 - TerminalCache perf PR: PR #114 (`036a101`)
+- Asymmetric-range hand-count fix (load-bearing for W2.4 rust path): PR #16 (`2d7ea58`) — `fix(dcfr_vector): size next_reach by player_hands not opp_hands`
 - Post-v1.8.0 retest PR: PR #94 (`d0cf7be`)
+- W2.4 fixture: `scripts_retest/w2_4_test_spots.csv` (3 river rows, iter=100)
+- W2.4 retest script (pre-PR-133): `scripts_retest/w2_4_retest.py`
 - W3.5 PoC ground-truth: `docs/persona_test_results/W3_5_TRUE_nash_v1_5_1.md`
 - v1.8 SIMD bench (W2.3 perf framing): `docs/v1_8_simd_perf_benchmark_2026-05-26.md`
 - W2.3 retest prompt: `docs/persona_test_results/post_v1_8_0_W2_3_retest_prompt.md` (BR-walk caching in flight via PR #50)
