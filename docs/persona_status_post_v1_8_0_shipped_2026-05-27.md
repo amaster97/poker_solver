@@ -40,7 +40,7 @@ required** at production scale).
 | **W2.3** Sarah deep-stack turn RvR | BLOCKED | **BLOCKED (Type D)** | = | >1200 (kill) | 8-class symmetric turn fixture (Qs7h2d5c, 200BB, iter=500) per `post_v1_8_0_W2_3_retest_prompt.md`. Wall > 20 min kill switch (Sarah 5-min gate exceeded by 4×). v1.8 SIMD ~1.0× refutation confirmed. **Release-narrative-revision trigger** per pre-stage prompt line 117-118. |
 | **W2.4** Sarah batch-solve CSV | PARTIAL | **PARTIAL (Type D for CLI path)** | = | >1200 kill | CLI `batch-solve` on 3-row CSV (river spots, iter=100) timed out at 20-min kill switch with zero row commits to temp library. Library-direct path still PASSes (pre-v1.8 retest); CLI path remains INCONCLUSIVE-SLOW. v1.8 SIMD ~1.0× — perf unchanged. |
 | **W3.5** Daniel monotone polarization | FAIL (Type B-DOC) | **FAIL → DIAGNOSED (range-setup mismatch, not code bug)** | = | 70.7 / 11.3 | At class-name API: AA check = 0.14 (10-class) / 0.33 (15-class) / 0.32 (15-class @ 3000 iter; convergence ruled out). **At PoC explicit-no-flush-combo setup via `solve_range_vs_range_rust` directly @ 3000 iter: AA check = 1.0000** — PoC reproduces bit-clean at v1.8.0. Root cause: PoC excluded flushes from villain range; class-name API includes flush combos via classes like `AKs`, `KQs`, `JTs`, `98s`, `87s`, giving a different but correct Nash. **Not a code bug.** See `docs/v1_8_1_candidate_findings_2026-05-27.md` for full diagnostic chain. |
-| **W4.2** Priya limp-or-fold action menu | PARTIAL | **PARTIAL** | = | 0.7 | `ActionAbstractionConfig(bet_size_fractions=(), include_all_in=False)` produces clean check-only action menu at 10-class river RvR. Range aggregate check=1.0, no bet keys leak. Wiring + action restriction PASS confirmed at production scale. Heuristic mis-alignment (Type A DEVELOPER.md doc add) unchanged. |
+| **W4.2** Priya limp-or-fold action menu | PARTIAL | **PASS** | ↑ | 0.7 | `ActionAbstractionConfig(bet_size_fractions=(), include_all_in=False)` produces clean check-only action menu at 10-class river RvR. Range aggregate check=1.0, no bet keys leak. Wiring + action restriction PASS confirmed at production scale. **Reclassified PARTIAL → PASS** per `persona_acceptance_spec.md:69` amendment 2026-05-27 (task #62): criteria (3-trash) and (4) are informational-only when `bet_size_fractions=()` because subgame mode collapses equilibrium to per-hand equity comparison; the spec's range-aware heuristic does not apply. Hard PASS gates (1)+(2)+(3-premium)+(5) all met. See `docs/w4_2_investigation_2026-05-27.md` (PR #124, task #52). |
 
 ### Marcus 30s budget validation (W1.2 production-scale)
 
@@ -62,13 +62,13 @@ result: 9.19s at smaller fixture; 14.7s at 10-class production scale).
 - BLOCKED: 1
 - FAIL: 1
 
-**After retest:**
-- PASS: 10 (unchanged)
-- PARTIAL: 5 (unchanged — W1.5, W2.1, W2.2, W2.4, W4.2)
+**After retest (with 2026-05-27 W4.2 spec amendment per task #62):**
+- PASS: **11** (W4.2 reclassified PARTIAL → PASS per `persona_acceptance_spec.md:69` amendment)
+- PARTIAL: **4** (W1.5, W2.1, W2.2, W2.4)
 - BLOCKED: 1 (unchanged — W2.3 still Type D timeout; v1.8 SIMD refutation re-confirmed)
 - FAIL: 1 (unchanged label — W3.5 still labeled FAIL pending persona-spec update; **diagnosed as range-setup mismatch, NOT a code bug**)
 
-**No reclassifications, no regressions, no v1.8.1 code candidates.**
+**One reclassification (W4.2 PARTIAL → PASS, spec-amendment driven, no code change). No regressions, no v1.8.1 code candidates.**
 
 The retests confirm prior status. **W3.5 finding resolved at the diagnostic
 level:** initial 10-class FAIL looked like a wrapper bug, but the 3000-iter
@@ -171,11 +171,11 @@ correct, not a wrapper bug.
 PoC's no-flush range setup (AA check ≥0.99) from class-name API setups
 that include flush combos (AA check ≥0.50 may be appropriate).
 
-The other retested personas (W1.5, W2.1, W2.2, W2.4, W4.2) are unchanged
+The remaining retested personas (W1.5, W2.1, W2.2, W2.4) are unchanged
 structural blockers; v1.8.1 cannot resolve these without separate feature work
 (W2.1 awaits hand-class abstraction post-v1; W2.2 awaits B10; W1.5 awaits
-`return_ev=True` keyword; W4.2 awaits DEVELOPER.md docs; W2.4 CLI perf is
-co-blocked with W2.3 perf wall).
+`return_ev=True` keyword; W2.4 CLI perf is co-blocked with W2.3 perf wall).
+W4.2 resolved to PASS via 2026-05-27 spec amendment (task #62) — see row above.
 
 ---
 
