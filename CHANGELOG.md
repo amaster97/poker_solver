@@ -13,6 +13,342 @@ In-flight on feature branches; not yet merged to `main`.
 - v1.5/v2 follow-ups (Q3 exploitability slider reframe; range-based
   dealing; Rust callbacks; full-tree preflop).
 
+## [1.10.0] - 2026-MM-DD
+
+Combined v1.9.0 Premium-A + v1.10 postflop optimization release.
+Three user-visible capabilities ship together: (1) instant 27-cell
+precomputed preflop blueprint lookup, (2) realtime postflop subgame
+solving across **all three streets** — flop, turn, and river — with
+the live flop path unblocked by v1.10's arena + vector-form chance
+compaction, and (3) the W2.3 Sarah deep-stack turn workflow at
+strict-PASS via the vector-form best-response walk. Persona table:
+**17/0/0/0** (was 14/2/1/0 at v1.8.x).
+
+The release pulls the v1.9.0 draft (Premium-A blueprint feature
+chain; the v1.9.0 tag was never cut) plus the four v1.10 postflop
+optimization PRs (arena, vector turn, vector flop, opt-in rayon)
+into a single MINOR bump. See `docs/v1_9_0_release_notes_DRAFT.md`
+and `docs/v1_10_postflop_optimization_plan.md` for the per-stream
+detail; entries below are the consolidated CHANGELOG view.
+
+### Added — Preflop blueprint asset bundle (PR [#171][v110-pr171], asset commit `1783bef`)
+
+- **27 precomputed 169-class Nash-equilibrium preflop strategy
+  shards** (9 stack depths × 3 ante configs, ~21 MB compressed)
+  ship in `assets/blueprints/` with a per-shard sha256 manifest.
+  Stack depths: 20, 30, 40, 60, 80, 100, 150, 175, 200 BB. Ante
+  configs: `none`, `half`, `full`. Action menu: `fold`, `call`,
+  open 2-5 BB, 3/4/5-bet ladder, all-in. Raise cap 4 per preflop
+  street. 25,000 DCFR iterations per cell (Brown & Sandholm 2019
+  hyperparams).
+- **True 169-class engine** (PR [#171][v110-pr171], merge `a7a23ff`)
+  is the unblock that made the blueprint compute pipeline practical:
+  internal strategy storage and DCFR update now operate directly on
+  the 169-class abstraction, not on the underlying 1326 combos with
+  a post-hoc collapse. Lossless for preflop modulo numerical noise
+  (L1 = 0.0000 across 6,084 cells at 15 BB / 1000 iters vs hybrid
+  1326→169 output). Measured preflop solve speedup vs the prior
+  hybrid path: **178× / 406× / 448×** at 15 / 40 / 100 BB.
+- Compute wall for all 27 shards end-to-end on M-series silicon:
+  **38.5 minutes** (vs a pre-PR-#171 projection of 17-40 hours on
+  the hybrid path). Cumulative speedup over vanilla CFR ~80,000×;
+  see `docs/rust_optimization_ledger.md` §7.
+
+### Added — Blueprint loader + interpolation + postflop subgame APIs
+
+- **`poker_solver.blueprint.BlueprintLoader`** (PR [#174][v110-pr174],
+  merge `509f07d`) — lazy-load constructor + manifest sha256
+  validation + lookup API. ~865k lookups/sec on M4 Pro. Methods:
+  `from_dir`, `lookup`, `actions`, `available_depths`.
+- **`poker_solver.blueprint_interp.interpolate_strategy`**
+  (PR [#173][v110-pr173], merge `cb177c7`) — convex linear blend
+  across the two bracketing anchor depths for any depth in
+  `[20, 200]` BB; `method="nearest"` snaps to nearest anchor.
+  Result stays on the probability simplex; floating-point drift
+  normalized.
+- **`poker_solver.blueprint_subgame.solve_postflop_from_blueprint`**
+  (PR [#177][v110-pr177], merge `18b9bcf`) — chains blueprint
+  preflop history into a postflop live-solve. Looks up per-player
+  reach-vector strategy → expands 169-class to 1326-combo reach via
+  suit-symmetric per-combo weighting → live-solves the postflop
+  street with the expanded reaches as priors via the vector-form
+  CFR backend. Optional `top_k_per_side` parameter (default: no
+  truncation; the 1326-combo solver is internal and the `top_k`
+  filter operates at the **class level**, not combo level — see
+  caveat below).
+- **`poker_solver.solver_router.SolverRouter`** (PR [#181][v110-pr181],
+  merge `03842b0`) — top-level front-door for "solve this request,
+  whatever street/depth/range it is." Picks one of four backends:
+  `lookup` (anchor depth + anchor ante + blueprint hit),
+  `interp` (non-anchor depth + anchor ante + blueprint hit on both
+  bracket depths), `live` (out-of-envelope), or `postflop-subgame`
+  (turn / river / flop chained from blueprint). The active backend
+  is exposed on `SolveResult.backend` for introspection.
+- **`SolveResult.backend`** — new field on the existing dataclass.
+  Existing callers that don't read `backend` are unaffected.
+- **Token-equivalence fix at preflop boundary** (PR [#182][v110-pr182],
+  merge `2aedb4b`) — normalizes `b`/`r` history tokens so blueprint
+  histories using either notation route to the same shard entry.
+
+### Added — UI integration: blueprint chart widget + chained tab (PR [#178][v110-pr178], merge `5df601b`)
+
+- **13×13 chart widget** displays a `blueprint` / `interpolated` /
+  `live` source badge in the cell tooltip. Anchor depth + ante
+  cells are instant lookups; off-anchor depths route through the
+  interpolation path with `interpolated` badging; out-of-envelope
+  cells fall through to a fresh live solve.
+- **Chained postflop tab** surfaces the blueprint preflop range
+  source per player (blueprint / interpolated / live) and the
+  active postflop backend (turn live-solve, flop live-solve as of
+  v1.10, river live-solve) at the top of the result panel.
+
+### Added — Vector-form best-response walk + W2.3 strict-PASS (PR [#170][v110-pr170], merge `188489b`)
+
+- Applies the vector-form pattern (PR #114, forward walk) to the
+  **best-response walk** in `exploit.rs`. At each tree node, one
+  batched op operates on the full combo vector instead of looping
+  per combo and walking the tree.
+- **Bench result on the W2.3 fixture:** per-combo 202.43 s →
+  vector **32.30 s** (=6.27×). On the 8-class W2.3 retest fixture
+  used to gate the strict-PASS reclassification, wall is
+  **~25.18 s** — inside Sarah's 600 s (10-min) gate by ~24×.
+- **Dual-path during transition:** `BrWalkMode::PerCombo` is the
+  canonical reference (unchanged); `BrWalkMode::Vector` is opt-in.
+  10 diff tests in `exploit::tests::vector_matches_per_combo_*`
+  confirm bit-identical agreement (1e-12 EV / 1e-9 exploitability)
+  across the Kuhn / Leduc / 8-class-river / W2.3-turn / mixed
+  fixture matrix.
+- Persona reclassification recorded in PR [#184][v110-pr184]
+  (merge `f0fc879`): **W2.3 PARTIAL → strict-PASS; persona table
+  17/0/0/0**.
+
+### Added — B10 per-combo frequency feature train
+
+The `Range` set-membership semantics of v1.7.x are extended with
+per-combo fractional weights. **W2.2 Sarah `Range.diff`:
+PARTIAL → PASS** via this train (captured in
+`docs/persona_status_2026-05-28-late.md`).
+
+- **PR [#149][v110-pr149]** (`40ac87a`) — Phase A: `Range` per-combo
+  fractional weights. `Range` stores a `dict[Combo, float]`
+  internally; `range["AKs"] = 0.6` is supported.
+- **PR [#154][v110-pr154]** (`11e3f01`) — Phase B: aggregator +
+  solver weight propagation. The vector-form CFR backend respects
+  per-combo weights in the prior reach distribution.
+- **PR [#158][v110-pr158]** (`1839ee1`) — Phase C: per-combo
+  intensity editor in the GUI range builder.
+- **PR [#160][v110-pr160]** (`a1c1546`) — Phase D: W2.2
+  `Range.diff` empirical verification + persona reclassification.
+
+### Added — Blueprint user + developer guides (PR [#176][v110-pr176])
+
+- `docs/blueprint_user_guide.md` — user-facing guide for the
+  27-shard preflop bundle, the chart widget badges, and the
+  chained-tab workflow.
+- `docs/blueprint_developer_guide.md` — developer-facing guide
+  covering the loader / interpolation / subgame / router APIs +
+  the reraise-multiplier semantics (PR [#191][v110-pr191] worked
+  example).
+
+### Added — CLI BB-normalization (PR [#152][v110-pr152], merge `dfc0786`)
+
+- Commercial-UX parity: CLI surfaces accept and display chip
+  values in BB units consistently across `solve`, `pushfold`,
+  `river`, and `parity` subcommands. Resolves the v1.8.x friction
+  where some surfaces accepted chips and others BB.
+
+### Performance — v1.10 postflop optimization (task #70)
+
+The v1.10 stream lands four perf PRs targeting the live flop
+subgame OOM that was the marquee v1.9 carry-over. See
+`docs/v1_10_postflop_optimization_plan.md` for the research
+analysis and `docs/rust_optimization_ledger.md` for the cumulative
+speedup table.
+
+- **Thread-local arena allocator** (PR-1, when it lands — branch
+  `feat-v1-10-1-arena-lto`). Replaces per-call `vec![0.0; N]`
+  allocations in `dcfr_vector.rs::traverse` (lines 635, 661,
+  689-690, 741-742, 766) with a thread-local `BumpArena` that
+  hands out reusable `&mut [f64]` slices under RAII stack
+  discipline. Reference pattern: `references/code/postflop-solver/
+  src/alloc.rs` (AGPL, no code copy). Target: 3-5× wall reduction
+  on flop, near-zero quality risk; bit-identical at 1e-12 EV.
+- **Vector-form turn forward walk** (PR [#190][v110-pr190]) — adds
+  chance-template extraction at tree-build time + specialized
+  chance-node dispatch on `VectorDCFR`. Bit-identical to main at
+  1e-12 strategy tolerance (the dispatch hook performs the same
+  arithmetic as the legacy chance arm); IEEE 754 summation order
+  preserved. Ships the structural framework PR-3 needs to broadcast
+  scratch buffers across river-card chance branches.
+- **Vector-form flop forward walk** (PR-3, when it lands — branch
+  to be cut). Extends PR-2's template framework to double chance
+  compaction (turn × river); flop's outer chance loop does
+  45 × 44 = 1980 weighted sums against the cached river template
+  instead of recursing the full subtree. Target: **flop top_k=169
+  in <120 s wall, RSS ≤ 1 GB** (vs current OOM).
+- **Opt-in rayon parallel chance branches** (PR [#189][v110-pr189],
+  merge `f5ec665`) — parallelizes iteration over 45 turn cards via
+  `rayon::par_iter`. Each thread walks one turn subtree and
+  contributes regret/strategy_sum deltas through disjoint mutable
+  access (`split_at_mut`; no `unsafe`). **Empirical: 4.79× speedup
+  on flop top_k=169 (14-core M-series)**; river single-threaded
+  overhead -5.8% (within ±10% noise). Opt-in via
+  `CFR_RAYON_CHANCE=1` env var; canonical single-threaded path is
+  bit-identical to the pre-rayon implementation at Δ=0.000e+00
+  across all 25 existing diff tests + 9 new rayon-path fixtures
+  in `tests/test_vector_rayon_diff.py`.
+- **Flop subgame top_k=169 in <120 s** (target) — unblocks the v1.9
+  carry-over. Previously OOM-killed at ~2.3 GB RSS within 5 minutes
+  wall on the J7o A♦8♥9♦ 40 BB / 169-class reference fixture.
+- **Perf benchmark harness** (PR [#187][v110-pr187], merge
+  `b5aa023`) — `scripts/run_v1_10_perf_bench.py` (Python driver)
+  + `crates/cfr_core/benches/flop_subgame_perf.rs` (Rust inner
+  kernel) with the canonical fixture (J7o A♦8♥9♦, 40 BB,
+  SB-opens-3bb / BB-calls) and the 12-cell matrix
+  (top_k ∈ {4, 15, 50, 169} × street ∈ {flop, turn, river}).
+  Includes `scripts/measure_quality_metrics.py` with three formulas
+  (`chips_to_bb100`, `compute_l1_distance`,
+  `compute_ev_action_loss_bb100`). Outputs:
+  `docs/v1_10_perf_bench_results.jsonl` + per-street markdown
+  tables.
+- **Profiler + canonical diff-test scaffold** (PR [#188][v110-pr188],
+  merge `5390bdd`) — `scripts/profile_flop_subgame.py` runs the
+  reference flop solve under macOS `/usr/bin/sample` CPU profiling
+  (top function: `VectorDCFR::traverse` 51%, `evaluate_7` 15%,
+  `BettingTree::add` 8%). `tests/test_v1_10_canonical_diff.py`
+  over 8 kill-switch fixtures (F1.1 Kuhn, F1.3 Leduc, F2.4, F3.1,
+  F4.1, F5.2, F5.3, J7o) with per-quantity tolerance (1e-12
+  strategy, 1e-9 exploitability, exact BR argmax, 1e-12 game
+  value). Each v1.10-N implementer PR re-runs the harness on its
+  branch; mismatches HARD-FAIL.
+- **Flop subgame OOM measurement** (PR [#186][v110-pr186], merge
+  `629b5b2`) — 4-config wall+RSS sweep documenting the pre-v1.10
+  baseline (top_k=4/15/50/169 × flop) for the perf ledger.
+
+### Fixed — Preflop `State::initial` honors `config.initial_contributions` (PR [#165][v110-pr165], merge `43ed53e`)
+
+- Long-standing preflop engine bug: `State::initial` (the entry
+  point for fresh preflop subgames) failed to read
+  `config.initial_contributions` correctly, always starting from
+  `(0, 0)` contributions even when the config declared a
+  non-trivial ante or already-posted blind. Caused subtle
+  preflop-RvR strategy drift on configs with
+  `initial_contributions` ≠ `(0.5, 1.0)`.
+- PR [#165][v110-pr165] tightens `State::initial` to read
+  `config.initial_contributions` directly. The default
+  `(0.5, 1.0)` path is **unchanged at the bit level** (the default
+  values were already correct under the old code path). Configs
+  with non-default `initial_contributions` (custom antes, straddle
+  setups) now produce strategies consistent with the declared chip
+  state.
+- The blueprint compute pipeline reads the corrected
+  `State::initial` — the shipped 27 blueprints already reflect the
+  fix.
+- Scope investigation (PR #161, `63264dd`) confirmed the bug was
+  preflop-only; postflop subgame paths construct `State`
+  differently and were never affected.
+
+### Caveats — disclosed honestly
+
+- **Flop subgame live-solve unblocked.** v1.10's arena + vector
+  turn + vector flop + opt-in rayon stream takes the live flop
+  path from OOM-killed (5 min / ~2.3 GB RSS) to **flop top_k=169
+  in <120 s** target on the J7o A♦8♥9♦ 40 BB reference fixture.
+  The v1.9 carry-over "flop = blueprint-only" caveat is **resolved
+  in v1.10** (live flop ✓).
+- **Rayon parallelism is opt-in via `CFR_RAYON_CHANCE=1`**.
+  Default path is the canonical single-threaded path and is
+  bit-identical to the pre-rayon implementation at Δ=0.000e+00
+  across all 25 existing diff tests + 9 new rayon-path fixtures.
+  When opted in: empirical 4.79× speedup on flop top_k=169
+  (14-core M-series); zero quality regression.
+- **`top_k_per_side` is a class-level filter, not combo-level.**
+  The solver internally operates on the full **1326-combo
+  representation** (per-combo blocker bookkeeping is required for
+  correct postflop walks). `top_k_per_side=4 / 15 / 50` truncates
+  each player's range to the top-K **hand classes** by reach mass
+  before expanding to combos. Setting `top_k_per_side` below 169
+  introduces a strategic loss vs the full 169-class solve; it is
+  **not** a Nash-preserving abstraction. Production default is no
+  filter (full 169-class → 1326-combo expansion). Use only when
+  wall time is the dominant constraint. See
+  `docs/v1_10_postflop_optimization_plan.md` §5.1 for the perf
+  matrix.
+- **Persona table 17/0/0/0** maintained; full persona suite gated
+  per-PR on the v1.10 train.
+- **Carry-overs unchanged from v1.8.x:** A83 deep-cap Brown
+  apples-to-apples residual (Nash multiplicity at deep-cap
+  indifference manifolds, not a bug — strict-per-cell |Δ| K72
+  0.852 / A83 0.907 under the reframed 4-layer SANITY gate);
+  Apple Silicon arch hazard (pyenv x86_64 cannot load arm64
+  `_rust.so`; use `.venv/bin/python`); `poker-solver` PATH shim
+  quirk on first-time install; `.app`/`.dmg` still ad-hoc-signed.
+
+### Migration / upgrade notes
+
+- **Public API additions are additive.** `BlueprintLoader`,
+  `interpolate_strategy`, `solve_postflop_from_blueprint`,
+  `SolverRouter`, and the new `SolveResult.backend` field are all
+  new surface; no v1.8.x caller signature changes.
+- **Asset bundle required for blueprint paths.** `assets/blueprints/`
+  (27 gzipped JSON shards + `manifest.json`, ~21 MB compressed)
+  ships in the v1.10.0 `.dmg`; source installs pick it up from
+  `git pull` (LFS-tracked in clones with LFS enabled).
+- **Rebuild required from source.** v1.10 includes new Rust engine
+  surface (PR #171 169-class engine, PR #170 vector-form BR walk,
+  PR #189 rayon-gated parallel chance, plus the v1.10 arena +
+  vector-turn + vector-flop PRs); `pip install -e .` will not
+  rebuild `_rust.so`. Run `maturin develop --release` after
+  `git pull`.
+- **Version bumps:** `crates/cfr_core` `0.8.3 → 0.10.0`;
+  `pyproject.toml` `1.8.3 → 1.10.0`; `poker_solver/__init__.py`
+  `__version__` `1.8.3 → 1.10.0`. (Note: v1.9.0 was never tagged;
+  this is a single MINOR bump folding both work streams.)
+
+### Full PR list (v1.10.0 ship)
+
+Premium-A blueprint feature train (PR #68 epic):
+[#171][v110-pr171], [#173][v110-pr173], [#174][v110-pr174],
+[#176][v110-pr176], [#177][v110-pr177], [#178][v110-pr178],
+[#181][v110-pr181], [#182][v110-pr182], asset commit `1783bef`.
+
+Engine / perf (v1.9 stream): [#152][v110-pr152],
+[#165][v110-pr165], [#170][v110-pr170].
+
+B10 per-combo frequency train (PR #60 epic):
+[#149][v110-pr149], [#154][v110-pr154], [#158][v110-pr158],
+[#160][v110-pr160].
+
+v1.10 postflop optimization (task #70):
+[#186][v110-pr186], [#187][v110-pr187], [#188][v110-pr188],
+[#189][v110-pr189], [#190][v110-pr190], plus PR-1 (arena+LTO)
+and PR-3 (vector flop) when they land.
+
+Audit / status: [#184][v110-pr184], [#191][v110-pr191].
+
+[v110-pr149]: https://github.com/amaster97/poker_solver/pull/149
+[v110-pr152]: https://github.com/amaster97/poker_solver/pull/152
+[v110-pr154]: https://github.com/amaster97/poker_solver/pull/154
+[v110-pr158]: https://github.com/amaster97/poker_solver/pull/158
+[v110-pr160]: https://github.com/amaster97/poker_solver/pull/160
+[v110-pr165]: https://github.com/amaster97/poker_solver/pull/165
+[v110-pr170]: https://github.com/amaster97/poker_solver/pull/170
+[v110-pr171]: https://github.com/amaster97/poker_solver/pull/171
+[v110-pr173]: https://github.com/amaster97/poker_solver/pull/173
+[v110-pr174]: https://github.com/amaster97/poker_solver/pull/174
+[v110-pr176]: https://github.com/amaster97/poker_solver/pull/176
+[v110-pr177]: https://github.com/amaster97/poker_solver/pull/177
+[v110-pr178]: https://github.com/amaster97/poker_solver/pull/178
+[v110-pr181]: https://github.com/amaster97/poker_solver/pull/181
+[v110-pr182]: https://github.com/amaster97/poker_solver/pull/182
+[v110-pr184]: https://github.com/amaster97/poker_solver/pull/184
+[v110-pr186]: https://github.com/amaster97/poker_solver/pull/186
+[v110-pr187]: https://github.com/amaster97/poker_solver/pull/187
+[v110-pr188]: https://github.com/amaster97/poker_solver/pull/188
+[v110-pr189]: https://github.com/amaster97/poker_solver/pull/189
+[v110-pr190]: https://github.com/amaster97/poker_solver/pull/190
+[v110-pr191]: https://github.com/amaster97/poker_solver/pull/191
+
 ## [1.8.0] - 2026-05-27
 
 The v1.8.0 release folds in the v1.6.1 engine bundle (shipped piecewise
