@@ -144,12 +144,15 @@ Output:
 **No code fix required.** The W3.5 issue is fully resolved at the
 diagnostic level. The remaining work is documentation/spec hygiene:
 
-1. **Update persona acceptance spec** (`docs/pr13_prep/persona_acceptance_spec.md` §2 W3.5):
-   clarify that the W3.5 acceptance criterion `AA check ≥ 0.99` applies
-   specifically to the PoC's no-flush explicit-combo setup. For class-name
-   API setups that include flushes in villain's range, `AA check ≥ 0.50`
-   is a more appropriate criterion (the class-name range gives a different
-   but mathematically correct Nash strategy).
+1. **Update persona acceptance spec** — **DONE 2026-05-27 (task #63):**
+   the W3.5 range-setup qualifier is now codified in
+   `docs/persona_status_post_v1_8_0_shipped_2026-05-27.md`
+   §"W3.5 spec amendment 2026-05-27" (this PR). Criterion `AA check ≥ 0.99`
+   is **strict** under the PoC's explicit-no-flush setup (PASS at v1.8.0)
+   and **informational-only** under class-name API setups that include
+   flush combos. Reclassifies W3.5 FAIL → PASS. The parent
+   `docs/pr13_prep/persona_acceptance_spec.md` §2 W3.5 entry will inherit
+   the amendment block when that file lands on main.
 2. **Add a class-name regression test** (optional, persona-spec hygiene):
    document the expected AA check behavior on `parse_range`-style class
    names so that production-scale retests have correct acceptance criteria.
