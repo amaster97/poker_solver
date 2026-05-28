@@ -73,3 +73,7 @@ PLAN.md
 
 # Local-only archives + scratch (not project source)
 .local/
+
+# Profiler artifacts (scripts/profile_flop_subgame.py output, regenerated on demand)
+.profile_logs/
+.profile_run.log
