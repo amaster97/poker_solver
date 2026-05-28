@@ -96,7 +96,7 @@ One-line rationale: **v1.8.1 is the credibility-of-release-page patch; HIGH-1/HI
 
 ## Hygiene tasks (user can do anytime, NOT v1.8.1 blocking)
 
-- [ ] **Persona spec W3.5 update** (`docs/pr13_prep/persona_acceptance_spec.md` §2 W3.5): clarify that `AA check ≥ 0.99` applies to the PoC's explicit-no-flush-combo setup; class-name API setups including flush combos (e.g., `AKs`, `KQs`, `JTs`, `98s`, `87s`) get a different-but-correct Nash where `AA check ≥ 0.50` is more appropriate. Source: `docs/persona_status_post_v1_8_0_shipped_2026-05-27.md` §"W3.5 monotone polarization — diagnosed as range-setup mismatch (not a code bug)". Diagnostic ruled out wrapper bug (PoC explicit-combo setup reproduces `AA check = 1.0000` bit-clean at v1.8.0).
+- [x] **Persona spec W3.5 update** — **DONE 2026-05-27 (task #63):** amendment landed via `docs/persona_status_post_v1_8_0_shipped_2026-05-27.md` §"W3.5 spec amendment 2026-05-27" (reclassifies W3.5 FAIL → PASS via dual-mode range-setup qualifier; mirrors the W4.2 amendment pattern from PR #128). The amendment text is authoritative until `docs/pr13_prep/persona_acceptance_spec.md` lands on main, at which point §2 W3.5 inherits the block. Net persona-table delta: PASS 11 → 12, FAIL 1 → 0.
 
 - [ ] **PR #49** (`pr-92-resume-doc`) — RESUME doc, OPEN MERGEABLE. **Stale** — body says "TWO MAJOR FINDINGS that need user decision before v1.8.0 ships" but v1.8.0 shipped. Either refresh the body and merge as historical, or close. Source: `docs/post_burst_audit_2026-05-27.md` §5 Open PR sanity.
 
@@ -143,7 +143,7 @@ One-line rationale: **v1.8.1 is the credibility-of-release-page patch; HIGH-1/HI
 | HIGH-2 RvR optimization | **DEFER** to v1.9 (NEON roadmap) | No |
 | GitHub v1.8.0 release body amendment | **DEFER** — user eyeball first | No |
 | v1.8.0 .dmg upload | **DEFER** — user manually uploads | No |
-| Persona spec W3.5 clarification | **DEFER** (hygiene) | No |
+| Persona spec W3.5 clarification | **DONE** (task #63, this PR — reclassifies FAIL → PASS) | No |
 | Tasks #31/#32 preflop orchestrator | **DEFER** to v1.9+ | No |
 
 ---
