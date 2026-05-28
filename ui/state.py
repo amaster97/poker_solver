@@ -69,7 +69,11 @@ from typing import TYPE_CHECKING, Any
 from poker_solver.card import RANKS, Card
 from poker_solver.hunl import HUNLConfig, HUNLPoker, Street
 from poker_solver.range import Combo, Range, parse_range
-from poker_solver.range_aggregator import HandClass, RangeVsRangeResult
+from poker_solver.range_aggregator import (
+    HandClass,
+    RangeVsRangeNashResult,
+    RangeVsRangeResult,
+)
 from poker_solver.solver import SolveResult
 
 if TYPE_CHECKING:
@@ -364,6 +368,22 @@ class Spot:
     # mode because hole-card selection is handled per-class by the
     # aggregator itself.
     rvr_mode: bool = False
+    # Task #61: RvR solver-mode selector (post-PR-114 true-Nash unlock).
+    # When ``rvr_mode`` is True, this field picks which engine entry the
+    # worker routes through:
+    #   * ``"blueprint"`` (default — backward compat): the Pluribus-style
+    #     ``poker_solver.range_aggregator.solve_range_vs_range`` aggregator.
+    #     Fast per-spot, but produces per-class blueprint approximations,
+    #     not a true joint Nash. See ``docs/aggregator_vs_true_nash_explainer.md``.
+    #   * ``"true_nash"``: ``poker_solver.range_aggregator.solve_range_vs_range_nash``
+    #     (vector-form CFR — Brown's algorithm bit for bit). Yields a true
+    #     joint Nash with an exploitability number. Per PR #114 the river
+    #     path is now ~213× faster (interactive on river; flop/turn may
+    #     still be longer wall-clock). The UI surfaces a tooltip warning
+    #     when this mode is enabled.
+    # Ignored when ``rvr_mode`` is False (concrete solves don't go through
+    # the aggregator at all).
+    solver_mode: str = "blueprint"
     # PR 24a: hero seat selector (v1.3.1 ``hero_player`` surface).
     # 0 = hero at P0 (SB seat / button — aggressor postflop sequencing);
     # 1 = hero at P1 (BB seat — defender). Mirrors the
@@ -675,6 +695,16 @@ class SolveRunner:
         # ``per_class_strategy`` onto the 13x13 grid instead of the
         # point-pair concrete strategy.
         self.rvr_result: RangeVsRangeResult | None = None
+        # Task #61: true-Nash RvR result snapshot (None when concrete solve
+        # or when ``solver_mode == "blueprint"``). Populated by the worker
+        # when ``start(...)`` is invoked with ``rvr_mode=True`` AND
+        # ``solver_mode="true_nash"``. The result carries an exploitability
+        # number + per-class projection; ``ui/views/run_panel.py`` reads
+        # ``exploitability`` and ``wall_clock_s`` to populate the result
+        # readouts. The matrix renderer treats this dataclass duck-typed
+        # the same as ``RangeVsRangeResult`` (both expose
+        # ``per_class_strategy`` keyed by hand class).
+        self.nash_result: RangeVsRangeNashResult | None = None
         # PR 24a §3.7: tier-slider plumbing. ``run_panel._wrap_solve``
         # sets these on each click; ``ui/app.py:_on_solve`` reads them
         # when calling ``start(...)``. Kept off ``SolveSession`` to avoid
@@ -721,6 +751,14 @@ class SolveRunner:
         rvr_hero_range: list[HandClass] | None = None,
         rvr_villain_range: list[HandClass] | None = None,
         rvr_hero_player: int = 0,
+        # Task #61: true-Nash solver-mode dispatch (post-PR-114 perf unlock).
+        # When ``rvr_mode`` is True, ``solver_mode == "true_nash"`` routes the
+        # worker through ``solve_range_vs_range_nash`` (vector-form CFR);
+        # the default ``"blueprint"`` keeps the existing Pluribus aggregator
+        # path. The value is ignored when ``rvr_mode`` is False. Must be
+        # one of ``"blueprint"`` or ``"true_nash"``; any other value raises
+        # ValueError so misconfigurations surface early.
+        solver_mode: str = "blueprint",
         # PR 24b §3.5: node-locking. ``locked_strategies`` maps infoset
         # key -> probability vector aligned to the engine's legal-action
         # ordering at that node. Empty/None falls through to existing
@@ -745,6 +783,10 @@ class SolveRunner:
                 "rvr_mode=True requires rvr_hero_range and rvr_villain_range "
                 "to be non-None lists of hand-class strings."
             )
+        if solver_mode not in ("blueprint", "true_nash"):
+            raise ValueError(
+                f"solver_mode must be 'blueprint' or 'true_nash'; got {solver_mode!r}."
+            )
         # Reset state for the new run.
         self._pause_event.clear()
         self._stop_event.clear()
@@ -757,6 +799,7 @@ class SolveRunner:
             self.started_at = time.time()
             self.partial_report = None
             self.rvr_result = None
+            self.nash_result = None
         config = game.config
         self._thread = threading.Thread(
             target=self._worker,
@@ -775,6 +818,7 @@ class SolveRunner:
                 "rvr_hero_range": rvr_hero_range,
                 "rvr_villain_range": rvr_villain_range,
                 "rvr_hero_player": rvr_hero_player,
+                "solver_mode": solver_mode,
                 "locked_strategies": locked_strategies,
                 "force_tree_solve": force_tree_solve,
             },
@@ -889,6 +933,7 @@ class SolveRunner:
         rvr_hero_range: list[HandClass] | None = None,
         rvr_villain_range: list[HandClass] | None = None,
         rvr_hero_player: int = 0,
+        solver_mode: str = "blueprint",
         locked_strategies: dict[str, list[float]] | None = None,
         force_tree_solve: bool = False,
     ) -> None:
@@ -961,6 +1006,7 @@ class SolveRunner:
                 villain_range=rvr_villain_range or [],
                 hero_player=rvr_hero_player,
                 dcfr_kwargs=dcfr_kwargs,
+                solver_mode=solver_mode,
             )
             return
 
@@ -1247,21 +1293,42 @@ class SolveRunner:
         villain_range: list[HandClass],
         hero_player: int,
         dcfr_kwargs: dict[str, Any] | None,
+        solver_mode: str = "blueprint",
     ) -> None:
-        """Run the range-vs-range aggregator path (PR 24a).
+        """Run the range-vs-range path (PR 24a + task #61).
 
-        Dispatches to ``poker_solver.range_aggregator.solve_range_vs_range``.
+        When ``solver_mode == "blueprint"`` (default, backward-compatible):
+        dispatches to ``poker_solver.range_aggregator.solve_range_vs_range``.
         Progress is plumbed via the aggregator's ``on_progress(done, total,
         hand_class)`` callback so the UI's chart can show class-level
         completion as a coarse stand-in for exploitability (the aggregator
         does not expose a per-iter exploitability curve — every per-hand
-        solve runs the underlying concrete solver to convergence).
+        solve runs the underlying concrete solver to convergence). Honest
+        framing per ``range_aggregator.py`` module docstring: this is a
+        blueprint approximation, NOT a Nash range-vs-range solve. The chart
+        subtitle in ``run_panel._chart_options`` reflects this (see PR 24a
+        §3.4 "true Nash vs blueprint").
 
-        Honest framing per ``range_aggregator.py`` module docstring: this
-        is a blueprint approximation, NOT a Nash range-vs-range solve.
-        The chart subtitle in ``run_panel._chart_options`` reflects this
-        (see PR 24a §3.4 "true Nash vs blueprint").
+        When ``solver_mode == "true_nash"`` (task #61, post-PR-114 unlock):
+        dispatches to ``poker_solver.range_aggregator.solve_range_vs_range_nash``
+        (vector-form CFR, joint Nash of the supplied ranges with an
+        exploitability number computed at the end). Per PR #114 the river
+        path is ~213× faster than the pre-cache baseline; flop / turn wall
+        times may still be longer than the blueprint path. The result lands
+        on ``self.nash_result`` (vs ``self.rvr_result`` for the blueprint
+        path); both expose ``per_class_strategy`` so the matrix renderer
+        treats them the same.
         """
+        if solver_mode == "true_nash":
+            self._run_true_nash_rvr_path(
+                config=config,
+                iterations=iterations,
+                hero_range=hero_range,
+                villain_range=villain_range,
+                hero_player=hero_player,
+            )
+            return
+
         from poker_solver.range_aggregator import solve_range_vs_range
 
         def _on_rvr_progress(done: int, total: int, hand_class: str) -> None:
@@ -1319,6 +1386,90 @@ class SolveRunner:
         with self._lock:
             self.rvr_result = rvr_result
             self.iteration = len(hero_range)
+            if self._stop_event.is_set():
+                self.status = "stopped"
+            else:
+                self.status = "done"
+
+    def _run_true_nash_rvr_path(
+        self,
+        *,
+        config: HUNLConfig,
+        iterations: int,
+        hero_range: list[HandClass],
+        villain_range: list[HandClass],
+        hero_player: int,
+    ) -> None:
+        """Run the true-Nash vector-form RvR path (task #61).
+
+        Dispatches to ``poker_solver.range_aggregator.solve_range_vs_range_nash``
+        (PR 23 vector-form CFR) instead of the Pluribus-blueprint
+        aggregator. Produces a joint Nash with an exploitability number;
+        the river path is ~213× faster post-PR-114 (interactive on river
+        though flop / turn may still be longer wall-clock).
+
+        Progress: the vector-form solver does not stream per-iteration
+        callbacks in v1.7.0 (see ``range_aggregator.solve_range_vs_range_nash``
+        docstring); it fires ``on_progress`` once at start and once at
+        end. We surface ``(0, iterations)`` -> ``(iterations, expl)`` on
+        the chart so the user sees the solve kick off and finalize.
+
+        Cancellation: the vector-form solver runs to completion before
+        returning. ``self._stop_event`` is not honored mid-solve; this is
+        a known limitation of the v1.7.0 binding. The daemon thread will
+        exit naturally on return.
+        """
+        from poker_solver.range_aggregator import solve_range_vs_range_nash
+
+        def _on_progress(done: int, total: int, phase: str) -> None:
+            _ = phase  # vector-form labels: "solve_start" / "solve_done"
+            now = time.monotonic()
+            with self._lock:
+                self.iteration = done
+                self.current_time_monotonic = now
+
+        # Populate timing fields used by ``compute_eta()``.
+        with self._lock:
+            self.target_iterations = iterations
+            self.start_time_monotonic = time.monotonic()
+            self.current_time_monotonic = self.start_time_monotonic
+
+        try:
+            nash_result = solve_range_vs_range_nash(
+                config,
+                hero_range,
+                villain_range,
+                iterations=iterations,
+                hero_player=hero_player,
+                on_progress=_on_progress,
+            )
+        except (ValueError, RuntimeError, NotImplementedError, ImportError) as exc:
+            logger.exception("True-Nash RvR solve failed with %s", type(exc).__name__)
+            with self._lock:
+                self.error = exc
+                self.status = "error"
+            return
+        except BaseException as exc:  # noqa: BLE001
+            logger.exception("True-Nash RvR solve worker raised unexpected exception")
+            with self._lock:
+                self.error = exc
+                self.status = "error"
+            return
+
+        with self._lock:
+            self.nash_result = nash_result
+            # Mirror onto ``rvr_result`` so the matrix renderer's
+            # duck-typed ``per_class_strategy`` lookup (see
+            # ``ui/views/range_matrix.py:_current_rvr_result``) finds the
+            # true-Nash projection without an additional code path. Both
+            # dataclasses expose the same ``per_class_strategy`` attribute.
+            self.rvr_result = nash_result  # type: ignore[assignment]
+            self.iteration = int(getattr(nash_result, "iterations", iterations))
+            # Push the final exploitability onto the chart's expl_history
+            # so the user sees the converged value (vector form does not
+            # stream per-iter, so this is the single data point).
+            expl_value = float(getattr(nash_result, "exploitability", 0.0))
+            self.expl_history.append((self.iteration, expl_value))
             if self._stop_event.is_set():
                 self.status = "stopped"
             else:

@@ -358,6 +358,10 @@ def _on_solve(state: AppState) -> None:
                 rvr_hero_range=hero_range,
                 rvr_villain_range=villain_range,
                 rvr_hero_player=spot.hero_player,
+                # Task #61: thread the solver-mode toggle through. Default
+                # ``"blueprint"`` preserves the existing aggregator path;
+                # ``"true_nash"`` dispatches to vector-form CFR.
+                solver_mode=getattr(spot, "solver_mode", "blueprint"),
             )
         except RuntimeError as exc:
             ui.notify(f"Solve already running: {exc}", type="warning", position="top")
