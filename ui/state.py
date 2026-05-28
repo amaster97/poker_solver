@@ -823,6 +823,15 @@ class SolveRunner:
         # the same as ``RangeVsRangeResult`` (both expose
         # ``per_class_strategy`` keyed by hand class).
         self.nash_result: RangeVsRangeNashResult | None = None
+        # Task #57: chained orchestrator result snapshot (None when concrete
+        # solve or RvR / blueprint paths). Populated by the worker when
+        # ``start(...)`` is invoked with ``solver_mode="chained"``; consumed
+        # by ``ui/views/chained_tab.py`` to render the 13x13 preflop chart
+        # and lazily fetch the postflop subgame solves via
+        # ``ChainedSolveResult.solve_postflop``. The forward-reference avoids
+        # importing ``poker_solver.chained`` at module load — the chained
+        # module is only needed inside ``_run_chained_path``.
+        self.chained_result: Any | None = None
         # PR 24a §3.7: tier-slider plumbing. ``run_panel._wrap_solve``
         # sets these on each click; ``ui/app.py:_on_solve`` reads them
         # when calling ``start(...)``. Kept off ``SolveSession`` to avoid
@@ -920,9 +929,10 @@ class SolveRunner:
                 "rvr_mode=True requires rvr_hero_range and rvr_villain_range "
                 "to be non-None lists of hand-class strings."
             )
-        if solver_mode not in ("blueprint", "true_nash"):
+        if solver_mode not in ("blueprint", "true_nash", "chained"):
             raise ValueError(
-                f"solver_mode must be 'blueprint' or 'true_nash'; got {solver_mode!r}."
+                f"solver_mode must be 'blueprint', 'true_nash', or 'chained'; "
+                f"got {solver_mode!r}."
             )
         # Reset state for the new run.
         self._pause_event.clear()
@@ -937,6 +947,15 @@ class SolveRunner:
             self.partial_report = None
             self.rvr_result = None
             self.nash_result = None
+            # Task #57: chained orchestrator result holder. Cleared on
+            # every start so a previous chain solve never leaks into the
+            # next click. The ``chained_tab`` view reads this attribute
+            # directly to drive the 13x13 preflop chart + the lazy postflop
+            # subgame display.
+            self.chained_result = None
+            # Stash the active mode so views can tell whether to project
+            # their result holder (mirrors the preflop_chart pattern).
+            self._mode = "chained" if solver_mode == "chained" else self.__dict__.get("_mode", "")
         config = game.config
         self._thread = threading.Thread(
             target=self._worker,
@@ -1385,6 +1404,28 @@ class SolveRunner:
             while self._pause_event.is_set() and not self._stop_event.is_set():
                 time.sleep(0.05)
             return self._stop_event.is_set()
+
+        # ----- Chained orchestrator path (task #57, #31 Phase C) -----
+        # When ``solver_mode == "chained"``, route through
+        # :func:`poker_solver.chained.solve_chained` (PR #121 Phase A).
+        # Stashes the resulting :class:`ChainedSolveResult` on
+        # ``self.chained_result`` so the chained_tab view can render the
+        # 13x13 preflop chart and lazily fetch postflop subgames. Mock
+        # injection still takes priority so smoke tests can synthesize
+        # error paths regardless of solver_mode.
+        if (
+            solver_mode == "chained"
+            and mock_latency_ms is None
+            and mock_failure_mode is None
+        ):
+            self._run_chained_path(
+                config=config,
+                iterations=iterations,
+                hero_range=rvr_hero_range or [],
+                villain_range=rvr_villain_range or [],
+                hero_player=rvr_hero_player,
+            )
+            return
 
         # ----- Range-vs-range path (PR 24a) -----
         # When ``rvr_mode`` is set, route through the Pluribus-blueprint
@@ -1866,6 +1907,111 @@ class SolveRunner:
             # so the user sees the converged value (vector form does not
             # stream per-iter, so this is the single data point).
             expl_value = float(getattr(nash_result, "exploitability", 0.0))
+            self.expl_history.append((self.iteration, expl_value))
+            if self._stop_event.is_set():
+                self.status = "stopped"
+            else:
+                self.status = "done"
+
+    def _run_chained_path(
+        self,
+        *,
+        config: HUNLConfig,
+        iterations: int,
+        hero_range: list[HandClass],
+        villain_range: list[HandClass],
+        hero_player: int,
+    ) -> None:
+        """Run the chained orchestrator path (task #57, #31 Phase C).
+
+        Dispatches to :func:`poker_solver.chained.solve_chained` which:
+
+          1. Solves the preflop range subgame via Route A blueprint
+             aggregation (per-pair :func:`solve_hunl_preflop` calls;
+             see ``poker_solver/chained.py``).
+          2. Enumerates preflop terminal action sequences + derives
+             per-player continuation ranges.
+          3. Returns a :class:`ChainedSolveResult` whose
+             ``solve_postflop(action_seq, board)`` method runs the
+             postflop subgame lazily on demand.
+
+        Stashes the result on ``self.chained_result`` so the
+        ``chained_tab`` view can render the 13x13 preflop chart and
+        trigger postflop subgames from the UI.
+
+        Progress: the chained orchestrator currently emits per-stage
+        callbacks (``"preflop"`` / ``"continuation"``). We use those to
+        update ``self.iteration`` so the header's status indicator
+        moves while the per-pair solves run. The expl_history axis is
+        coarse (count of completed per-pair solves vs total) — the chart
+        subtitle in ``chained_tab._subtitle`` already calls this out.
+
+        Cancellation: the orchestrator runs the per-pair preflop solves
+        synchronously and there is no per-solve interrupt point in
+        Phase A. ``self._stop_event`` is honored between stages only;
+        the daemon thread will exit naturally on return.
+
+        Note: the chained orchestrator reuses ``rvr_hero_range`` /
+        ``rvr_villain_range`` for hero / villain class lists (the
+        worker dispatches via the same parameter slot to avoid widening
+        ``start``'s signature for a third path). The ``rvr_mode`` flag
+        is NOT set when this path runs — it is mutually exclusive with
+        the chained dispatch, and the worker checks ``solver_mode``
+        first.
+        """
+        from poker_solver.chained import solve_chained
+
+        def _on_chained_progress(stage: str, done: int, total: int) -> None:
+            _ = stage  # "preflop" / "continuation"
+            now = time.monotonic()
+            with self._lock:
+                self.iteration = done
+                self.target_iterations = total
+                self.current_time_monotonic = now
+
+        with self._lock:
+            self.target_iterations = max(1, len(hero_range) * len(villain_range))
+            self.start_time_monotonic = time.monotonic()
+            self.current_time_monotonic = self.start_time_monotonic
+            self._mode = "chained"
+
+        try:
+            chained_result = solve_chained(
+                config,
+                hero_range=hero_range,
+                villain_range=villain_range,
+                preflop_iterations=iterations,
+                # Phase A defaults the postflop iter count to 500. The UI
+                # exposes a single preflop-iter input for now; postflop
+                # iters can be widened in a future PR if needed.
+                postflop_iterations=500,
+                hero_player=hero_player,
+                on_progress=_on_chained_progress,
+            )
+        except (ValueError, RuntimeError, NotImplementedError, ImportError) as exc:
+            logger.exception("Chained solve failed with %s", type(exc).__name__)
+            with self._lock:
+                self.error = exc
+                self.status = "error"
+            return
+        except BaseException as exc:  # noqa: BLE001
+            logger.exception("Chained solve worker raised unexpected exception")
+            with self._lock:
+                self.error = exc
+                self.status = "error"
+            return
+
+        with self._lock:
+            self.chained_result = chained_result
+            self.iteration = int(
+                getattr(chained_result.preflop_result, "iterations", iterations)
+            )
+            # Push the preflop exploitability into the chart history so
+            # the run-panel chart has a finalize data point even though
+            # the chained orchestrator does not stream per-iter.
+            expl_value = float(
+                getattr(chained_result.preflop_result, "exploitability", 0.0)
+            )
             self.expl_history.append((self.iteration, expl_value))
             if self._stop_event.is_set():
                 self.status = "stopped"
