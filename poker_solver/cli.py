@@ -789,6 +789,76 @@ def _cmd_pushfold(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_pot_stack_bb(args: argparse.Namespace) -> tuple[int, int]:
+    """v1.9.0 — Resolve --pot / --stack with legacy --pot-bb / --stack-bb aliases.
+
+    Returns ``(pot_bb, stack_bb)``. Resolution order:
+
+    1. Canonical ``--pot`` / ``--stack`` win when both forms are passed.
+    2. Legacy ``--pot-bb`` / ``--stack-bb`` work alone (emits a one-shot
+       deprecation warning to stderr).
+    3. Neither passed → defaults (10 BB pot, 100 BB stacks).
+
+    Minimum clamps are preserved from the prior code path (pot >= 1,
+    stack >= 2 to avoid solver pathologies).
+    """
+    from poker_solver.cli_bb_format import emit_deprecation_warning_once
+
+    pot_canonical = getattr(args, "pot", None)
+    stack_canonical = getattr(args, "stack", None)
+    pot_legacy = getattr(args, "pot_bb", None)
+    stack_legacy = getattr(args, "stack_bb", None)
+
+    if pot_canonical is not None:
+        pot_bb = int(pot_canonical)
+    elif pot_legacy is not None:
+        emit_deprecation_warning_once("--pot-bb", "--pot")
+        pot_bb = int(pot_legacy)
+    else:
+        pot_bb = 10
+
+    if stack_canonical is not None:
+        stack_bb = int(stack_canonical)
+    elif stack_legacy is not None:
+        emit_deprecation_warning_once("--stack-bb", "--stack")
+        stack_bb = int(stack_legacy)
+    else:
+        stack_bb = 100
+
+    return max(1, pot_bb), max(2, stack_bb)
+
+
+def _print_spot_header(
+    *,
+    starting_stack_chips: int,
+    initial_pot_chips: int,
+    board_cards: list,
+    street_label: str | None,
+    bet_size_fractions: tuple[float, ...],
+    raise_cap: int,
+) -> None:
+    """v1.9.0 — Print the ``SPOT CONFIG`` header block to stdout.
+
+    Mirrors the brief verbatim. Always printed before the legacy preamble
+    (``Board:`` / ``Hero:`` / etc.) so users get a consistent at-a-glance
+    summary across every CLI command. Suppressed in JSON/CSV formats by
+    caller (parseable output must not be polluted with the header).
+    """
+    from poker_solver.cli_bb_format import SpotHeader, render_header
+
+    board_str = " ".join(str(c) for c in board_cards) if board_cards else ""
+    header = SpotHeader(
+        effective_stack_chips=starting_stack_chips,
+        starting_pot_chips=initial_pot_chips,
+        board=board_str,
+        street=(street_label.upper() if street_label else None),
+        bet_menu_pcts=tuple(bet_size_fractions),
+        raise_cap=raise_cap,
+        include_all_in=True,
+    )
+    print(render_header(header), end="")
+
+
 def _cmd_river(args: argparse.Namespace) -> int:
     """PR 39: river spot solve with fixed hero hole cards vs villain range.
 
@@ -957,8 +1027,7 @@ def _run_subgame_solve(
     # (matches the USAGE.md §3b convention; users can rebuild a custom config
     # in Python for non-standard stacks).
     big_blind = 100
-    pot_bb = max(1, int(args.pot_bb))
-    stack_bb = max(2, int(args.stack_bb))
+    pot_bb, stack_bb = _resolve_pot_stack_bb(args)
     initial_pot = pot_bb * big_blind
     half = initial_pot // 2
     starting_stack = stack_bb * big_blind
@@ -1005,9 +1074,32 @@ def _run_subgame_solve(
             iters=args.iters,
         )
 
-    # When in text mode (default formatter), emit the legacy preamble. JSON /
-    # CSV modes suppress preamble so the output is parser-friendly.
+    # When in text mode (default formatter), emit the v1.9.0 SPOT CONFIG
+    # header followed by the legacy preamble. JSON / CSV modes suppress
+    # both so the output is parser-friendly.
     if fmt == "text":
+        # v1.9.0 — SPOT CONFIG header block (commercial-UX parity). Uses
+        # the engine's default action-abstraction bet menu + raise cap
+        # since the river/subgame commands don't expose --bet-sizes (the
+        # ad-hoc postflop `solve --hunl-mode postflop` path does); we
+        # surface those defaults so the user sees the menu they're
+        # solving against.
+        from poker_solver.action_abstraction import ActionContext as _ActionCtx
+
+        default_bet_menu = _ActionCtx.__dataclass_fields__[
+            "bet_size_fractions"
+        ].default
+        default_raise_cap = _ActionCtx.__dataclass_fields__[
+            "postflop_raise_cap"
+        ].default
+        _print_spot_header(
+            starting_stack_chips=starting_stack,
+            initial_pot_chips=initial_pot,
+            board_cards=board_cards,
+            street_label=street_label,
+            bet_size_fractions=default_bet_menu,
+            raise_cap=default_raise_cap,
+        )
         print(f"Board:        {' '.join(str(c) for c in board_cards)}")
         if show_street_line:
             print(f"Street:       {street_label}")
@@ -1156,6 +1248,23 @@ def _run_subgame_true_nash(
     for combo in villain_combos:
         villain_range_obj.add(combo)
 
+    # v1.9.0 — SPOT CONFIG header block.
+    from poker_solver.action_abstraction import ActionContext as _ActionCtx
+
+    default_bet_menu = _ActionCtx.__dataclass_fields__[
+        "bet_size_fractions"
+    ].default
+    default_raise_cap = _ActionCtx.__dataclass_fields__[
+        "postflop_raise_cap"
+    ].default
+    _print_spot_header(
+        starting_stack_chips=starting_stack,
+        initial_pot_chips=initial_pot,
+        board_cards=board_cards,
+        street_label=street_label,
+        bet_size_fractions=default_bet_menu,
+        raise_cap=default_raise_cap,
+    )
     print(f"Board:        {' '.join(str(c) for c in board_cards)}")
     if show_street_line:
         print(f"Street:       {street_label}")
@@ -1233,6 +1342,10 @@ def _render_new_mode(
     Pulled out of ``_cmd_river`` to keep the legacy code path readable. All
     state passed in explicitly so this stays a pure presentation function.
     """
+    from poker_solver.cli_bb_format import (
+        canonical_history_for_user_node,
+        canonical_node_id_for_history,
+    )
     from poker_solver.cli_tree_walk import (
         aggregate_class_strategies,
         compute_mdf_threshold,
@@ -1248,9 +1361,11 @@ def _render_new_mode(
     # including opponent strategy + chance prob); falls back to the
     # legacy heuristic when the result lacks the fields.
     per_combo_nodes: dict[str, list] = {}
+    per_combo_games: dict[str, object] = {}
     for combo_label, result in per_combo_results.items():
         cfg = per_combo_cfgs[combo_label]
         game = HUNLPoker_cls(cfg)
+        per_combo_games[combo_label] = game
         reach_lookup = getattr(result, "reach_probability", None) or None
         off_keys = getattr(result, "off_path_keys", None) or None
         nodes = walk_tree(
@@ -1261,6 +1376,24 @@ def _render_new_mode(
             off_path_keys=off_keys,
         )
         per_combo_nodes[combo_label] = nodes
+
+    # v1.9.0 — translate the user-supplied --node string into the engine's
+    # canonical chip-token form. ``node_history`` will be the engine-form
+    # string used for lookups below; ``node_history_user`` is what the
+    # caller passed in (preserved for error messages so we don't surprise
+    # the user with normalization rewrites).
+    node_history_user = node_history
+    if node_history is not None and node_history != "":
+        # Use the first per-combo game to walk the tree; all combos share
+        # the same betting structure since they only differ by hole cards.
+        ref_game = next(iter(per_combo_games.values()))
+        try:
+            node_history = canonical_history_for_user_node(
+                node_history, ref_game, None,
+            )
+        except ValueError as exc:
+            print(f"error: {exc}", file=__import__("sys").stderr)
+            return 2
 
     if fmt == "json":
         # Full dict dump — every combo, every node.
@@ -1308,9 +1441,11 @@ def _render_new_mode(
         # Drill-down: aggregate per-class strategy at the requested history.
         classes = aggregate_class_strategies(per_combo_nodes, node_history)
         if not classes:
+            display_node = node_history_user or node_history
             print(
-                f"No nodes match history {node_history!r} for any villain combo. "
-                "Try a shorter / different history (e.g. 'xb750', 'b330')."
+                f"No nodes match history {display_node!r} for any villain combo. "
+                "Try a shorter / different history "
+                "(e.g. 'check.bet33pct', 'b330')."
             )
             return 0
         # Determine the MDF threshold from the first matching combo (all
@@ -1345,7 +1480,19 @@ def _render_new_mode(
                 f"Villain combo {combo_label} — {len(nodes)} on-path nodes"
                 + (" (incl. off-path phantoms)" if full_tree else "")
             )
-            print(format_text(nodes, title=title, include_off_path=full_tree))
+            game = per_combo_games[combo_label]
+            # v1.9.0 — translate each engine history into the BB-native
+            # canonical id for the [--node "..."] right-margin annotation.
+            def _node_id_fn(history: str, _g=game) -> str:
+                return canonical_node_id_for_history(history, _g)
+            print(
+                format_text(
+                    nodes,
+                    title=title,
+                    include_off_path=full_tree,
+                    node_id_for_history=_node_id_fn,
+                )
+            )
         print(f"Mean game value (BB, P0 perspective): {mean_ev:+.6f}")
         return 0
 
@@ -1967,17 +2114,32 @@ def build_parser() -> argparse.ArgumentParser:
         default=200,
         help="DCFR iterations per per-combo solve (default: 200).",
     )
+    # v1.9.0 — canonical BB flags (no -bb suffix; BB implicit). The
+    # ``--pot-bb`` / ``--stack-bb`` legacy aliases below stay functional
+    # with a deprecation warning emitted to stderr on first use.
+    rv.add_argument(
+        "--pot",
+        type=int,
+        default=None,
+        help="Starting pot in BB (v1.9.0 canonical; default 10).",
+    )
+    rv.add_argument(
+        "--stack",
+        type=int,
+        default=None,
+        help="Per-player effective stack in BB (v1.9.0 canonical; default 100).",
+    )
     rv.add_argument(
         "--pot-bb",
         type=int,
-        default=10,
-        help="Starting pot in BB (default: 10).",
+        default=None,
+        help="[DEPRECATED v1.9.0] Use --pot. Kept for backward compat.",
     )
     rv.add_argument(
         "--stack-bb",
         type=int,
-        default=100,
-        help="Per-player effective stack in BB (default: 100).",
+        default=None,
+        help="[DEPRECATED v1.9.0] Use --stack. Kept for backward compat.",
     )
     # v1.8.2 — tree-walk presentation modes. Defaults preserve the legacy
     # first-decision aggregate output byte-for-byte (no new flags = no
@@ -2107,17 +2269,31 @@ def build_parser() -> argparse.ArgumentParser:
         default=200,
         help="DCFR iterations per per-combo solve (default: 200).",
     )
+    # v1.9.0 — canonical BB flags. Mirror of `river` (see that block for
+    # the deprecation policy).
+    sg.add_argument(
+        "--pot",
+        type=int,
+        default=None,
+        help="Starting pot in BB (v1.9.0 canonical; default 10).",
+    )
+    sg.add_argument(
+        "--stack",
+        type=int,
+        default=None,
+        help="Per-player effective stack in BB (v1.9.0 canonical; default 100).",
+    )
     sg.add_argument(
         "--pot-bb",
         type=int,
-        default=10,
-        help="Starting pot in BB (default: 10).",
+        default=None,
+        help="[DEPRECATED v1.9.0] Use --pot. Kept for backward compat.",
     )
     sg.add_argument(
         "--stack-bb",
         type=int,
-        default=100,
-        help="Per-player effective stack in BB (default: 100).",
+        default=None,
+        help="[DEPRECATED v1.9.0] Use --stack. Kept for backward compat.",
     )
     # v1.8.2 — tree-walk presentation modes (same set as `river`).
     sg.add_argument(

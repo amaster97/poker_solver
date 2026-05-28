@@ -9,7 +9,7 @@ tree from a solved ``HUNLSolveResult.average_strategy`` dict:
   its action labels, and the reach probability along the path.
 * :func:`decode_action_label` — pretty-print a single action ID given the
   ``ActionContext`` at the decision point (e.g. ``ACTION_BET_75`` →
-  ``"bet 75% (750)"``).
+  ``"bet 75% pot (7.5 BB)"`` post-v1.9.0 BB-normalization).
 * :func:`format_text` / :func:`format_json` / :func:`format_csv` — render the
   walk output in three formats.
 * :func:`find_node` — locate a node by its history string (e.g. ``"xb750"``)
@@ -50,6 +50,7 @@ from poker_solver.action_abstraction import (
     compute_bet_amount,
     compute_raise_to,
 )
+from poker_solver.cli_bb_format import format_bb, format_pot_pct
 from poker_solver.hunl import HUNLPoker, HUNLState
 
 # ---------------------------------------------------------------------------
@@ -75,34 +76,48 @@ _RAISE_FRACTIONS = {
 def decode_action_label(action_id: int, ctx: ActionContext) -> str:
     """Pretty-print a single action ID given the current decision context.
 
-    Output format examples:
+    v1.9.0 — BB-native output. Every chip amount is rendered as a BB amount
+    with at most 1 decimal place; bet/raise labels carry BOTH the %-pot tag
+    (so the user can read the bet-menu parameterization at a glance) AND
+    the BB amount (so they don't need to do mental math against a 100-chip
+    BB). All-in labels show the BB amount + the BB pot for context.
+
+    Output format examples (post-v1.9.0):
 
     * ``ACTION_FOLD`` → ``"fold"``
     * ``ACTION_CHECK`` → ``"check"``
-    * ``ACTION_CALL`` → ``"call (250)"`` (chip amount = to_call)
-    * ``ACTION_BET_75`` → ``"bet 75% (750)"``
-    * ``ACTION_RAISE_100`` → ``"raise to 2500 (100% pot)"``
-    * ``ACTION_ALL_IN`` → ``"all-in (9500)"``
+    * ``ACTION_CALL`` → ``"call (2.5 BB)"`` (chip amount = to_call rendered)
+    * ``ACTION_BET_75`` → ``"bet 75% pot (7.5 BB)"``
+    * ``ACTION_RAISE_100`` → ``"raise to 25 BB (100% pot)"``
+    * ``ACTION_ALL_IN`` (opening) → ``"all-in (95 BB into 10 BB pot)"``
+
+    The BB rendering goes through :func:`poker_solver.cli_bb_format.format_bb`
+    which strips trailing zeros (``7.5`` not ``7.5000``) and uses ``.``
+    as the decimal separator regardless of locale.
     """
     if action_id == ACTION_FOLD:
         return "fold"
     if action_id == ACTION_CHECK:
         return "check"
     if action_id == ACTION_CALL:
-        return f"call ({ctx.to_call})"
+        return f"call ({format_bb(ctx.to_call)} BB)"
     if action_id == ACTION_ALL_IN:
         # Both opening and reraise all-ins go through this branch — the chip
         # delta is the player's remaining stack for opening, and we mirror
         # compute_bet_amount which returns the stack for ACTION_ALL_IN.
-        return f"all-in ({ctx.stacks[ctx.cur_player]})"
+        stack_chips = ctx.stacks[ctx.cur_player]
+        return (
+            f"all-in ({format_bb(stack_chips)} BB into "
+            f"{format_bb(ctx.pot)} BB pot)"
+        )
     if action_id in _BET_FRACTIONS:
         label, _ = _BET_FRACTIONS[action_id]
         amount = compute_bet_amount(action_id, ctx)
-        return f"bet {label} ({amount})"
+        return f"bet {label} pot ({format_bb(amount)} BB)"
     if action_id in _RAISE_FRACTIONS:
         label, _ = _RAISE_FRACTIONS[action_id]
         raise_to = compute_raise_to(action_id, ctx)
-        return f"raise to {raise_to} ({label} pot)"
+        return f"raise to {format_bb(raise_to)} BB ({label} pot)"
     return f"action_{action_id}"
 
 
@@ -451,8 +466,18 @@ def format_text(
     *,
     title: str | None = None,
     include_off_path: bool = False,
+    node_id_for_history=None,
 ) -> str:
-    """Pretty-print the walk as ASCII tree text with bar charts."""
+    """Pretty-print the walk as ASCII tree text with bar charts.
+
+    v1.9.0 — node lines now embed a copy-paste-friendly ``[--node "..."]``
+    annotation showing the BB-native node id at the right margin. The
+    caller supplies a ``node_id_for_history`` callback that maps an engine
+    history string (e.g. ``"xb750"``) to the user-facing canonical
+    notation (e.g. ``"check.bet75pct"``). When the callback is ``None``,
+    the original engine history is shown verbatim (preserves the
+    pre-v1.9.0 output structure for tests that pin the legacy form).
+    """
     buf = _io.StringIO()
     if title:
         buf.write(title)
@@ -465,14 +490,20 @@ def format_text(
     for node in nodes:
         marker = " [OFF-PATH]" if node.off_path else ""
         depth_indent = "  " * len(_split_history_tokens(node.history))
+        node_id = (
+            node_id_for_history(node.history)
+            if node_id_for_history is not None
+            else node.history
+        )
+        node_annotation = f'  [--node "{node_id}"]'
         buf.write(
             f"{depth_indent}P{node.player} ({node.hole_label})"
             f" — {humanize_history(node.history)}"
-            f"  [reach={node.reach_prob:.4f}]{marker}\n"
+            f"  [reach={node.reach_prob:.4f}]{marker}{node_annotation}\n"
         )
         for _, label, prob in node.actions:
             buf.write(
-                f"{depth_indent}    {label:<28}  "
+                f"{depth_indent}    {label:<32}  "
                 f"{_bar(prob)}  {prob:.4f}\n"
             )
         buf.write("\n")
