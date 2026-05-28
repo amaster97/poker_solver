@@ -814,6 +814,7 @@ def generate_blueprint(
     equity_table_path: str | None = None,
     rust_solver: Any | None = None,
     skip_actual_solve: bool = False,
+    hand_resolution: HandResolution = HandResolution.CLASS_169,
 ) -> Blueprint:
     """Generate a single blueprint cell.
 
@@ -824,12 +825,24 @@ def generate_blueprint(
         equity_table_path: Override path to the 169x169x3 equity table.
             Defaults to the in-tree asset.
         rust_solver: Optional callable matching the signature of
-            ``poker_solver._rust.solve_hunl_preflop_rvr`` for dependency
+            ``poker_solver._rust.solve_hunl_preflop_rvr`` (or, when
+            ``hand_resolution == CLASS_169``, the signature of
+            ``solve_hunl_preflop_rvr_class169``) for dependency
             injection in tests. If ``None``, imports the production
             extension.
         skip_actual_solve: For tests + dry runs — if True, produces an
             empty blueprint with metadata only. Used to validate the
             schema round-trip without paying solve cost.
+        hand_resolution: Engine storage mode.
+            - ``CLASS_169`` (default, **True Path B**): engine runs the
+              169-element vector kernel. Per-iter speedup ~7-12x over
+              ``COMBO_1326``. Output strategy is already 169-class
+              (wrapper aggregation is a no-op).
+            - ``COMBO_1326`` (legacy hybrid path): engine runs the
+              1326-combo kernel; wrapper post-aggregates to 169 classes
+              via ``aggregate_to_169_classes``. Kept for differential
+              testing and applications that need exact per-combo
+              strategies.
 
     Returns:
         The converged blueprint with 169-class strategies.
@@ -855,25 +868,45 @@ def generate_blueprint(
     if rust_solver is None:
         from poker_solver import _rust  # type: ignore[attr-defined]
 
-        rust_solver = getattr(_rust, "solve_hunl_preflop_rvr", None)
+        attr_name = (
+            "solve_hunl_preflop_rvr_class169"
+            if hand_resolution == HandResolution.CLASS_169
+            else "solve_hunl_preflop_rvr"
+        )
+        rust_solver = getattr(_rust, attr_name, None)
         if rust_solver is None:
             raise RuntimeError(
-                "poker_solver._rust.solve_hunl_preflop_rvr is missing. "
+                f"poker_solver._rust.{attr_name} is missing. "
                 "Rebuild via `maturin develop --release`."
             )
 
-    raw = rust_solver(
-        config_json,
-        equity_table_path,
-        config.iterations,
-        config.alpha,
-        config.beta,
-        config.gamma,
-        list(config.preflop_open_sizes_bb),
-        list(config.preflop_reraise_multipliers),
-        None,  # p0_holes — full 1326
-        None,  # p1_holes — full 1326
-    )
+    if hand_resolution == HandResolution.CLASS_169:
+        # True Path B: engine emits 169-class strategy directly.
+        raw = rust_solver(
+            config_json,
+            equity_table_path,
+            config.iterations,
+            config.alpha,
+            config.beta,
+            config.gamma,
+            list(config.preflop_open_sizes_bb),
+            list(config.preflop_reraise_multipliers),
+            None,  # root_reach_p0 — default combo-weighted (matches hybrid)
+            None,  # root_reach_p1 — default combo-weighted (matches hybrid)
+        )
+    else:
+        raw = rust_solver(
+            config_json,
+            equity_table_path,
+            config.iterations,
+            config.alpha,
+            config.beta,
+            config.gamma,
+            list(config.preflop_open_sizes_bb),
+            list(config.preflop_reraise_multipliers),
+            None,  # p0_holes — full 1326
+            None,  # p1_holes — full 1326
+        )
     average_strategy = {k: list(v) for k, v in raw["average_strategy"].items()}
     wallclock = time.time() - started
 
@@ -889,8 +922,15 @@ def generate_blueprint(
         preflop_raise_cap=hunl_config.preflop_raise_cap,
     )
 
-    # Aggregate 1326 -> 169 classes.
-    by_history_class = aggregate_to_169_classes(average_strategy)
+    # Aggregate to 169 classes if needed.
+    if hand_resolution == HandResolution.CLASS_169:
+        # Engine output is already 169-class; key format is
+        # ``"<class_label>||p|<history>"``. Reshape into
+        # ``{history_key: {class_label: probs}}`` to match the schema.
+        by_history_class = _reshape_class169_engine_output(average_strategy)
+    else:
+        # 1326-combo path: wrapper post-aggregates.
+        by_history_class = aggregate_to_169_classes(average_strategy)
 
     infosets: dict[str, dict[str, Any]] = {}
     for history_key, classes in by_history_class.items():
@@ -913,6 +953,30 @@ def generate_blueprint(
         final_exploitability_bb100=None,
         infosets=infosets,
     )
+
+
+def _reshape_class169_engine_output(
+    average_strategy: dict[str, list[float]],
+) -> dict[str, dict[str, list[float]]]:
+    """Reshape a 169-class engine output into ``{history: {class: probs}}``.
+
+    The 169-class engine emits keys of the form
+    ``"<class_label>||p|<history>"`` (e.g. ``"AA||p|"``). This is the
+    same final schema produced by ``aggregate_to_169_classes`` for the
+    1326-combo path, so the rest of ``generate_blueprint`` doesn't need
+    to know which path produced the output.
+    """
+    out: dict[str, dict[str, list[float]]] = {}
+    canonical = set(CANONICAL_169_CLASSES)
+    for key, probs in average_strategy.items():
+        if "||p|" not in key:
+            continue
+        cls_label, _, history_suffix = key.partition("||p|")
+        if cls_label not in canonical:
+            continue
+        history_key = "||p|" + history_suffix
+        out.setdefault(history_key, {})[cls_label] = list(probs)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1019,6 +1083,7 @@ __all__ = [
     "ManifestEntry",
     "BatchSpec",
     "aggregate_to_169_classes",
+    "_reshape_class169_engine_output",
     "blueprint_shard_filename",
     "generate_blueprint",
     "hunl_config_from_blueprint_config",
