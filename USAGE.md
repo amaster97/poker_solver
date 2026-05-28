@@ -710,6 +710,106 @@ result = solve(HUNLPoker(cfg), iterations=500, alpha=0.3)  # DeprecationWarning
 result = solve(HUNLPoker(cfg), iterations=500, alpha=0)    # ValueError
 ```
 
+### 5.9 Preflop blueprint — instant lookup for standard HU spots
+
+The repo ships a precomputed Nash-equilibrium preflop chart in
+`assets/blueprints/` — 9 stack depths × 3 ante configurations × all
+169 starting-hand classes, solved offline at 25,000 DCFR iterations
+per cell. Lookup is effectively instant; the alternative is running
+the full HUNL preflop range-vs-range solve from scratch at query time
+(minutes per cell). The loader (`poker_solver.blueprint_loader`,
+Phase 2 / PR #174) is lazy + cached: the manifest is parsed once at
+construction; shards are gzip-decompressed and parsed on first lookup
+and held in memory afterward.
+
+```python
+from poker_solver.blueprint_loader import BlueprintLoader
+
+loader = BlueprintLoader.from_dir("assets/blueprints/")
+print(loader.available_depths())   # [20, 30, 40, 60, 80, 100, 150, 175, 200]
+
+# SB root decision for AA at 100 BB, no ante:
+probs = loader.lookup(stack_bb=100, ante="none", hand="AA", action_history="")
+labels = loader.actions(stack_bb=100, ante="none", action_history="")
+print(dict(zip(labels, probs)))    # {'fold': 0.0, 'call': 0.05, ...}
+
+# BB's response after SB opens to 300:
+probs = loader.lookup(stack_bb=100, ante="none", hand="AKs",
+                      action_history="b300")
+
+# Miss handling — lookup() returns None on absent shard / infoset / class.
+# Use blueprint_interp (below) for off-anchor depths.
+```
+
+For off-anchor depths (e.g. 67 BB between the 60 and 80 BB anchors),
+the Phase 3 interpolation module
+(`poker_solver.blueprint_interp`, PR #173) blends per-cell across the
+two flanking depths:
+
+```python
+from poker_solver.blueprint_interp import interpolate_strategy
+
+strategies = {
+    60: loader.lookup(stack_bb=60, ante="none", hand="AKs", action_history=""),
+    80: loader.lookup(stack_bb=80, ante="none", hand="AKs", action_history=""),
+}
+probs_67 = interpolate_strategy(target_bb=67, strategies=strategies)
+```
+
+Depth-clamping (target below 20 BB or above 200 BB) is handled by
+`interpolate_strategy` — values outside the supplied grid range fall
+back to the nearest neighbor.
+
+**Coverage.**
+
+- Stack depths: 20, 30, 40, 60, 80, 100, 150, 175, 200 BB.
+- Ante configs: `none` (0 BB), `half` (0.5 BB), `full` (1.0 BB).
+- Action menu: `fold`, `call`, open sizes {2.0, 3.0, 4.0, 5.0} BB,
+  3/4/5-bet multipliers {2.0, 3.0, 4.0, 5.0} of the previous bet,
+  `all_in`. Raise cap 4 per preflop street.
+- Hand resolution: 169 Pio-style canonical classes (pairs, suited,
+  offsuit). The True Path B Rust kernel solves natively at this
+  resolution; see
+  [`docs/blueprint_developer_guide.md`](docs/blueprint_developer_guide.md)
+  §"169-class vs 1326-combo paths" for why this is lossless for
+  preflop.
+
+**When the blueprint applies vs when it doesn't.**
+
+| Spot                                              | Path                              |
+|---------------------------------------------------|-----------------------------------|
+| Standard HU preflop, on-anchor depth + ante       | Blueprint (instant)               |
+| Standard HU preflop, off-anchor depth (e.g. 67 BB)| Blueprint, interpolated           |
+| Postflop spot anchored on standard preflop history| Blueprint preflop + subgame solve via `poker_solver/chained.py` |
+| Custom range, custom ante, depth < 20 or > 200 BB | Live solve (`solve_hunl_preflop` / `solve_range_vs_range`) |
+| Stack ≤ 15 BB                                     | Push/fold chart (§3a)             |
+
+**Regenerating the blueprint.** The driver script is idempotent and
+re-running with the same `--output` directory skips completed cells.
+Wall time for the full 27-cell grid is ~30-40 h on M-series silicon at
+25k iterations.
+
+```bash
+caffeinate -i python scripts/generate_preflop_blueprint.py \
+  --all-depths --all-antes --iterations 25000 \
+  --output assets/blueprints/ \
+  --verbose
+```
+
+See [`docs/blueprint_user_guide.md`](docs/blueprint_user_guide.md)
+for the end-user "what / when / why" explainer (including why
+specific cells may not match GTO Wizard or PokerCoaching exactly — Nash
+multiplicity + action-menu differences). The engineering reference is
+[`docs/blueprint_developer_guide.md`](docs/blueprint_developer_guide.md).
+
+**Caveat — Nash multiplicity.** HUNL has multiple Nash equilibria
+particularly at deeper stacks, so the blueprint output may diverge from
+specific published charts even when both are valid GTO. The 100 BB
+apples-to-apples validation in
+[`docs/preflop_100bb_chart_validation_v2_2026-05-28.md`](docs/preflop_100bb_chart_validation_v2_2026-05-28.md)
+reports 75.7% per-cell match against a public chart; the remaining
+24.3% is explained by Nash multiplicity or sizing-menu differences.
+
 ---
 
 ## 6. Library mode (caching solves)
