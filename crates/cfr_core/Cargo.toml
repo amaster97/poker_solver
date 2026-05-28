@@ -79,3 +79,15 @@ path = "benches/rvr_profile.rs"
 name = "preflop_rvr_profile"
 harness = false
 path = "benches/preflop_rvr_profile.rs"
+
+# v1.10 (task #70) — flop-subgame inner-kernel perf bench. Criterion-style
+# measurement (warmup + measured samples + stats) using std::time::Instant,
+# matching the existing harness=false convention in this crate. Default
+# matrix is intentionally small (top_k=4,15 × iters=5 × river); the final
+# v1.10 close-out agent will override via BENCH_TOP_K / BENCH_ITERS /
+# BENCH_STREET env vars. Run with:
+#   cargo bench --bench flop_subgame_perf --manifest-path crates/cfr_core/Cargo.toml
+[[bench]]
+name = "flop_subgame_perf"
+harness = false
+path = "benches/flop_subgame_perf.rs"
