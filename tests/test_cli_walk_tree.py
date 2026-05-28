@@ -367,16 +367,23 @@ def test_action_label_decoder_for_all_token_kinds() -> None:
 
     assert decode_action_label(ACTION_FOLD, ctx) == "fold"
     assert decode_action_label(ACTION_CHECK, ctx) == "check"
-    assert "call" in decode_action_label(ACTION_CALL, ctx)
-    assert "(250)" in decode_action_label(ACTION_CALL, ctx)
-    assert "all-in" in decode_action_label(ACTION_ALL_IN, ctx)
-    # ACTION_BET_75 → "bet 75% (NN)"
+    # v1.9.0 — call label is BB-native: "call (2.5 BB)" (250 chips / 100).
+    call_label = decode_action_label(ACTION_CALL, ctx)
+    assert "call" in call_label
+    assert "2.5 BB" in call_label
+    # v1.9.0 — all-in label embeds BB amount and BB pot context.
+    allin_label = decode_action_label(ACTION_ALL_IN, ctx)
+    assert "all-in" in allin_label
+    assert "BB" in allin_label
+    # ACTION_BET_75 → "bet 75% pot (7.5 BB)"
     label_b75 = decode_action_label(ACTION_BET_75, ctx)
     assert "bet 75%" in label_b75
-    # ACTION_RAISE_75 → "raise to NN (75% pot)"
+    assert "BB" in label_b75
+    # ACTION_RAISE_75 → "raise to NN BB (75% pot)"
     label_r75 = decode_action_label(ACTION_RAISE_75, ctx)
     assert "raise to" in label_r75
     assert "75% pot" in label_r75
+    assert "BB" in label_r75
 
 
 # ---------------------------------------------------------------------------
