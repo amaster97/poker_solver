@@ -42,6 +42,24 @@ Apple silicon (arm64) only. See
 [`docs/dmg_install_guide.md`](docs/dmg_install_guide.md) (relevant once
 the .dmg is safe to launch again).
 
+## Preflop blueprint mode
+
+The repo ships a precomputed Nash-equilibrium preflop blueprint in
+`assets/blueprints/` — 9 stack depths (20, 30, 40, 60, 80, 100, 150,
+175, 200 BB) × 3 ante configurations (`none` / `half` / `full` BB) ×
+all 169 starting-hand classes, solved offline at 25,000 DCFR iterations
+per cell. Lookups are effectively instant compared to the
+minutes-per-cell live solve path. Custom ranges, non-standard antes,
+and out-of-envelope depths still drop to the live solver. Format and
+coverage are documented in
+[`docs/blueprint_user_guide.md`](docs/blueprint_user_guide.md);
+generation pipeline and engine-internals reference live in
+[`docs/blueprint_developer_guide.md`](docs/blueprint_developer_guide.md).
+Tracking: task #68 (Premium-A). PRs of record: #163 (subplan),
+#167 (Phase 1 hybrid pipeline), #171 (Phase 1.5 True Path B
+169-class kernel), #173 (Phase 3 stack-depth interpolation),
+#174 (Phase 2 lazy loader).
+
 ## Recent changes (since v1.8.0)
 
 User-facing additions on `main` after the v1.8.0 tag, queued for the
