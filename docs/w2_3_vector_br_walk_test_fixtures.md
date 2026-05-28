@@ -776,7 +776,7 @@ to-head. This is the production CI budget for the merge gate.
 
 ## Cross-references
 
-- W2.3 strict-PASS persona context: `docs/persona_status_2026-05-28-late.md`
+- W2.3 strict-PASS persona context: `docs/persona_status_2026-05-28-evening.md` (current, 17/0/0/0 post-PR-170); `docs/persona_status_2026-05-28-late.md` (prior, 16/1/0/0 with W2.3 still PARTIAL)
 - Prior BR-walk perf PRs: PR #139 (terminal cache), PR #162 (non-terminal cache)
 - Open PR for W2.3 unblock: GitHub PR #162 (`feat/br-walk-non-terminal-cache-task66`)
 - Reference Rust source: `crates/cfr_core/src/exploit.rs` lines 1003–1350

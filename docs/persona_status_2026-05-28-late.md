@@ -1,5 +1,12 @@
 # Persona Test Status Snapshot — 2026-05-28 (late)
 
+> **SUPERSEDED 2026-05-28 evening.** W2.3 has since moved PARTIAL → PASS via
+> **PR #170** (`188489b`, vector-form BR walk; W2.3 fixture wall time
+> 25.18 s, inside Sarah's 10-min gate). Current snapshot count is
+> **17 PASS / 0 PARTIAL / 0 BLOCKED / 0 FAIL** — see
+> `docs/persona_status_2026-05-28-evening.md`. This snapshot is retained
+> for historical accuracy of the 16/1/0/0 framing.
+
 **Trigger:** 5-PR merge wave landed today (PRs #20, #121, #122, #126, #139).
 Empirical retest of W2.1 (Sarah full-tree preflop) and W2.3 (Sarah deep-stack
 turn) to verify the expected reclassifications.
