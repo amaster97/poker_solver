@@ -11,38 +11,32 @@ locking. Goalpost: PioSolver-class HU local solving on a MacBook.
 
 ## Status
 
-- **Latest tagged release:** v1.8.0 (cross-platform SIMD + .dmg
-  fork-bomb fix + v1.6.1 engine bundle + v1.7.2 CI hardening). The
-  v1.0 → v1.8.0 trajectory is documented in
-  [`CHANGELOG.md`](CHANGELOG.md). v1.6.1 engine bundle shipped
-  piecewise on `origin/main` and is folded into v1.8.0 (see
-  [`docs/v1_7_1_tag_decision_2026-05-26.md`](docs/v1_7_1_tag_decision_2026-05-26.md)
-  for the tag-strategy decision). Post-v1.8.0 user-facing additions
-  land in v1.8.2 — see "Recent changes (since v1.8.0)" below.
+- **Latest tagged release:** v1.10.0 (2026-MM-DD) — combined v1.9.0
+  Premium-A blueprint feature train + v1.10 postflop optimization
+  stream. Three user-visible capabilities ship together: (1) instant
+  27-cell precomputed preflop blueprint lookup, (2) realtime postflop
+  subgame solving across **all three streets** (flop, turn, river) —
+  the live flop path is unblocked by v1.10's arena allocator +
+  vector-form chance compaction, and (3) the W2.3 Sarah deep-stack
+  turn workflow at strict-PASS via the vector-form best-response walk.
+  Persona table: **17/0/0/0**. The v1.0 → v1.10.0 trajectory is
+  documented in [`CHANGELOG.md`](CHANGELOG.md); v1.9.0 was drafted but
+  never tagged (folded into the v1.10.0 MINOR bump). See "What's new
+  in v1.10.0" below.
 - **License:** MIT.
 - **Platforms:** macOS (Apple Silicon primary), Linux. Intel Mac is
   source-build only.
 - **Python:** 3.9+. Rust toolchain required (stable channel).
 - **Working install path:** source build (`pip install -e .`).
-- **`.dmg` installer:** **v1.6.0 `.dmg` has a critical fork-bomb bug on
-  Finder launch — DO NOT use until the v1.8.0 packaging fix lands.**
-  See Known issues. Use the CLI source install (below) instead.
+- **`.dmg` installer:** v1.8.0's packaging fix
+  (PR #42, `728206e` — `multiprocessing.freeze_support()` at module
+  level in the PyInstaller entry point) resolved the v1.6.0 fork-bomb
+  on Finder launch. The v1.10.0 `.dmg` bundles the 27 preflop
+  blueprint shards (~21 MB) so the chart widget works offline. Apple
+  silicon (arm64) only; ad-hoc signed (not notarized). See
+  [`docs/dmg_install_guide.md`](docs/dmg_install_guide.md).
 
-### macOS install (.dmg — NOT RECOMMENDED until v1.8.0)
-
-> ⚠️ **CRITICAL:** the v1.6.0 `.dmg` currently spawns processes
-> uncontrollably on Finder launch and can freeze your Mac. Root cause
-> identified (missing `multiprocessing.freeze_support()` in the
-> PyInstaller entry point); fix merged on `main` (PR #42, commit
-> `728206e`) and ships in v1.8.0. Until v1.8.0 is tagged + released,
-> use the source install below. Full RCA:
-> [`docs/dmg_spawn_loop_rca_2026-05-26.md`](docs/dmg_spawn_loop_rca_2026-05-26.md).
-
-Apple silicon (arm64) only. See
-[`docs/dmg_install_guide.md`](docs/dmg_install_guide.md) (relevant once
-the .dmg is safe to launch again).
-
-## Preflop blueprint mode
+## Preflop blueprint mode (v1.10.0 — Premium-A)
 
 The repo ships a precomputed Nash-equilibrium preflop blueprint in
 `assets/blueprints/` — 9 stack depths (20, 30, 40, 60, 80, 100, 150,
@@ -50,58 +44,150 @@ The repo ships a precomputed Nash-equilibrium preflop blueprint in
 all 169 starting-hand classes, solved offline at 25,000 DCFR iterations
 per cell. Lookups are effectively instant compared to the
 minutes-per-cell live solve path. Custom ranges, non-standard antes,
-and out-of-envelope depths still drop to the live solver. Format and
-coverage are documented in
+and out-of-envelope depths still drop to the live solver.
+
+**Python API.** Four entry points are now public:
+
+- `poker_solver.blueprint.BlueprintLoader` (PR #174) — lazy loader +
+  manifest sha256 validation + `lookup` / `actions` /
+  `available_depths` methods.
+- `poker_solver.blueprint_interp.interpolate_strategy` (PR #173) —
+  convex linear blend across the two bracketing anchor depths for
+  any depth in [20, 200] BB; `method="nearest"` snaps to nearest
+  anchor.
+- `poker_solver.blueprint_subgame.solve_postflop_from_blueprint`
+  (PR #177) — chains the blueprint preflop history into a live
+  postflop subgame (turn / river default; **flop unblocked in
+  v1.10**).
+- `poker_solver.solver_router.SolverRouter` (PR #181) — top-level
+  front-door that picks `lookup` / `interp` / `live` /
+  `postflop-subgame` per request. Active backend exposed on
+  `SolveResult.backend`.
+
+**UI integration (v1.10.0, PR #178).** The NiceGUI app (`poker-solver
+ui`) now consumes the blueprint:
+
+- **13×13 chart widget** displays a `blueprint` / `interpolated` /
+  `live` **source-indicator badge** in each cell tooltip. Anchor
+  depth + ante combinations are instant lookups; off-anchor depths
+  route through the interpolation path with `interpolated` badging;
+  out-of-envelope cells fall through to a fresh live solve.
+- **Chained postflop tab** surfaces the blueprint preflop range
+  source per player at the top of the result panel and runs the
+  postflop street live-solve with the blueprint-derived reaches as
+  priors.
+- **Live-solve confirmation modal** gates the fall-through to a
+  fresh solve on out-of-envelope cells so users know they're about
+  to spend wall-time, not hit a cache.
+
+**B10 per-combo editor (v1.10.0, PRs #149 / #154 / #158 / #160).**
+`Range` now stores per-combo fractional weights (`range["AKs"] = 0.6`).
+The aggregator and vector-form CFR backend respect those weights in
+the prior reach distribution, and the GUI range builder exposes a
+per-combo intensity editor. Closes Sarah W2.2 (`Range.diff`) at
+empirical PASS.
+
+**Honest framing on postflop wall-times (v1.10.0).** v1.10's arena
+allocator + vector-form turn/flop forward walks + opt-in rayon
+(PR-1 thread-local arena + PRs #190 / PR-3 vector turn/flop + PR #189
+rayon, all on task #70) unblock the live flop subgame from
+OOM-killed (~2.3 GB RSS at 5 min wall) to **target flop top_k=169
+in <120 s** on the J7o A♦8♥9♦ 40 BB reference fixture. Actual
+12-cell benchmark (top_k ∈ {4, 15, 50, 169} × {flop, turn, river}) is
+captured in `docs/v1_10_perf_bench_results.jsonl` once PR-1 and PR-3
+land. Turn / river live-solves are fast today (sub-second to seconds
+on the Rust tier). **Flop live-solve at top_k=169 should be treated
+as "not OOM" rather than "interactive" until the benchmark publishes
+final numbers.**
+
+Format and coverage are documented in
 [`docs/blueprint_user_guide.md`](docs/blueprint_user_guide.md);
 generation pipeline and engine-internals reference live in
 [`docs/blueprint_developer_guide.md`](docs/blueprint_developer_guide.md).
 Tracking: task #68 (Premium-A). PRs of record: #163 (subplan),
 #167 (Phase 1 hybrid pipeline), #171 (Phase 1.5 True Path B
-169-class kernel), #173 (Phase 3 stack-depth interpolation),
-#174 (Phase 2 lazy loader).
+169-class kernel — measured 178× / 406× / 448× solve speedup at 15 /
+40 / 100 BB), #173 (Phase 3 stack-depth interpolation), #174 (Phase 2
+lazy loader), #175 (Phase 7 reference inventory + diff-test seed),
+#176 (Phase 8 user + developer guides), #177 (Phase 4 postflop
+subgame chaining), #178 (Phase 6 UI wiring — chart widget badges +
+chained tab + live-solve modal), #181 (Phase 5 top-level
+`SolverRouter`), #182 (preflop boundary `b`/`r` token-equivalence
+fix), asset commit `1783bef` (27 shards + manifest, ~21 MB).
 
-## Recent changes (since v1.8.0)
+## What's new in v1.10.0
 
-User-facing additions on `main` after the v1.8.0 tag, queued for the
-v1.8.2 release. All seven are merged on `origin/main` today.
+User-visible additions consolidated from the v1.9.0 Premium-A draft
+(never tagged) and the v1.10 postflop optimization stream. All merged
+on `origin/main` ahead of the v1.10.0 tag.
 
-- **CLI walk-tree (PR #123)** — `poker-solver solve ... --walk-tree`
-  walks the full decision tree instead of returning only the
-  first-decision aggregate. Pair with `--node <infoset_key>` to drill
-  into a specific node, and `--format json|csv` to pipe into your own
-  tooling. Replaces the "first-decision aggregate only" limitation
-  on the river / subgame commands. See USAGE.md §7a.
-- **CLI subgame (PR #127)** — `poker-solver subgame --street flop|turn|river`
-  generalizes the previous river-only command to flop and turn boards
-  (3-, 4-, and 5-card `--board` accepted). The legacy
-  `poker-solver river` subcommand remains for backwards compatibility.
-  See USAGE.md §7a.
-- **CLI `--version` (PR #116)** — `poker-solver --version` prints
-  `poker-solver 1.8.0` (the version string updates with the package).
-  Resolves the HIGH-deferred ergonomic gap from the PR #107 audit.
-- **DCFR α-guard (PR #113)** — `solve(..., alpha=0)` now raises a
-  clear `ValueError` instead of silently producing a non-Nash
-  strategy. Values in `(0, 0.5)` emit a deprecation `WARN`. Default
-  remains the Brown & Sandholm 2019 paper value (`alpha=1.5`).
-- **TerminalCache 213× river RvR speedup (PR #114)** —
-  `solve_range_vs_range_nash` on a river spot now runs at roughly
-  0.13 sec/iteration vs. 28 sec/iteration previously (terminal-leaf
-  hand-strength caching). Interactive river joint-Nash queries on
-  ≥6-class ranges are now realistic. Turn and flop perf are also
-  improved but remain governed by tree size (see "When to use
-  blueprint vs true Nash" in USAGE.md §5.6).
-- **Marcus EV display (PR #125)** — `get_pushfold_strategy(...,
-  return_ev=True)` returns a `{"strategy": prob, "ev_bb": ev}` dict
-  instead of just the frequency. EV is in big blinds; lets push/fold
-  UIs surface "how much does deviating cost?" alongside the chart
-  cell.
-- **Off-path infoset annotation (PR #129)** —
-  `SolveResult.reach_probability` (a `{infoset_key: float}` map)
-  and `SolveResult.off_path_keys` (a set) expose which infosets are
-  actually on the equilibrium reach path. Filter `average_strategy`
-  by these to drop phantom strategies at unreachable nodes (a common
-  source of "why is hero raising 100% here?" confusion on deep trees).
-  See USAGE.md §5 for the filter pattern.
+**Premium-A blueprint feature train (task #68)** — see "Preflop
+blueprint mode" above for the full breakdown. Headline:
+
+- **27 precomputed Nash-equilibrium preflop shards** (PR #171 + asset
+  commit `1783bef`) — 9 stack depths × 3 ante configs, ~21 MB
+  compressed in `assets/blueprints/`. Instant lookup; 38.5 min total
+  compute on M-series silicon (vs 17-40 h hybrid-path projection).
+- **Loader / interpolation / subgame / router public API** (PRs #173,
+  #174, #177, #181, #182).
+- **GUI consumes the blueprint** (PR #178) — chart widget
+  source-indicator badges, chained postflop tab, live-solve
+  confirmation modal.
+- **User + developer guides** (PR #176) — `docs/blueprint_user_guide.md`,
+  `docs/blueprint_developer_guide.md`.
+- **Reference inventory + diff-test seed** (PR #175).
+
+**v1.10 postflop optimization (task #70)** — flop subgame live-solve
+unblocked.
+
+- **Thread-local arena allocator** (PR-1, branch
+  `feat-v1-10-1-arena-lto`) — replaces per-call `vec![0.0; N]`
+  allocations in `dcfr_vector.rs::traverse` with a thread-local
+  `BumpArena`. Bit-identical at 1e-12 EV.
+- **Vector-form turn forward walk** (PR #190) — chance-template
+  extraction at tree-build time + specialized chance-node dispatch.
+  Bit-identical to main at 1e-12 strategy tolerance.
+- **Vector-form flop forward walk** (PR-3, branches
+  `feat-v1-10-3-vector-flop-design` / `-impl`) — extends PR #190's
+  template framework to double chance compaction (turn × river).
+  Target: flop top_k=169 in <120 s wall, RSS ≤ 1 GB.
+- **Opt-in rayon parallel chance branches** (PR #189) — empirical
+  **4.79× speedup on flop top_k=169** (14-core M-series); opt-in via
+  `CFR_RAYON_CHANCE=1`; canonical single-threaded path is
+  bit-identical at Δ=0.000e+00 across all 25 existing diff tests + 9
+  new rayon-path fixtures.
+- **Perf benchmark harness + profiler + canonical diff-test scaffold**
+  (PRs #186, #187, #188) — 12-cell wall + RSS matrix
+  (top_k ∈ {4, 15, 50, 169} × {flop, turn, river}) on the canonical
+  J7o A♦8♥9♦ 40 BB fixture. Each v1.10 implementer PR re-runs the
+  harness; mismatches HARD-FAIL.
+
+**Engine fixes folded in from the v1.9.0 stream:**
+
+- **Preflop `State::initial` honors `config.initial_contributions`**
+  (PR #165) — long-standing preflop engine bug where non-default
+  initial contributions silently regressed to `(0, 0)`. Default
+  `(0.5, 1.0)` path is bit-unchanged.
+- **Vector-form best-response walk** (PR #170) — per-combo 202.43 s →
+  vector **32.30 s** (6.27×) on the W2.3 fixture. Closes W2.3 Sarah
+  at strict-PASS (PR #184 status snapshot).
+- **CLI BB-normalization** (PR #152) — `--pot N --stack M` are the
+  canonical flags (BB implicit); `--pot-bb` / `--stack-bb` remain
+  functional with a one-shot deprecation warning. Resolves the
+  v1.8.x friction where some surfaces accepted chips and others BB.
+  See USAGE.md §5.10.
+
+**B10 per-combo frequency feature train (task #60)** — see
+"Preflop blueprint mode" above for the train summary (PRs #149,
+#154, #158, #160).
+
+Carried forward from v1.8.x (still applies, listed here for
+discoverability): `--walk-tree` / `--node` / `--format` (PR #123),
+`poker-solver subgame --street flop|turn|river` (PR #127),
+`poker-solver --version` (PR #116), DCFR α-guard (PR #113),
+TerminalCache 213× river RvR speedup (PR #114), Marcus EV display
+(PR #125), `SolveResult.reach_probability` + `off_path_keys`
+(PR #129). See USAGE.md §5, §7a for usage.
 
 ## Install (from source)
 
@@ -189,7 +275,7 @@ poker-solver pushfold --stack 8 --position bb_call_vs_jam --full-range --json
 from poker_solver import get_pushfold_strategy, get_full_range
 print(get_pushfold_strategy(stack_bb=10, position="sb_jam", hand="AKs"))
 
-# v1.8.2: pass return_ev=True to get jam EV alongside the frequency.
+# v1.8.2+: pass return_ev=True to get jam EV alongside the frequency.
 # Returned dict is {"strategy": prob, "ev_bb": ev_in_big_blinds}.
 print(get_pushfold_strategy(stack_bb=10, position="sb_jam",
                             hand="AKs", return_ev=True))
@@ -274,7 +360,7 @@ See [`docs/aggregator_vs_true_nash_explainer.md`](docs/aggregator_vs_true_nash_e
 for when to use which, and [`USAGE.md`](USAGE.md) for custom subgames,
 library mode, and asymmetric-contribution examples.
 
-**Filtering off-path infosets (v1.8.2).** Deep trees accumulate
+**Filtering off-path infosets (v1.8.2+).** Deep trees accumulate
 strategies at infosets that are never actually reached under the
 equilibrium — phantom mass that can confuse downstream consumers.
 `SolveResult` now exposes the reach annotation directly:
@@ -295,7 +381,7 @@ weighted = {
 }
 ```
 
-**DCFR α-guard (v1.8.2).** `solve(..., alpha=0)` now raises `ValueError`
+**DCFR α-guard (v1.8.2+).** `solve(..., alpha=0)` now raises `ValueError`
 (was a silent non-Nash bug). Values in `(0, 0.5)` emit a deprecation
 warning; the Brown & Sandholm 2019 paper default `alpha=1.5` remains
 recommended.
@@ -308,12 +394,19 @@ poker-solver ui
 ```
 
 Launches NiceGUI on `http://127.0.0.1:8080` with a 13x13 range matrix,
-board picker, solver controls, and a decision-tree browser. The UI is
-currently in mock mode — clicking **Solve** returns hand-crafted
-fixture data, not real solver output (PR 10a scaffold; real solver
-bindings land in PR 10b). A yellow banner across the top makes this
-explicit. The packaged `.dmg` GUI does not currently work — see Known
-issues. **Use the CLI / Python API for real strategies today.**
+board picker, solver controls, and a decision-tree browser.
+
+**v1.10.0:** the chart widget and chained postflop tab now consume the
+**real** preflop blueprint (PR #178 — Phase 6 UI wiring). Cells show
+`blueprint` / `interpolated` / `live` source badges in the tooltip;
+the chained tab surfaces the active postflop backend at the top of
+the result panel; a live-solve confirmation modal gates the
+fall-through to a fresh solve on out-of-envelope spots. Standalone
+postflop subgame solves from the **Solve** button on the ad-hoc tab
+still use the PR 10a mock fixtures (real bindings land in PR 10b);
+the yellow banner is retained on that surface only. **For real
+preflop strategies, use the chart widget. For real postflop, use the
+chained tab or the CLI / Python API.**
 
 ## Architecture (brief)
 
@@ -348,20 +441,14 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the PR-flow contract.
 
 ## Known issues
 
-- **`.dmg` installer crashes Mac on Finder launch (CRITICAL).** The
-  v1.6.0 `.dmg` ships on the GitHub Release, but launching the `.app`
-  from Finder causes uncontrolled process spawning (PyInstaller +
-  macOS-multiprocessing fork-bomb) and can freeze the machine. Root
-  cause: `scripts/pyinstaller_entry.py` did not call
-  `multiprocessing.freeze_support()` at module level, so each NiceGUI
-  worker spawned by uvicorn re-execs the entire frozen app, recursively.
-  The fix is merged on `main` (PR #42, commit `728206e`); re-packaged
-  `.dmg` ships in v1.8.0. **Use the source install above** until then.
-  Full RCA:
-  [`docs/dmg_spawn_loop_rca_2026-05-26.md`](docs/dmg_spawn_loop_rca_2026-05-26.md).
-  Earlier v1.4.0 `.dmg` had a different defect (nicegui missing from
-  bundle), fixed in PR 44; the current v1.6.0 fork-bomb issue is
-  separate.
+- **`.dmg` is ad-hoc signed (not notarized) + arm64-only.** v1.10.0
+  `.dmg` is launchable from Finder (the v1.6.0 fork-bomb was resolved
+  in v1.8.0 — PR #42, `728206e` — and the v1.10.0 bundle includes the
+  27 preflop blueprint shards). First launch requires the macOS
+  Gatekeeper override (right-click → Open → confirm). Universal2
+  binaries are not yet published; Intel Mac users should source-build
+  per the "Install (from source)" section. See
+  [`docs/dmg_install_guide.md`](docs/dmg_install_guide.md).
 - **Deep-cap RvR acceptance vs Brown: Nash-multiplicity on indifference
   manifold (resolved); v1.6.1 ship HOLD lifted.** Investigation closed.
   The v1.5 Brown acceptance test PASSES under the reframed 4-layer gate
