@@ -297,6 +297,86 @@ def test_aa_only_vs_kk_only_closed_form() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Test 2b — initial_contributions agnosticism (PR #67 / issue #159)
+# ---------------------------------------------------------------------------
+
+
+def test_engine_agnostic_to_blind_declaration() -> None:
+    """The engine produces identical strategies whether the caller passes
+    ``initial_contributions=[0,0]+initial_pot=0`` (engine posts blinds) or
+    ``initial_contributions=[SB+ante,BB+ante]+initial_pot=SB+BB+2*ante``
+    (caller declared the posted blinds as already-in-pot dead money).
+
+    PR #67 (issue #159) fix: ``State::initial`` honors the declared
+    contributions. Pre-fix, the second config silently produced a
+    fold-everywhere Nash because every leaf saw ``pot_total=0``.
+
+    Python's ``HUNLConfig.__post_init__`` rejects the second form at
+    preflop (Python tier is stricter than Rust); to exercise the
+    equivalence we build the raw JSON dict the Rust solver consumes and
+    bypass the Python dataclass guard.
+    """
+    import copy
+    import json
+
+    cfg = HUNLConfig(starting_stack=10_000)  # 100 BB, default blinds 50/100
+    payload_a = json.loads(_serialize_hunl_config(cfg))
+    payload_b = copy.deepcopy(payload_a)
+    # Caller-declared-blinds form (post-fix Rust solver accepts both).
+    payload_b["initial_contributions"] = [
+        cfg.small_blind + cfg.ante,
+        cfg.big_blind + cfg.ante,
+    ]
+    payload_b["initial_pot"] = cfg.small_blind + cfg.big_blind + 2 * cfg.ante
+    config_json_a = json.dumps(payload_a)
+    config_json_b = json.dumps(payload_b)
+    aa = (Card.from_str("As"), Card.from_str("Ah"))
+    kk = (Card.from_str("Kd"), Card.from_str("Kc"))
+    p0_holes = [[card_to_int(aa[0]), card_to_int(aa[1])]]
+    p1_holes = [[card_to_int(kk[0]), card_to_int(kk[1])]]
+    iters = 200
+
+    def _solve(cfg_json: str) -> dict[str, list[float]]:
+        raw = _rust_solve_preflop_rvr(
+            cfg_json,
+            _EQUITY_TABLE,
+            iters,
+            1.5,
+            0.0,
+            2.0,
+            None,
+            None,
+            p0_holes,
+            p1_holes,
+        )
+        return {k: list(v) for k, v in raw["average_strategy"].items()}
+
+    strat_a = _solve(config_json_a)
+    strat_b = _solve(config_json_b)
+    assert set(strat_a) == set(strat_b), (
+        f"infoset key sets diverge: only-in-A={set(strat_a) - set(strat_b)}, "
+        f"only-in-B={set(strat_b) - set(strat_a)}"
+    )
+    tol = 1e-4
+    max_drift = 0.0
+    worst_key = ""
+    for key in strat_a:
+        probs_a = strat_a[key]
+        probs_b = strat_b[key]
+        assert len(probs_a) == len(probs_b), (
+            f"action count differs at key {key!r}: {len(probs_a)} vs {len(probs_b)}"
+        )
+        for a, b in zip(probs_a, probs_b):
+            drift = abs(a - b)
+            if drift > max_drift:
+                max_drift = drift
+                worst_key = key
+    assert max_drift < tol, (
+        f"strategies diverged beyond {tol}: max_drift={max_drift:.6f} at key {worst_key!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Test 3 — aggregator drift on premium ranges (postflop)
 # ---------------------------------------------------------------------------
 
