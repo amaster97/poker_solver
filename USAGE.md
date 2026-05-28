@@ -1,4 +1,4 @@
-# Using poker_solver — End-User Guide (v1.8.x)
+# Using poker_solver — End-User Guide (v1.10.0)
 
 For people who want to **use** the solver to improve their poker game,
 not develop it. You should be comfortable in a terminal and editing a
@@ -6,18 +6,27 @@ config file; you do not need to read Python or Rust source. The README
 is the developer-facing overview; this is the "what can I do with this
 today" companion.
 
-Document baseline: v1.0.0. Updates through v1.8.0 are layered in §5.3
-(node-locking), §5.4 (asymmetric contributions), §5.5 (range utilities),
-§5.6 (aggregator vs. true-Nash range-vs-range, v1.7.0+), plus the §7a
-ergonomic subcommands and §7b known perf cliffs sections. v1.8.0
-ships cross-platform SIMD + the .dmg fork-bomb fix; no user-facing API
-changes vs v1.7.x. v1.8.2 (post-v1.8.0, on `main` today) adds the
-`subgame` CLI command, `--walk-tree` / `--node` / `--format` flags,
-`--version`, `return_ev=True` on push/fold, `SolveResult` off-path
-annotation, the DCFR α-guard, and a 213× river-RvR speedup — see
-§5.6 ("When to use blueprint vs true Nash" bench numbers), §5.7
-(off-path filtering), §7a (subgame + walk-tree CLI), and the README
-"Recent changes (since v1.8.0)" section for the full list.
+Document baseline: v1.0.0. Updates through v1.8.x layered in §5.3
+(node-locking), §5.4 (asymmetric contributions), §5.5 (range
+utilities), §5.6 (aggregator vs. true-Nash range-vs-range, v1.7.0+),
+§5.7 (off-path filtering, v1.8.2), §5.8 (DCFR α-guard, v1.8.2), §7a
+(ergonomic subcommands), §7b (known perf cliffs).
+
+**v1.10.0 (this ship)** adds §5.9 (Preflop blueprint — instant lookup
++ interpolation + postflop subgame chaining), §5.10 (CLI
+BB-normalization — canonical `--pot N --stack M` flags), and updates
+§7b with the v1.10 postflop optimization stream (live flop subgame
+unblocked from OOM). v1.9.0 was drafted but never tagged — the
+Premium-A blueprint feature train (PRs #149/#154/#158/#160 B10
+per-combo train; PRs #163/#167/#171/#173/#174/#175/#176/#177/#178/#181/#182
+Premium-A blueprint chain; PRs #165/#170 engine fixes; PR #152 CLI
+BB-normalization) and the v1.10 postflop optimization PRs (arena
+allocator, vector-form turn + flop forward walks, opt-in rayon, perf
+harness + profiler — PRs #186/#187/#188/#189/#190 plus PR-1 + PR-3)
+fold into the v1.10.0 MINOR bump. See README "What's new in v1.10.0"
+for the consolidated list; per-stream detail in
+`docs/v1_9_0_release_notes_DRAFT.md` and
+`docs/v1_10_postflop_optimization_plan.md`.
 
 ---
 
@@ -45,26 +54,29 @@ mock mode (see §4).
 
 ## 2. Installing on macOS
 
-### Path A: `.dmg` — currently broken (v1.6.0), DO NOT LAUNCH
+### Path A: `.dmg` (v1.10.0)
 
-> ⚠️ **CRITICAL — DO NOT LAUNCH v1.6.0 `.dmg` from Finder.** The
-> packaged `.app` spawns processes uncontrollably on macOS launch and
-> can freeze your Mac. Root cause is a missing
-> `multiprocessing.freeze_support()` call in the PyInstaller entry
-> point; fix merged on `main` (PR #42, commit `728206e`) and ships in
-> v1.8.0. Until v1.8.0 is tagged + released, use **Path B** below.
-> Full RCA:
-> [`docs/dmg_spawn_loop_rca_2026-05-26.md`](docs/dmg_spawn_loop_rca_2026-05-26.md).
+The v1.10.0 `.dmg` is launchable from Finder — the v1.6.0 fork-bomb
+defect was resolved in v1.8.0 (PR #42, `728206e` — added
+`multiprocessing.freeze_support()` at module level in the PyInstaller
+entry point so NiceGUI workers no longer re-exec the frozen app
+recursively). The v1.10.0 bundle additionally ships the 27 preflop
+blueprint shards (~21 MB compressed) so the chart widget works
+offline.
 
-The historical `.dmg` build script (`sh scripts/build_macos_dmg.sh`)
-remains in the repo; once the v1.8.0 re-signed build is published, this
-section will be restored with a working install flow. The current shipped artifact (`Poker-Solver-1.6.0-arm64.dmg`) is
-ad-hoc signed (not notarized) and arm64-only. The "universal2" claim
-that appeared in earlier release labeling was retired in PR 44 (DMG
-filename now matches the actual arch) and reinforced in PR 86 (build
-script enforces `lipo -info architecture: arm64` post-build). When the
-`.dmg` is safe to use again, see
-[`docs/dmg_install_guide.md`](docs/dmg_install_guide.md).
+The shipped artifact (`Poker-Solver-1.10.0-arm64.dmg`) is ad-hoc
+signed (**not notarized**) and arm64-only. First launch requires the
+macOS Gatekeeper override: right-click the `.app` → **Open** →
+confirm. (Double-clicking from Finder will refuse the launch with a
+"developer unverified" dialog; the right-click flow bypasses it
+explicitly per user consent.) The "universal2" claim from earlier
+labeling was retired in PR 44 (DMG filename now matches the actual
+arch) and reinforced in PR 86 (build script enforces
+`lipo -info architecture: arm64` post-build).
+
+Intel Mac users: source-build via Path B below. See
+[`docs/dmg_install_guide.md`](docs/dmg_install_guide.md) for the full
+install + launch flow.
 
 ### Path B: pip + cargo (power users)
 
@@ -836,6 +848,106 @@ apples-to-apples validation in
 reports 75.7% per-cell match against a public chart; the remaining
 24.3% is explained by Nash multiplicity or sizing-menu differences.
 
+**Chained postflop subgame (v1.10.0).** `solve_postflop_from_blueprint`
+(PR #177) chains the blueprint preflop history into a live postflop
+solve: it looks up the per-player 169-class strategy → expands to
+1326-combo reach via suit-symmetric weighting → live-solves the
+postflop street with the expanded reaches as priors via the
+vector-form CFR backend. v1.10's arena allocator + vector-form turn /
+flop forward walks + opt-in rayon (task #70) unblock the live **flop**
+path from the v1.9.0 OOM-killed state; target is flop top_k=169 in
+<120 s on the J7o A♦8♥9♦ 40 BB reference fixture. Turn and river
+live-solves are fast today (sub-second to seconds on the Rust tier).
+
+```python
+from poker_solver.blueprint_subgame import solve_postflop_from_blueprint
+
+# v1.10.0 — chained flop solve, blueprint preflop priors.
+# Turn / river were live-solvable in v1.9.0; flop is new in v1.10.0.
+result = solve_postflop_from_blueprint(
+    loader=loader,
+    stack_bb=40, ante="none", action_history="b300c",
+    board="Ad 8h 9d",   # flop (3-card)
+    iterations=200,
+)
+print(result.backend)   # "postflop-subgame"
+```
+
+**Top-level router (v1.10.0).** `SolverRouter` (PR #181) is the
+production-recommended front-door if you don't want to dispatch by
+hand. It picks one of four backends per request:
+
+- `lookup` — preflop, anchor depth + anchor ante, blueprint hit.
+- `interp` — preflop, non-anchor depth in [20, 200] BB, anchor ante,
+  blueprint hit on both bracket depths.
+- `live` — out-of-envelope (non-standard ante, depth outside
+  [20, 200] BB, action history not in the blueprint).
+- `postflop-subgame` — postflop street (flop / turn / river); chains
+  via `solve_postflop_from_blueprint`.
+
+The selected backend is exposed on `SolveResult.backend` so callers
+can introspect.
+
+```python
+from poker_solver.solver_router import SolverRouter
+
+router = SolverRouter(loader=loader)
+result = router.solve(stack_bb=67, ante="none", hand="AKs",
+                      action_history="")
+print(result.backend)   # "interp" (67 BB is between 60 and 80 anchors)
+```
+
+**Honest perf framing.** The v1.10.0 flop subgame target (<120 s at
+top_k=169) is the **unblock** of the v1.9.0 OOM state — actual
+12-cell benchmark numbers (top_k ∈ {4, 15, 50, 169} × {flop, turn,
+river}) land in `docs/v1_10_perf_bench_results.jsonl` once PR-1 and
+PR-3 of task #70 merge. Treat flop top_k=169 as "not OOM" rather
+than "interactive" until the published benchmark confirms otherwise.
+
+---
+
+### 5.10 CLI BB-normalization (v1.9.0; canonical in v1.10.0)
+
+Pre-v1.9.0, some CLI surfaces accepted chip values and others accepted
+BB, which was an ongoing source of confusion. **PR #152** ships
+canonical BB-implicit flags across `solve`, `pushfold`, `river`,
+`parity`, and `subgame`:
+
+```bash
+# v1.10.0 canonical — BB units, no -bb suffix.
+poker-solver river --board "As 7c 2d Kh 5s" --hero AdQd \
+    --villain-range "QQ,JJ,AKs" --pot 12 --stack 95 --iters 200
+
+poker-solver subgame --street turn --board "As 7c 2d Kh" \
+    --hero AdQd --villain-range "QQ,JJ,AKs" --pot 8 --stack 100 \
+    --iters 200
+```
+
+The legacy `--pot-bb` / `--stack-bb` aliases remain functional with
+a one-shot deprecation warning emitted to stderr on first use:
+
+```bash
+# Legacy — still works, but emits a deprecation warning.
+poker-solver river --board "As 7c 2d Kh 5s" --hero AdQd \
+    --villain-range "QQ,JJ,AKs" --pot-bb 12 --stack-bb 95 --iters 200
+# DeprecationWarning: --pot-bb is deprecated since v1.9.0; use --pot.
+```
+
+Resolution order if both forms are passed: canonical `--pot` /
+`--stack` win; legacy `--pot-bb` / `--stack-bb` warn-and-use only when
+the canonical form is absent. Defaults are `--pot=10` (BB) and
+`--stack=100` (BB).
+
+**Migration guidance.** New scripts and tutorials should use
+`--pot N --stack M`. Scripted call sites that pass `--pot-bb` /
+`--stack-bb` can be migrated by removing the `-bb` suffix; numeric
+values are unchanged.
+
+Tracking: task #70 plan in
+[`docs/v1_10_postflop_optimization_plan.md`](docs/v1_10_postflop_optimization_plan.md);
+v1.10 cumulative optimization ledger in
+[`docs/rust_optimization_ledger.md`](docs/rust_optimization_ledger.md).
+
 ---
 
 ## 6. Library mode (caching solves)
@@ -871,11 +983,17 @@ description, so the same configuration always resolves to the same row.
 
 ---
 
-## 7. Known limitations (v1.0.0)
+## 7. Known limitations (v1.10.0)
 
-- **UI is mock mode.** Clicking **Solve** returns fixture data, not
-  real strategies. The real-solver swap is tracked as PR 10b (not yet
-  shipped as of v1.7.x); use the CLI for real strategies today.
+- **UI standalone tab is mock mode; chart widget + chained tab are
+  real (v1.10.0).** The PR #178 wiring landed for the chart widget
+  (`blueprint` / `interpolated` / `live` source badges) and the
+  chained postflop tab (consumes the blueprint preflop range + runs
+  a live postflop subgame). The ad-hoc **Solve** button on the
+  standalone tab still uses the PR 10a mock fixtures; real-solver
+  swap there is tracked as PR 10b. For real preflop, use the chart
+  widget; for real postflop, use the chained tab or the CLI / Python
+  API.
 - **No full-tree HUNL solving above 15 BB yet.** `--hunl-mode full`
   raises `NotImplementedError`. Fixed-hole-card preflop shipped in
   v1.1.0 (`solve_hunl_preflop`); full-tree preflop with the chance node
@@ -1046,13 +1164,13 @@ is a thin wrapper around an existing library API; zero engine changes.
   ```
 
 - **`poker-solver --version` (PR #116).** Prints the package version
-  string (e.g. `poker-solver 1.8.0`) and exits. Resolves the
+  string (e.g. `poker-solver 1.10.0`) and exits. Resolves the
   HIGH-deferred ergonomic gap from the PR #107 README/quickstart drift
   audit. Output tracks `poker_solver.__version__`.
 
   ```bash
   $ poker-solver --version
-  poker-solver 1.8.0
+  poker-solver 1.10.0
   ```
 
 ### Still missing from the CLI
@@ -1067,22 +1185,42 @@ is a thin wrapper around an existing library API; zero engine changes.
 
 ---
 
-## 7b. Known perf cliffs (v1.7.x)
+## 7b. Known perf cliffs (v1.10.0 update)
 
-The honest framing: the v1.7.x Python solver targets two regimes
-well — short pushfold (§3a) and fixed-cards postflop subgames (§3b).
-Outside those regimes, performance is bounded by the
-chance-enum-at-root architecture and the post-solve exploitability
-walk. The §5.2 aggregator is the production-safe workaround today.
+The honest framing: the Python solver targets two regimes well —
+short pushfold (§3a) and fixed-cards postflop subgames (§3b). The
+v1.10 postflop optimization stream (task #70 — arena allocator,
+vector-form turn + flop forward walks, opt-in rayon, perf harness)
+materially improves the third regime (full-range postflop subgame on
+the vector-form Nash path) by unblocking the live flop subgame from
+the v1.9.0 OOM-killed state. The §5.2 aggregator remains the
+production-safe workaround for cases where wall-time matters more
+than joint-Nash semantics.
 
-Regime guidance at a glance:
+Regime guidance at a glance (v1.10.0):
 
-- **River spots:** fast (sub-second to seconds on the Rust tier);
-  good for interactive use today.
-- **Turn spots:** minutes per solve on the Nash path; aggregator
-  (§5.2) is recommended for interactive turn queries.
-- **Flop spots:** not interactive on the Nash path; use the
-  aggregator (§5.2) for production-scale flop range queries.
+- **Push/fold (≤ 15 BB):** instant; chart lookup, no solve (§3a).
+- **Preflop (16-200 BB):** instant if the depth + ante hits the
+  blueprint envelope (anchor or interpolated); seconds to live-solve
+  out-of-envelope (§5.9). The `SolverRouter` (PR #181) dispatches.
+- **River subgame spots:** fast (sub-second to seconds on the Rust
+  tier — PR #114's terminal-leaf hand-strength caching ships in
+  v1.8.2 and is unchanged in v1.10.0); good for interactive use.
+- **Turn subgame spots:** seconds to tens of seconds on the
+  vector-form Nash path (PR #114 + PR #170 vector-form BR walk +
+  PR #190 vector-form turn forward walk). Interactive on the Rust
+  tier today.
+- **Flop subgame spots:** **unblocked in v1.10.0.** v1.9.0 OOM-killed
+  at ~2.3 GB RSS within 5 min wall on the J7o A♦8♥9♦ 40 BB
+  reference fixture; v1.10's task #70 PR train (arena allocator,
+  vector-form flop forward walk, opt-in rayon) targets top_k=169
+  in <120 s wall, RSS ≤ 1 GB. **Treat as "not OOM" rather than
+  "interactive" until the 12-cell benchmark in
+  `docs/v1_10_perf_bench_results.jsonl` publishes final numbers.**
+  Opt-in `CFR_RAYON_CHANCE=1` env var gives an empirical 4.79×
+  speedup on flop top_k=169 (14-core M-series; PR #189). Aggregator
+  (§5.2) remains the recommended path for production-scale flop
+  charts where joint-Nash is not the gating constraint.
 
 - **`initial_hole_cards=()` on flop / turn / river is slow.** The
   full-range chance-enum path (§5.1) walks the lossless combo tree at
@@ -1113,22 +1251,32 @@ Regime guidance at a glance:
 
 ## 8. What's coming
 
-The three items most likely to matter:
+The three items most likely to matter for users beyond v1.10.0:
 
 - **PR 9 — HUNL preflop solve.** Shipped in v1.1.0 for fixed hole
   cards (`solve_hunl_preflop` is exported from the top-level package).
-  Full-tree preflop with the chance node over hole cards is still
-  pending — `--hunl-mode full` continues to raise `NotImplementedError`.
-- **PR 10b — real solver bindings in the UI.** Mechanical swap of
-  `ui/mock_solver.py` for the real `solve_hunl_postflop` (and PR 9's
-  preflop solver). Not yet shipped as of v1.7.x; the UI remains in mock
-  mode until then. Use the CLI for real strategies today.
-- **PR 8 — NEON SIMD and public chance sampling.** Rust tier perf work;
-  brings standard-flop solve time well below the 10-hour projection.
+  v1.10.0's Premium-A blueprint feature train (§5.9) ships the
+  precomputed-Nash lookup path for the 27-cell envelope and the
+  chained postflop subgame. Full-tree preflop with the chance node
+  over hole cards on out-of-envelope configs is still pending —
+  `--hunl-mode full` continues to raise `NotImplementedError`.
+- **PR 10b — real solver bindings in the UI standalone tab.** v1.10.0
+  ships the chart widget + chained postflop tab on real solver output
+  (PR #178), but the ad-hoc **Solve** button on the standalone tab
+  still uses the PR 10a mock fixtures. Mechanical swap of
+  `ui/mock_solver.py` for the real solver call pending.
+- **v1.10 perf benchmark publication.** The 12-cell wall + RSS
+  matrix (top_k ∈ {4, 15, 50, 169} × {flop, turn, river}) on the
+  J7o A♦8♥9♦ 40 BB reference fixture lands in
+  `docs/v1_10_perf_bench_results.jsonl` once PR-1 (arena allocator)
+  and PR-3 (vector-form flop forward walk) merge. Until then, treat
+  the "<120 s flop top_k=169" target as a target, not a measured
+  number. Per-PR re-runs of the canonical diff-test scaffold
+  (PR #188) HARD-FAIL on bit-identity regressions.
 
-3-handed postflop (PR 12) is a post-v1 stretch goal; CFR has no
-convergence guarantee for ≥3 players, so it would ship as an
-explicitly-approximate mode.
+Further out: 3-handed postflop (PR 12) is a post-v1 stretch goal;
+CFR has no convergence guarantee for ≥3 players, so it would ship as
+an explicitly-approximate mode.
 
 ---
 
