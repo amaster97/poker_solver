@@ -4,11 +4,22 @@
 Empirical retest of W2.1 (Sarah full-tree preflop) and W2.3 (Sarah deep-stack
 turn) to verify the expected reclassifications.
 
+**2026-05-28 — B10 Phase D update:** With the B10 phase trail (PRs #149,
+#154, #158) shipped, W2.2 has been empirically retested via
+`tests/test_w2_2_per_combo_diff.py` + `scripts_retest/w2_2_per_combo_diff_retest.py`.
+**W2.2 PARTIAL → PASS** (see new §W2.2 retest section below). Snapshot total:
+**16 PASS / 1 PARTIAL / 0 BLOCKED / 0 FAIL** (only W2.3 remains PARTIAL).
+[Note: the task brief asked for "15 PASS / 1 PARTIAL" but the prior table on
+line 37 of this snapshot already counted W2.1 in PASS = 15 PASS pre-W2.2;
+moving W2.2 into PASS makes it 16 PASS arithmetically.]
+
 **Prior snapshot:** `docs/persona_status_2026-05-28.md` (mid-day):
 **14 PASS / 2 PARTIAL / 1 BLOCKED / 0 FAIL** (17 in scope).
 
 **Worktree:** `/Users/ashen/Desktop/poker_solver_worktrees/persona-retest-post-5pr-merge`
 (branch `docs/persona-retest-post-5pr-merge` off `origin/main` `784505d`).
+**B10 Phase D worktree:** `/Users/ashen/Desktop/poker_solver_worktrees/feat-b10-phase-d-w2-2-persona`
+(branch `feat/b10-phase-d-w2-2-persona` off `origin/main` `1839ee1`).
 
 **5 PRs from today's wave (all merged):**
 
@@ -26,12 +37,20 @@ turn) to verify the expected reclassifications.
 
 | Category | Count | Workflows |
 |---|---|---|
-| **PASS** | **15** | W1.1, W1.2, W1.3, W1.4, W1.5, **W2.1** (↑ via PR #122), W2.4, W2.5, W3.1, W3.2, W3.3, W3.4 (caveated), W3.5, W4.1, W4.2, W4.3 |
-| **PARTIAL** | **2** | W2.2 (Range.diff structural — no driver in this wave), **W2.3** (PR #139 unblocks the kill-switch failure mode but Sarah's 10-min gate still breached on 3-class iter=10 smoke) |
+| **PASS** | **16** | W1.1, W1.2, W1.3, W1.4, W1.5, **W2.1** (↑ via PR #122), **W2.2** (↑ via B10 Phase D — PRs #149/#154/#158 + this retest), W2.4, W2.5, W3.1, W3.2, W3.3, W3.4 (caveated), W3.5, W4.1, W4.2, W4.3 |
+| **PARTIAL** | **1** | **W2.3** (PR #139 unblocks the kill-switch failure mode but Sarah's 10-min gate still breached on 3-class iter=10 smoke) |
 | **BLOCKED** | 0 | — |
 | **FAIL** | 0 | — |
 
+> **Note (B10 Phase D, 2026-05-28).** The W2.2 row above moved PARTIAL → PASS
+> after this snapshot was originally written. The `Bottom line` table and
+> the `Sarah (W2.x)` per-workflow block below have been updated to reflect
+> the new counts; sections that document the 5-PR-wave deltas (immediately
+> below) retain their original framing for historical accuracy.
+
 **Net delta vs prior mid-day snapshot (`persona_status_2026-05-28.md`):** PASS 14→**15** (+1), PARTIAL 2→**2** (W2.1 left PARTIAL, W2.3 newly entered PARTIAL from BLOCKED), BLOCKED 1→**0** (-1), FAIL 0→0 (=).
+
+**Net delta after B10 Phase D (this update):** PASS 15→**16** (+1, W2.2), PARTIAL 2→**1** (-1, W2.2), BLOCKED 0→0 (=), FAIL 0→0 (=). Scope total = 17 (16 PASS / 1 PARTIAL).
 
 **Reclassifications:**
 
@@ -148,18 +167,62 @@ diagnostic invocations; logs at `/tmp/w2_3_*.log` (W2.3 fixture attempts).
 
 ---
 
+## W2.2 retest — PASS *(B10 Phase D, 2026-05-28)*
+
+**Spec / exemplar:** `docs/b10_per_combo_frequency_plan_2026-05-28.md` §1 —
+"KQo: you 3-bet 0%, GTO 25%." Pre-B10 `Range.diff` only supported boolean
+set-membership; the 25% was inexpressible.
+
+**Pre-condition:** the B10 phase trail is landed.
+
+| Phase | PR | Subject |
+|---|---|---|
+| A | **#149** (`40ac87a`) | per-combo fractional weights core (`Combo` subclass, `Range._weight`, `parse_range` `:weight` grammar, frequency-aware `Range.diff`) |
+| B | **#154** (`11e3f01`) | aggregator + solver weight propagation |
+| C | **#158** (`1839ee1`) | UI per-combo intensity editor |
+| **D** | (this PR — B10 Phase D persona retest) | empirical PARTIAL → PASS |
+
+**Fixture results** (`scripts_retest/w2_2_per_combo_diff_retest.py`; mirrored
+in `tests/test_w2_2_per_combo_diff.py`):
+
+| Case | GTO spec | User spec | `len(diff)` | Distinct weights | Wall |
+|---|---|---|---|---|---|
+| 1 — literal exemplar | `KQo:0.25` | `AA, KK, QQ, AKs, AKo` | 12 | `[0.25]` | 0.15 ms |
+| 2 — per-combo partial subtract | `KQo:0.7, JTs:0.4` | `KQo:0.5` | 16 | `[0.2, 0.4]` | 0.07 ms |
+| 3 — all-unit back-compat | `AA, KK` | `AA` | 6 | `[1.0]` | 0.05 ms |
+
+**Assertion that succeeded:** Case 1 is the previously-inexpressible W2.2
+exemplar. `parse_range("KQo:0.25").diff(parse_range("AA, KK, QQ, AKs, AKo"))`
+returns 12 combos, each at weight 0.25 — exactly the leak surface Sarah
+asked for. Case 2 confirms `max(w_self − w_other, 0)` per-combo semantics
+across multiple hand classes. Case 3 confirms set-membership behavior is
+preserved when all weights are 1.0 (back-compat invariant from B10 Phase A).
+
+**Reclassification: PARTIAL → PASS.** No engine code modified in Phase D;
+the unblock arrived via Phase A's data-model promotion (`Combo` →
+weight-bearing tuple subclass + `Range._weight` map + frequency-aware
+`diff`).
+
+**Drivers:**
+
+- Test: `tests/test_w2_2_per_combo_diff.py` (4 cases, all PASS, ~30 ms total)
+- Fixture: `scripts_retest/w2_2_per_combo_diff_retest.py` (human-readable)
+- Detail doc: `docs/persona_test_results/W2_2_b10_phase_d_retest.md`
+
+---
+
 ## Per-workflow table
 
 ### Marcus (W1.x) — 5/5 PASS *(no movement)*
 
 Unchanged from `persona_status_2026-05-28.md`.
 
-### Sarah (W2.x) — 3/5 PASS / 2 PARTIAL / 0 BLOCKED *(W2.1 PARTIAL → PASS; W2.3 BLOCKED → PARTIAL)*
+### Sarah (W2.x) — 4/5 PASS / 1 PARTIAL / 0 BLOCKED *(W2.1 PARTIAL → PASS; W2.2 PARTIAL → PASS via B10 Phase D; W2.3 BLOCKED → PARTIAL)*
 
 | ID | Verdict | Wall | Assertion |
 |---|---|---|---|
 | W2.1 | **PASS** ↑ from PARTIAL | **258.00 s** | `_rust.solve_hunl_preflop_rvr` (PR #122) accepts `initial_hole_cards = None`, returns full 1326-combo strategy on 50 iter |
-| W2.2 | **PARTIAL** | (unchanged) | Range.diff via set-membership; no per-combo frequency methods — no PR in this wave addresses W2.2 |
+| W2.2 | **PASS** ↑ from PARTIAL | **0.15 ms** | Per-combo `Range.diff` via B10 Phase A/B/C (PRs #149/#154/#158); literal exemplar `parse_range("KQo:0.25").diff(parse_range("AA, KK, QQ, AKs, AKo"))` returns 12 KQo combos at weight 0.25 — see `docs/persona_test_results/W2_2_b10_phase_d_retest.md` and `tests/test_w2_2_per_combo_diff.py` |
 | W2.3 | **PARTIAL** ↑ from BLOCKED | (diagnostic) **37.67 s** solve-only on 3-class iter=10; end-to-end with `compute_exploitability_at_end=True` exceeds 10-min gate | PR #139 unblocks the prior >1200 s hard-kill failure mode; BR walk still dominates wall time at scale |
 | W2.4 | PASS | 2.01 s | Unchanged from prior snapshot (PR #133 unblocker) |
 | W2.5 | PASS | 12.17 s | Unchanged |
@@ -176,9 +239,15 @@ Unchanged from `persona_status_2026-05-28.md`.
 
 ## Personas that should NOT have moved (and didn't)
 
+> **Historical note (B10 Phase D, 2026-05-28).** The original framing of this
+> section (for the 5-PR wave) listed W2.2 as "PARTIAL (unchanged)". With the
+> subsequent B10 Phase D retest, W2.2 moved PARTIAL → PASS and now sits in
+> the §Sarah table above. The row is retained below for historical accuracy
+> of the 5-PR wave delta.
+
 | Workflow | Status | Notes |
 |---|---|---|
-| W2.2 | PARTIAL (unchanged) | Wave didn't include B10 Range fractional refactor |
+| W2.2 (5-PR wave) | PARTIAL (unchanged at the time) | Wave didn't include B10 Range fractional refactor; subsequently moved PASS via B10 Phase D (PRs #149/#154/#158 + this retest) |
 | All W1.x / W3.x / W4.x | PASS (unchanged) | PR #126 (UI toggle) is a UI surface that does not change library-API verdicts; PR #20 (CI), PR #121 (preflop orchestrator) do not affect persona surfaces |
 
 ## Unexpected reclassifications
@@ -201,13 +270,14 @@ non-terminal cost still dominates and exceeds Sarah's 10-min budget.
 
 ## Methodology
 
-- **Worktree:** `/Users/ashen/Desktop/poker_solver_worktrees/persona-retest-post-5pr-merge`, branch `docs/persona-retest-post-5pr-merge` off `origin/main` `784505d`.
+- **Worktree (W2.1 + W2.3, 5-PR wave):** `/Users/ashen/Desktop/poker_solver_worktrees/persona-retest-post-5pr-merge`, branch `docs/persona-retest-post-5pr-merge` off `origin/main` `784505d`.
+- **Worktree (W2.2, B10 Phase D):** `/Users/ashen/Desktop/poker_solver_worktrees/feat-b10-phase-d-w2-2-persona`, branch `feat/b10-phase-d-w2-2-persona` off `origin/main` `1839ee1` (post-Phase-C).
 - **Python:** `/Users/ashen/Desktop/poker_solver/.venv/bin/python` (3.13, arm64).
-- **Rust extension:** rebuilt from worktree source via `maturin develop --release --manifest-path crates/cfr_core/Cargo.toml` (the main-install v1.8.2 wheel does NOT include the PR #122 `solve_hunl_preflop_rvr` binding; the worktree-local `.so` is required to exercise W2.1).
+- **Rust extension:** rebuilt from worktree source via `maturin develop --release --manifest-path crates/cfr_core/Cargo.toml` (the main-install v1.8.2 wheel does NOT include the PR #122 `solve_hunl_preflop_rvr` binding; the worktree-local `.so` is required to exercise W2.1). W2.2 exercises pure-Python `Range.diff` only and does not require the Rust extension.
 - **Arch verification:** `file _rust.cpython-313-darwin.so → Mach-O 64-bit dynamically linked shared library arm64` (silent-skip hazard cleared per `feedback_dotso_arch_check`).
-- **Test fixtures:** W2.1 — library API direct via `_rust.solve_hunl_preflop_rvr`; W2.3 — library API direct via `solve_range_vs_range_nash` with `compute_exploitability_at_end=True` and (diagnostic) `False`.
-- **Iteration counts:** smoke-grade (W2.1 = 50 iter; W2.3 attempts = 10–200 iter) — these are reclassification verifications, not convergence runs.
-- **Time budget:** 10 min per persona per task brief; W2.3 micro fixture exceeded the budget and was killed.
+- **Test fixtures:** W2.1 — library API direct via `_rust.solve_hunl_preflop_rvr`; W2.2 — `parse_range(...).diff(parse_range(...))` per `scripts_retest/w2_2_per_combo_diff_retest.py`; W2.3 — library API direct via `solve_range_vs_range_nash` with `compute_exploitability_at_end=True` and (diagnostic) `False`.
+- **Iteration counts:** smoke-grade (W2.1 = 50 iter; W2.3 attempts = 10–200 iter) — these are reclassification verifications, not convergence runs. W2.2 is structural (per-combo diff semantics), not perf-bound.
+- **Time budget:** 10 min per persona per task brief; W2.3 micro fixture exceeded the budget and was killed; W2.2 wall = 0.15 ms (well inside any budget).
 
 ---
 
@@ -216,6 +286,9 @@ non-terminal cost still dominates and exceeds Sarah's 10-min budget.
 - Prior snapshot: `docs/persona_status_2026-05-28.md` (mid-day, post-PR #125/#129/#133)
 - Persona spec: `docs/pr13_prep/persona_acceptance_spec.md`
 - W2.1 PR: **PR #122** (`efc9eae`) — full-tree preflop RvR engine, Phase A
+- W2.2 plan + B10 phase trail: `docs/b10_per_combo_frequency_plan_2026-05-28.md`; **PR #149** (`40ac87a`, B10 Phase A core), **PR #154** (`11e3f01`, B10 Phase B engine wiring), **PR #158** (`1839ee1`, B10 Phase C UI editor)
+- W2.2 retest detail: `docs/persona_test_results/W2_2_b10_phase_d_retest.md`
+- W2.2 retest driver: `scripts_retest/w2_2_per_combo_diff_retest.py`; test: `tests/test_w2_2_per_combo_diff.py`
 - W2.3 PR: **PR #139** (`5d2a33d`) — BR-walk terminal-leaf caching
 - Retest driver: `scripts_retest/w2_1_w2_3_post_5pr_retest.py`
 - W2.3 prior block doc: `docs/_archive_2026-05-26/persona_w2_3_retest_2026-05-26.md` (>1200 s SIGTERM at 600 s cap)
