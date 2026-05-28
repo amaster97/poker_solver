@@ -7,6 +7,39 @@ HEAD commit at prep: `f165eb8` (origin/main clean, ahead 0 / behind 0)
 
 ---
 
+## CRITICAL PREREQUISITE (post-PR #140): `_rust.so` MUST be source-current
+
+**Lesson from v1.8.0:** The v1.8.0 `.dmg` shipped with a STALE `_rust.so` that did NOT contain
+PR #16's hand-count fix at `crates/cfr_core/src/dcfr_vector.rs`. End-users on that `.dmg` crashed
+on asymmetric-range fixtures with `index out of bounds: 65 but index 70` at `dcfr_vector.rs:651`.
+
+**Root cause:** PyInstaller picked up whatever `_rust.so` was in the build venv (typically
+`.venv/lib/python3.13/site-packages/poker_solver/_rust*.so`). The site-packages `.so` had been
+installed via `pip install -e .` BEFORE the most recent `maturin develop --release`, so the
+embedded binary was stale.
+
+**Fix (now enforced by the build script):**
+
+> **ALWAYS run `maturin develop --release --target universal2-apple-darwin` IMMEDIATELY before
+> the `.dmg` build to ensure the source-current `.so` is what gets embedded.**
+
+The build script's preflight (Step 1) now performs a two-layer source-currency check:
+
+1. **Static source check** — verifies `crates/cfr_core/src/dcfr_vector.rs` contains the
+   post-PR-#16 pattern (`next_reach = vec![0.0_f64; player_hands]` at the opponent-decision
+   branch in `traverse`). Hard-fails if the source tree is PRE-PR-#16.
+2. **Behavioral .so check** — runs an in-process smoke that triggers the asymmetric-combo
+   branch (hero `{AA, KK}` = 12 combos vs villain `{72o, 83o}` = 24 combos, 50 Nash iters,
+   ~1 s). Pre-fix `.so` panics with index-out-of-bounds; post-fix `.so` completes. If the smoke
+   fails, the build hard-fails with a "rebuild via `maturin develop --release` first" message.
+
+Bypass (DANGEROUS — only for emergency pre-PR-#16 archeology): `NO_SO_CURRENCY_CHECK=1`.
+
+The release-trigger wrapper (`scripts/release_v1_8_0_trigger.sh`) Phase C.8 performs the same
+two-layer audit at tag-time, before the inner release script touches `origin`.
+
+---
+
 ## Pre-build sanity (PASS = ready, WARN = action required)
 
 - [x] **PR #42 freeze_support fix:** PASS
@@ -143,7 +176,11 @@ sh scripts/build_macos_dmg.sh \
 ```
 
 Notes:
-- `maturin develop` step is the workaround for WARN 1 above. It takes ~30-60s and only needs to run once (subsequent runs reuse cached cargo artifacts).
+- `maturin develop` step is **mandatory** (per post-PR-#140 hardening). It satisfies both
+  WARN 1 (universal2 arch) and the source-currency check (CRITICAL PREREQUISITE above).
+  Takes ~30-60s; subsequent runs reuse cached cargo artifacts.
+- The preflight will HARD-FAIL if the loaded `.so` is stale (built from pre-PR-#16 source).
+  Bypass: `NO_SO_CURRENCY_CHECK=1` (DANGEROUS — only for archeology).
 - `--skip-signing` skips Step 5 (sign) AND Step 9 (sign DMG); the Step 5.5 codesign-verify will be skipped too (the script gates it on signing being on — see line 336 `[[ $SKIP_SIGNING -eq 1 ]]`).
 - Adding `--identity "-"` keeps the inside-out ad-hoc walk and Step 5.5 verify path active (recommended; produces a more realistic build).
 
