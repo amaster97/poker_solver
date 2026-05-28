@@ -1,51 +1,68 @@
-# poker-solver v1.8.3 — CLI range queries default to true Nash + Sarah W2.4 PARTIAL → PASS
+# poker-solver v1.8.3 — Full-tree preflop RvR + BR-walk caching + chained orchestrator + UI True Nash default (major engine + UI release)
 
 **Status: DRAFT (compile-since-v1.8.2). Compiled 2026-05-28 from the
-post-v1.8.2 main branch.**
+post-v1.8.2 main branch; refreshed 2026-05-27 after the PR
+#139/#122/#121/#126/#20 merge wave.**
 
 **Baseline commit on `origin/main`:** `16c92e6` (v1.8.2 tag, 2026-05-28).
-**Compilation tip:** `14b09b0` (PR #140, 2026-05-28).
+**Compilation tip:** `30cbd9f` (PR #20 cross-platform CI matrix, last of
+the 2026-05-27 merge wave).
 **Release date:** TBD (user-gated; release notes are user-facing).
 **Tag:** `v1.8.3` (to be created at ship time).
 Final tag SHA will be set at `git tag` time.
 
 **Hold for user review.** This is a draft anticipating the next ship. The
-contents reflect what has landed on `main` after `16c92e6`. PRs currently
-OPEN at compilation time (PR [#139][pr139] BR-walk caching, PR [#126][pr126]
-UI True Nash default toggle, PR [#121][pr121] chained orchestrator Phase A,
-PR [#122][pr122] full-tree preflop RvR Phase A) are listed in the
-**"Conditional adds"** section below — they fold into v1.8.3 only if they
-merge before ship.
+contents reflect what has landed on `main` after `16c92e6`. The four
+previously-held major PRs ([#139][pr139] BR-walk caching, [#122][pr122]
+full-tree preflop RvR engine, [#121][pr121] chained orchestrator Phase A,
+[#126][pr126] UI True Nash default toggle) plus [#20][pr20] cross-platform
+CI matrix have all merged and are promoted to first-class entries below.
 
 ---
 
 ## Headline
 
-**v1.8.3 — CLI range queries default to true Nash + Sarah W2.4 (batch-solve)
-PARTIAL → PASS.**
+**v1.8.3 — Full-tree preflop RvR engine + BR-walk caching + chained
+orchestrator + UI True Nash default — major engine + UI release.**
 
-Two user-visible items land in this release:
+Six user-visible items land in this release:
 
 1. **CLI true-Nash default for range queries.** `poker-solver river` and
    `poker-solver subgame` now dispatch multi-combo villain ranges through
    `solve_range_vs_range_nash` (vector-form CFR, joint imperfect-info Nash)
-   by default. The prior per-combo blueprint loop is preserved behind a new
-   opt-in `--legacy-blueprint` flag. Sample wall: 3-combo villain, river,
-   50 iters: **~0.46 s default vs ~1.70 s legacy** (the post-PR-#114
-   TerminalCache makes true Nash competitive with — and usually faster
-   than — the loop, and it is mathematically correct as a joint solve
-   rather than 1v1 averages). See "CLI" §1.
-2. **Sarah W2.4 (batch-solve) PARTIAL → PASS.** The post-PR-#133
-   verification under the new `batch-solve --backend rust` CLI surface
-   completes 3/3 fixture rows in **2.01 s wall** (per-row 0.58–0.68 s),
-   well inside Sarah's 5-min session gate (149× safety margin). Bottom-line
-   persona counts: PASS 13 → **14**, PARTIAL 3 → **2**, BLOCKED 1, FAIL 0
-   (Sarah: 1/5 PASS → 2/5 PASS). See "Persona milestones" §2.
+   by default. Sample wall: 3-combo villain, river, 50 iters: **~0.46 s
+   default vs ~1.70 s legacy**. See "CLI" §1.
+2. **UI True Nash RvR default flip (PR [#126][pr126]).** The GUI
+   range-vs-range run panel now defaults `solver_mode = "true_nash"`. The
+   user-visible story is now "CLI **and** GUI default to true Nash for
+   range queries". See "UI" §6.
+3. **Full-tree preflop RvR engine — Phase A (PR [#122][pr122]).** First
+   landing of the full-tree preflop range-vs-range engine. Unblocks W2.1
+   (Sarah preflop chart) at the engine layer. See "Engine" §7.
+4. **Chained preflop orchestrator — Phase A (PR [#121][pr121]).** Single-pass
+   + lazy + Route A chained orchestrator infrastructure that drives the
+   full-tree preflop engine. Unblocks W2.1 at the orchestration layer. See
+   "Engine" §8.
+5. **BR-walk terminal-leaf caching (PR [#139][pr139]).** Applies PR #114's
+   `TerminalCache` pattern to the best-response walk in `exploit.rs`.
+   `cargo test -p cfr_core --lib --release`: **58 passed in 2.83 s** (was
+   ~110 s pre-cache). Unblocks W2.3 (Sarah deep-stack turn RvR) at the
+   exploitability-compute layer. See "Engine perf" §9.
+6. **Sarah W2.4 (batch-solve) PARTIAL → PASS.** Post-PR-#133 retest hits
+   3/3 fixture rows in 2.01 s wall (149× safety margin). See "Persona
+   milestones" §2.
+
+**Persona delta (pre-retest baseline, post-PR #140):** PASS 14 / PARTIAL 2
+/ BLOCKED 1 / FAIL 0. **Expected target post-empirical retest** (with
+PR #122 unblocking W2.1 and PR #139 unblocking W2.3): **PASS 16 / PARTIAL 1
+/ BLOCKED 0 / FAIL 0** — pending empirical confirmation at production scale
+per memory rule `feedback_post_ship_persona_retest.md`.
 
 The release also folds in the v1.8.2 post-ship audit (PR [#138][pr138];
 8 checks, 6 PASS / 2 INFORMATIONAL / 0 release-blockers), the held-PR
-backlog snapshot (PR [#137][pr137]), and the 2026-05-28 current-state
-persona snapshot (PR [#135][pr135]).
+backlog snapshot (PR [#137][pr137]), the 2026-05-28 current-state persona
+snapshot (PR [#135][pr135]), and infra hardening via cross-platform CI
+matrix (PR [#20][pr20]).
 
 ---
 
@@ -113,7 +130,8 @@ session gate hit with **149× safety margin**.
 
 **Reclassification:** W2.4 PARTIAL → **PASS**.
 
-**Bottom-line persona counts (snapshot at HEAD `14b09b0`):**
+**Bottom-line persona counts (pre-retest baseline, snapshot at HEAD
+`14b09b0`):**
 
 | Verdict | Pre-PR-#140 | Post-PR-#140 | Delta |
 |---|---|---|---|
@@ -123,7 +141,13 @@ session gate hit with **149× safety margin**.
 | **FAIL**    |  0 | 0      | =  |
 
 Sarah: 1/5 PASS → **2/5 PASS** (W2.4 closed; W2.1, W2.2 remain PARTIAL;
-W2.3 BLOCKED).
+W2.3 BLOCKED at this snapshot).
+
+**Expected target post-empirical retest (PR #122 + #121 + #139 merge wave):**
+**PASS 16 / PARTIAL 1 / BLOCKED 0 / FAIL 0** — W2.1 PARTIAL → PASS (PR
+#122 + #121) and W2.3 BLOCKED → PASS (PR #139), pending empirical
+confirmation at production scale per memory rule
+`feedback_post_ship_persona_retest.md`. The empirical retest is in flight.
 
 **Build caveat called out in the per-workflow row.** The PR #140
 verification rebuilds the `_rust.so` from current source via
@@ -167,9 +191,9 @@ All other expected effects (PR #128 W4.2, PR #130 W3.5) were already
 absorbed into the prior baseline. PR #129 off-path annotation surface
 verified on `SolveResult` (8/8 tests pass); does not flip a persona
 because dependent workflows were already PASS. PR #114 vector-RvR perf
-gain alone is not enough to unblock W2.3 turn fixture (>20 min) — W2.3
-retest skipped per task constraint (>5 min budget). PR #50 / #139
-BR-walk caching is in flight (see "Conditional adds" below).
+gain alone was not enough to unblock W2.3 turn fixture (>20 min) — W2.3
+retest deferred to the post-PR #139 BR-walk caching retest now folded
+into this release (see "Engine perf §9" and "Persona table" below).
 
 No unexpected reclassifications, no regressions.
 
@@ -186,10 +210,10 @@ rationale, merge recommendation, and downstream blockers:
 - PR [#126][pr126] — True Nash UI default flip.
 - PR [#20][pr20]  — cross-platform CI matrix.
 
-All four are HELD per the project memory rule that major new features
-require explicit user merge approval. If any merge before v1.8.3 ships,
-they roll into the "Conditional adds" section below; otherwise they
-defer to v1.8.3+.
+All four were HELD per the project memory rule at PR #137 compilation
+time. **All four have since merged** and are promoted to first-class
+entries in this release (PR #122 → §7, PR #121 → §8, PR #126 → §6,
+PR #20 → §10).
 
 ### 5. v1.8.2 post-ship audit (PR [#138][pr138])
 
@@ -214,25 +238,66 @@ in `docs/v1_8_2_post_ship_audit_2026-05-28.md`.
 
 No follow-up release-blocker discovered.
 
----
+### 6. UI — True Nash RvR mode toggle, default flipped (PR [#126][pr126])
 
-## Conditional adds (PRs OPEN at compilation time)
+**Merge SHA:** `da2af17`.
 
-The following PRs are OPEN against `origin/main` as of compilation
-(2026-05-28). **If they merge before v1.8.3 ships, the highlights and
-PR list should be updated accordingly.** Otherwise they defer to
-v1.8.3+ / v1.9.
+Adds a True-Nash-vs-blueprint solver-mode selector to the GUI
+range-vs-range run panel. **Default is `solver_mode = "true_nash"`**
+(flipped from `"blueprint"` per the post-PR-#114 bench data). Blueprint
+remains opt-in via the inverted-label checkbox ("Use Pluribus blueprint
+(legacy, faster on tiny river)") for the narrow case where it still wins
+on tiny river spots.
 
-### PR [#139][pr139] — BR-walk caching (W2.3 unblock candidate)
+**Empirical bench (3-class hero, 3-class villain, K72r board):**
 
-**Headref:** `perf/br-walk-terminal-cache-task50`. **Status:** OPEN.
+- Turn: True Nash **~27× faster** than blueprint.
+- Flop: blueprint impractical (>27 min CPU); true-Nash feasible.
+- River: post-PR-#114 True Nash is **~213× faster** (interactive).
+
+The combined effect with PR #136 means **CLI and GUI both default to true
+Nash for range queries** — a single coherent user-visible story.
+
+### 7. Engine — full-tree preflop RvR engine, Phase A (PR [#122][pr122])
+
+**Merge SHA:** `efc9eae`.
+
+First landing of the full-tree preflop range-vs-range engine. Provides the
+engine surface required to drive a full preflop solve (no hand-class
+abstraction). Phase A scope is the single-pass core; Phase B (caching +
+parallel) is tracked separately for v1.9.
+
+**Why this matters for personas.** W2.1 (Sarah preflop chart) was PARTIAL
+because `solve_hunl_preflop` raised `ValueError` requiring
+`initial_hole_cards` (subgame mode only). The Phase A engine closes the
+engine-layer gap; combined with PR #121 chained orchestrator, this is the
+infrastructure for the preflop-chart workflow.
+
+**Persona expectation.** W2.1 PARTIAL → PASS expected post-retest (pending
+empirical confirmation at production scale).
+
+### 8. Engine — chained preflop orchestrator, Phase A (PR [#121][pr121])
+
+**Merge SHA:** `ac69eba`.
+
+Single-pass + lazy + Route A chained orchestrator infrastructure that
+drives the full-tree preflop RvR engine (PR #122). Provides the
+orchestration layer above the bare engine. Pairs 1-to-1 with PR #122:
+PR #122 is the engine; PR #121 is the driver.
+
+**Persona expectation.** W2.1 PARTIAL → PASS expected post-retest (jointly
+with PR #122; pending empirical confirmation at production scale).
+
+### 9. Engine perf — BR-walk terminal-leaf caching (PR [#139][pr139])
+
+**Merge SHA:** `5d2a33d`.
 
 Applies PR #114's `TerminalCache` pattern to the best-response walk in
 `exploit.rs`. Pre-caches `Strength` values per terminal leaf;
 `cached_terminal_utility` is a bit-exact replacement for the per-combo
 `evaluate_7` calls.
 
-**Bench numbers from PR description:**
+**Bench numbers:**
 
 - `cargo test -p cfr_core --lib --release`: **58 passed in 2.83 s** (was
   ~110 s pre-cache; `flat_tree_chance_enum_river_completes` alone took
@@ -247,51 +312,18 @@ Applies PR #114's `TerminalCache` pattern to the best-response walk in
 >1200 s kill → 16.6 s via PR #114 on the 8-class symmetric turn fixture,
 but **best-response walk** (exploitability computation) was the
 remaining wall. PR #139 caches the BR-walk terminals so the remaining
-wall is removed. If merged: W2.3 BLOCKED → PASS expected (subject to
-empirical retest at production scale per memory rule
-`feedback_post_ship_persona_retest.md`).
+wall is removed.
 
-**If merged before ship:** elevate to "Engine perf §1", move W2.3 to
-"Personas unblocked", drop W2.3 from "Known issues remaining".
+**Persona expectation.** W2.3 BLOCKED → PASS expected post-retest (pending
+empirical confirmation at production scale).
 
-### PR [#126][pr126] — UI True Nash RvR mode toggle (default flipped)
+### 10. Infra — cross-platform CI matrix (PR [#20][pr20])
 
-**Headref:** `feat/ui-true-nash-rvr-toggle-task61-v2`. **Status:** OPEN
-(HELD per project memory rule; major UI feature).
+**Merge SHA:** `30cbd9f`.
 
-Adds a True-Nash-vs-blueprint solver-mode selector to the GUI
-range-vs-range run panel. **Default is `solver_mode = "true_nash"`**
-(flipped from `"blueprint"` on 2026-05-27 per the post-PR-#114 bench
-data). Blueprint remains opt-in via the inverted-label checkbox ("Use
-Pluribus blueprint (legacy, faster on tiny river)") for the narrow case
-where it still wins on tiny river spots.
-
-**Empirical bench (3-class hero, 3-class villain, K72r board):**
-
-- Turn: True Nash **~27× faster** than blueprint.
-- Flop: blueprint impractical (>27 min CPU); true-Nash feasible.
-- River: post-PR-#114 True Nash is **~213× faster** (interactive).
-
-**If merged before ship:** add a UI-side §2 mirror of the PR #136 CLI
-default flip. The user-visible framing becomes "CLI **and** GUI default
-to true Nash for range queries", which is a cleaner story than "CLI
-only".
-
-### PR [#121][pr121] / [#122][pr122] — chained orchestrator + full-tree preflop RvR (Phase A)
-
-**Status:** OPEN (HELD per project memory rule; major new features).
-
-If either lands before v1.8.3, W2.1 (Sarah preflop chart) moves from
-PARTIAL to a re-evaluable state. Both are HELD pending user merge
-approval; recommend deferring to v1.9 unless the user explicitly
-elevates.
-
-### Persona sanity-check audit (in flight)
-
-A deeper persona sanity-check audit (separate worktree
-`audit-persona-pass-sanity-check`) was spawned around v1.8.2 compilation
-time. If it lands before ship, fold a "Quality §6 — persona sanity
-audit" subsection summarizing the verdict + any reclassifications.
+Adds a cross-platform CI matrix for v1.8 release hardening. Verifies build
++ test posture across the platform set ahead of v1.8.3 ship. No user-facing
+surface change; release-process hygiene only.
 
 ---
 
@@ -309,25 +341,29 @@ indifference manifolds. The EV(action) invariance gauntlet (PR #98,
 shipped in v1.8.2) is the canonical sanity check for the residual. No
 delta in v1.8.3.
 
-### Persona table — PARTIAL / BLOCKED rows remaining
+### Persona table — PARTIAL / BLOCKED rows remaining (pre-retest baseline)
 
-- **W2.1 (Sarah preflop chart)** — `solve_hunl_preflop` raises
-  `ValueError`: requires `initial_hole_cards` (subgame mode only).
-  Full-tree preflop "intractable without hand-class abstraction —
-  reserved for post-v1 follow-up." The Phase A engine work for this is
-  on PR [#122][pr122] (full-tree preflop RvR engine) and PR [#121][pr121]
-  (chained orchestrator), both HELD per project memory rule (see
-  "Conditional adds" above).
-- **W2.2 (Sarah `Range.diff` per-combo frequencies)** — `Range.diff()`
-  set-membership returns 56 combos (works); no per-combo frequency
-  methods. **B10** (Range fractional refactor) blocker, tracked
-  separately.
-- **W2.3 (Sarah deep-stack turn RvR)** — solve-phase >72× faster post
-  PR-#114 (16.6 s on the 8-class symmetric turn fixture, down from
-  >1200 s kill), but best-response walk (exploitability compute) is a
-  separate perf wall. **Unblock candidate: PR [#139][pr139] (OPEN at
-  compilation; see "Conditional adds" above).** If PR #139 merges
-  before ship, W2.3 moves to "Personas unblocked".
+The pre-retest baseline snapshot (post-PR #140, before PR #122/#121/#139
+empirical retest) is captured here. The **expected post-retest target** is
+**PASS 16 / PARTIAL 1 / BLOCKED 0 / FAIL 0** — W2.1 and W2.3 are expected
+to move to PASS once the empirical retest at production scale lands per
+memory rule `feedback_post_ship_persona_retest.md`. Until then:
+
+- **W2.1 (Sarah preflop chart) — PARTIAL (pending retest → PASS expected).**
+  Pre-merge, `solve_hunl_preflop` raised `ValueError` requiring
+  `initial_hole_cards` (subgame mode only). PR [#122][pr122] (full-tree
+  preflop RvR engine Phase A) and PR [#121][pr121] (chained orchestrator
+  Phase A) are now merged and provide the engine + orchestration surface;
+  empirical retest at production scale is in flight.
+- **W2.2 (Sarah `Range.diff` per-combo frequencies) — PARTIAL.**
+  `Range.diff()` set-membership returns 56 combos (works); no per-combo
+  frequency methods. **B10** (Range fractional refactor) blocker, tracked
+  separately. Unchanged by the merge wave.
+- **W2.3 (Sarah deep-stack turn RvR) — BLOCKED (pending retest → PASS expected).**
+  Solve-phase >72× faster post PR-#114 (16.6 s on the 8-class symmetric
+  turn fixture, down from >1200 s kill), and PR [#139][pr139] BR-walk
+  caching now removes the remaining best-response-walk wall. Empirical
+  retest at production scale is in flight.
 
 ### Engine / build carry-overs (unchanged from v1.8.0)
 
@@ -408,10 +444,9 @@ pip install -e .
 maturin develop --release
 ```
 
-No Rust ABI change in v1.8.3 (PR #136 is Python-only), so a fresh
-`maturin develop --release` is **not strictly required** unless a
-conditional add (PR #139) lands; rebuilding is cheap and recommended
-for hygiene.
+v1.8.3 includes Rust engine changes (PR #139 BR-walk caching, PR #122
+full-tree preflop RvR engine), so a fresh `maturin develop --release` is
+**required** to pick up the new `.so`.
 
 ### From the v1.8.2 `.dmg`
 
@@ -434,6 +469,11 @@ build caveat).
   changes from per-combo loop to joint Nash — strategy probabilities
   for multi-combo ranges will **not** match v1.8.2 output bit-for-bit;
   use `--legacy-blueprint` to pin the prior behavior.
+- **BR-walk caching (PR [#139][pr139]):** bit-exact parity with the
+  uncached path — see `cached_matches_uncached_terminal_value`. No
+  numerical change; pure perf delta.
+- **Full-tree preflop engine (PR [#122][pr122]):** new engine surface;
+  additive, no impact on existing postflop subgame solves.
 - **Public Python API:** unchanged. `range_aggregator.solve_range_vs_range`
   (blueprint) and `range_aggregator.solve_range_vs_range_nash` (true
   Nash) are both still exported; PR #136 only changes CLI default
@@ -482,7 +522,23 @@ time poker-solver river \
 ## Full PR list
 
 All PRs that ship in v1.8.3, in merge order since v1.8.2 (`16c92e6`).
-Compiled 2026-05-28 from main HEAD `14b09b0`.
+Compiled 2026-05-28; refreshed 2026-05-27 after the
+PR #139/#122/#121/#126/#20 merge wave. Compilation tip: `30cbd9f`.
+
+**Engine (load-bearing):**
+
+- [#122][pr122] `efc9eae` — feat: full-tree preflop RvR engine
+  (#32 Phase A).
+- [#121][pr121] `ac69eba` — feat: preflop chained orchestrator Phase A
+  (#31 — single-pass + lazy + Route A).
+- [#139][pr139] `5d2a33d` — perf: cache terminal-leaf strengths in
+  best-response walk (W2.3 unblock, #50). Bench: 58 cargo tests **110 s
+  → 2.83 s**.
+
+**UI (load-bearing user-visible):**
+
+- [#126][pr126] `da2af17` — feat(ui): True Nash RvR mode toggle
+  (post-PR-#114 perf unlock, #61). Default flipped to `"true_nash"`.
 
 **CLI surface (load-bearing user-visible):**
 
@@ -496,27 +552,17 @@ Compiled 2026-05-28 from main HEAD `14b09b0`.
 - [#135][pr135] `e6df209` — docs(persona): current-state snapshot
   2026-05-28 (post all 2026-05-27 reclassifications).
 
+**Infra:**
+
+- [#20][pr20] `30cbd9f` — feat(ci): cross-platform CI matrix for v1.8
+  prep.
+
 **Quality / housekeeping:**
 
 - [#138][pr138] `d74e5f3` — docs: v1.8.2 post-ship audit (8 checks,
   6 PASS / 2 INFORMATIONAL / 0 release-blockers).
 - [#137][pr137] `c4843d5` — docs: summary of held PRs awaiting user
   merge decision.
-
-**Conditional adds (OPEN at compilation; fold in if merged before ship):**
-
-- [#139][pr139] `<TBD-SHA>` — perf: cache terminal-leaf strengths in
-  best-response walk (W2.3 unblock, #50). Bench: 58 cargo tests **110 s
-  → 2.83 s**.
-- [#126][pr126] `<TBD-SHA>` — feat(ui): True Nash RvR mode toggle
-  (post-PR-#114 perf unlock, #61). Default flipped to `"true_nash"`.
-- [#121][pr121] `<TBD-SHA>` — feat: preflop chained orchestrator
-  Phase A (#31).
-- [#122][pr122] `<TBD-SHA>` — feat: full-tree preflop RvR engine
-  (#32 Phase A).
-
-If any of these flip to MERGED before v1.8.3 ships, the user decides
-whether to roll them into this release or defer to v1.9 / v1.8.4.
 
 ---
 
@@ -527,26 +573,35 @@ This release closes:
 - The CLI true-Nash default flip blocked by the pre-PR-#114 vector-RvR
   perf wall (PR #136). The v1.8.2 TerminalCache is what made this
   default change competitive on wall time.
+- The UI True Nash default flip companion to PR #136 (PR #126),
+  delivering a coherent "CLI + GUI both default to true Nash" story.
+- The full-tree preflop engine + chained orchestrator Phase A (PRs #122,
+  #121) — engine-layer infrastructure for W2.1.
+- The BR-walk exploitability-compute perf wall (PR #139) — final layer
+  of the W2.3 unblock chain on top of PR #114 solve-phase caching.
 - The Sarah W2.4 batch-solve PARTIAL (PR #140), gated on the
   PR #133 `batch-solve --backend rust` CLI surface.
 - The v1.8.2 post-ship audit backlog (PR #138).
 - The held-PR backlog snapshot for user merge decisions (PR #137).
+- The v1.8 cross-platform CI matrix (PR #20) — release-process hygiene.
 
-Thanks to the persona-test framework (Sarah W2.4) for empirically
-anchoring the CLI default flip's perf claim, and to the post-PR-#114
-TerminalCache work (v1.8.2) for unlocking the true-Nash default.
+Thanks to the persona-test framework for empirically anchoring this
+release's perf claims, and to the post-PR-#114 TerminalCache work
+(v1.8.2) for unlocking the true-Nash default that both PR #136 (CLI)
+and PR #126 (UI) act on.
 
 ---
 
 ## What's next
 
-- **v1.8.4 candidates** (if held PRs land separately): PR #139 BR-walk
-  caching (W2.3 unblock); PR #126 UI True Nash default flip.
-- **v1.9 candidate:** full-tree preflop solver (chained orchestrator
-  PR #121 + RvR engine PR #122 Phase A → Phase B caching + parallel),
-  unblocks W2.1 (Sarah preflop chart).
-- **v2.0:** EMD bucketing for flop interactive viability (the W2.3 /
-  W3.4 / W2.1 / W2.4 lever once best-response caching lands).
+- **Empirical persona retest** (in flight): production-scale retest of
+  W2.1 (PR #122 + #121) and W2.3 (PR #139) — expected to confirm the
+  16/1/0/0 target.
+- **v1.9 candidate:** full-tree preflop solver Phase B (caching +
+  parallel) on top of the Phase A engine + orchestrator shipped here.
+  Also tracking any additional UI surface for the preflop workflow.
+- **v2.0:** EMD bucketing for flop interactive viability (the W3.4 /
+  W2.4 / W2.1 lever beyond what BR-walk caching already provides).
 
 ---
 
