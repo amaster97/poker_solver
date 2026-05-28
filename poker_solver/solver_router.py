@@ -89,11 +89,7 @@ from typing import Any, Literal
 
 import numpy as np
 
-from poker_solver.blueprint import (
-    Blueprint,
-    BlueprintConfig,
-    blueprint_shard_filename,
-)
+from poker_solver.blueprint import BlueprintConfig
 from poker_solver.blueprint_interp import (
     InterpolationError,
     interpolate_strategy,
@@ -904,10 +900,11 @@ def _history_key_to_tokens(history_key: str) -> tuple[str, ...]:
     """
     if history_key in ("", "||p|"):
         return ()
-    if history_key.startswith("||p|"):
-        body = history_key[len("||p|") :]
-    else:
-        body = history_key
+    body = (
+        history_key[len("||p|") :]
+        if history_key.startswith("||p|")
+        else history_key
+    )
     tokens: list[str] = []
     i = 0
     while i < len(body):
