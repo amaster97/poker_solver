@@ -393,8 +393,16 @@ def _stub_rust_solver(*args, **kwargs) -> dict:
 
 
 def test_generate_blueprint_with_stub_solver(tmp_path: Path) -> None:
+    # `_stub_rust_solver` emits 1326-combo keys (matching the hybrid path);
+    # the wrapper aggregates them via `aggregate_to_169_classes`. The new
+    # True Path B path consumes 169-class keys natively from the engine, so
+    # we explicitly opt into the legacy COMBO_1326 mode for this stub.
     config = BlueprintConfig(stack_bb=40, ante_bb=0.0, iterations=10)
-    bp = generate_blueprint(config, rust_solver=_stub_rust_solver)
+    bp = generate_blueprint(
+        config,
+        rust_solver=_stub_rust_solver,
+        hand_resolution=HandResolution.COMBO_1326,
+    )
     assert bp.schema_version == SCHEMA_VERSION
     assert bp.config == config
     assert "||p|" in bp.infosets

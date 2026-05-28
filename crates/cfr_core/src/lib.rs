@@ -690,6 +690,90 @@ fn solve_hunl_preflop_rvr(
     Ok(dict.into())
 }
 
+/// Phase 1.5 (True Path B, #68) — 169-class abstraction preflop RvR
+/// solver, exposed to Python as `_rust.solve_hunl_preflop_rvr_class169`.
+///
+/// Engine operates on 169-element strategy/regret/reach vectors per
+/// infoset (instead of 1326-element). Leaf payoffs pre-bake the per-
+/// concrete-pair blocker effects into a 169x169 effective table.
+///
+/// Output dict has key format `"<class_label>||p|<history>"` (e.g.
+/// `"AA||p|"` is the SB AA root decision), one entry per (class,
+/// history) pair. Caller does NOT need to call `aggregate_to_169_classes`.
+///
+/// `root_reach_p0` / `root_reach_p1`: optional 169-element vectors with
+/// per-class reach at the root. Default (full range, all classes active
+/// uniformly): `[1.0; 169]` per player. To filter a range (e.g. premium
+/// only), set excluded classes to `0.0`.
+#[pyfunction]
+#[pyo3(signature = (
+    config_json,
+    equity_table_path,
+    iterations,
+    alpha,
+    beta,
+    gamma,
+    preflop_open_sizes_bb=None,
+    preflop_reraise_multipliers=None,
+    root_reach_p0=None,
+    root_reach_p1=None,
+))]
+#[allow(clippy::too_many_arguments)]
+fn solve_hunl_preflop_rvr_class169(
+    py: Python<'_>,
+    config_json: &str,
+    equity_table_path: &str,
+    iterations: u32,
+    alpha: f64,
+    beta: f64,
+    gamma: f64,
+    preflop_open_sizes_bb: Option<Vec<f64>>,
+    preflop_reraise_multipliers: Option<Vec<f64>>,
+    root_reach_p0: Option<Vec<f64>>,
+    root_reach_p1: Option<Vec<f64>>,
+) -> PyResult<PyObject> {
+    let config: hunl::HUNLConfig = serde_json::from_str(config_json)
+        .map_err(|e| PyValueError::new_err(format!("invalid HUNLConfig JSON: {e}")))?;
+    let opens = preflop_open_sizes_bb.unwrap_or_else(|| vec![2.0, 3.0, 4.0, 5.0]);
+    let mults = preflop_reraise_multipliers.unwrap_or_else(|| vec![2.0, 3.0, 4.0, 5.0]);
+    let table_path = std::path::PathBuf::from(equity_table_path);
+
+    let started = std::time::Instant::now();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        py.allow_threads(|| {
+            preflop_rvr::solve_hunl_preflop_rvr_class169(
+                &config,
+                &table_path,
+                root_reach_p0,
+                root_reach_p1,
+                &opens,
+                &mults,
+                iterations,
+                alpha,
+                beta,
+                gamma,
+            )
+        })
+    }));
+    let result = result.map_err(|payload| PyValueError::new_err(panic_message(&payload)))?;
+    let out = result.map_err(PyValueError::new_err)?;
+    let wallclock_seconds = started.elapsed().as_secs_f64();
+
+    let dict = PyDict::new(py);
+    let strat = PyDict::new(py);
+    for (key, probs) in &out.average_strategy {
+        strat.set_item(key, probs.clone())?;
+    }
+    dict.set_item("average_strategy", strat)?;
+    dict.set_item("iterations", out.iterations)?;
+    dict.set_item("wallclock_seconds", wallclock_seconds)?;
+    dict.set_item("decision_node_count", out.decision_node_count)?;
+    dict.set_item("strategy_entry_count", out.strategy_entry_count)?;
+    dict.set_item("backend", "rust_preflop_rvr_class169")?;
+    dict.set_item("hand_resolution", "class_169")?;
+    Ok(dict.into())
+}
+
 #[pymodule]
 fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_version, m)?)?;
@@ -700,5 +784,6 @@ fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(compute_exploitability, m)?)?;
     m.add_function(wrap_pyfunction!(solve_range_vs_range_rust, m)?)?;
     m.add_function(wrap_pyfunction!(solve_hunl_preflop_rvr, m)?)?;
+    m.add_function(wrap_pyfunction!(solve_hunl_preflop_rvr_class169, m)?)?;
     Ok(())
 }
