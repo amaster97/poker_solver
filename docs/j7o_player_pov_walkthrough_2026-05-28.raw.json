@@ -1,0 +1,234 @@
+{
+  "wall_solve_pf": 4.480046272277832,
+  "wall_total": 21.572852849960327,
+  "preflop_iters": 1500,
+  "postflop_turn_iters": 10,
+  "postflop_river_iters": 30,
+  "test1": {
+    "j7o_pf_strategy": {
+      "fold": 2.4292507214120443e-06,
+      "call": 0.015631229402838703,
+      "open_to_200": 0.9209437699256068,
+      "open_to_300": 0.06302972728278838,
+      "open_to_400": 0.0003921322891220231,
+      "open_to_500": 7.056120924459176e-07,
+      "all_in": 6.236830284133808e-09
+    },
+    "pf_actions": [
+      "fold",
+      "call",
+      "open_to_200",
+      "open_to_300",
+      "open_to_400",
+      "open_to_500",
+      "all_in"
+    ],
+    "flop": {
+      "class_strategy": {},
+      "specific": null,
+      "bb_modal": null,
+      "pot": 600,
+      "hero_range_combos": null,
+      "villain_range_combos": null,
+      "wall_solve_s": null,
+      "skipped": true
+    },
+    "turn": {
+      "class_strategy": {
+        "fold": 0.17973745706963334,
+        "call": 0.01904014065652866,
+        "raise_33": 0.3030288585742905,
+        "raise_75": 0.18787891985428395,
+        "raise_100": 0.14120992898484708,
+        "raise_150": 0.1083525508970463,
+        "raise_200": 0.037183496346863146,
+        "all_in": 0.023568647616506896
+      },
+      "specific": [
+        [
+          "fold",
+          "call",
+          "raise_33",
+          "raise_75",
+          "raise_100",
+          "raise_150",
+          "raise_200",
+          "all_in"
+        ],
+        {
+          "fold": 0.15923637161621365,
+          "call": 0.01602341053014912,
+          "raise_33": 0.30701805270958327,
+          "raise_75": 0.1949549789204062,
+          "raise_100": 0.14689895935198855,
+          "raise_150": 0.11423016753224524,
+          "raise_200": 0.037183175995510125,
+          "all_in": 0.02445488334390381
+        }
+      ],
+      "bb_modal": [
+        "bet_33",
+        0.34310774247923653,
+        {
+          "check": 0.28680087664493503,
+          "bet_33": 0.34310774247923653,
+          "bet_75": 0.1742894464086353,
+          "bet_100": 0.09851901255088193,
+          "bet_150": 0.02361195035860747,
+          "bet_200": 0.07076571409474706,
+          "all_in": 0.0029052574629566163
+        }
+      ],
+      "pot": 600,
+      "wall_solve_s": 14.6529311669874,
+      "skipped": false
+    },
+    "river": {
+      "class_strategy": {
+        "check": 0.06573702752640306,
+        "bet_33": 0.018895374640449807,
+        "bet_75": 0.0725636710959794,
+        "bet_100": 0.15032328619149718,
+        "bet_150": 0.08697822559991432,
+        "bet_200": 0.11430114883300678,
+        "all_in": 0.4912012661127494
+      },
+      "specific": [
+        [
+          "check",
+          "bet_33",
+          "bet_75",
+          "bet_100",
+          "bet_150",
+          "bet_200",
+          "all_in"
+        ],
+        {
+          "check": 0.0636386418147265,
+          "bet_33": 0.01789792694588533,
+          "bet_75": 0.07157331903782961,
+          "bet_100": 0.14471890980985136,
+          "bet_150": 0.09172543807857375,
+          "bet_200": 0.1130534430433855,
+          "all_in": 0.497392321269748
+        }
+      ],
+      "bb_modal": [
+        "check",
+        0.8447303129615967,
+        {
+          "check": 0.8447303129615967,
+          "bet_33": 0.14067588986732124,
+          "bet_75": 0.008216538689172248,
+          "bet_100": 0.003540842255505092,
+          "bet_150": 0.0024804546791713403,
+          "bet_200": 0.00024417805703489976,
+          "all_in": 0.0001117834901988321
+        }
+      ],
+      "pot": 600,
+      "wall_solve_s": 0.4957298330264166,
+      "skipped": false
+    }
+  },
+  "test2": {
+    "j7o_pf_strategy": {
+      "fold": 2.4292507214120443e-06,
+      "call": 0.015631229402838703,
+      "open_to_200": 0.9209437699256068,
+      "open_to_300": 0.06302972728278838,
+      "open_to_400": 0.0003921322891220231,
+      "open_to_500": 7.056120924459176e-07,
+      "all_in": 6.236830284133808e-09
+    },
+    "pf_actions": [
+      "fold",
+      "call",
+      "open_to_200",
+      "open_to_300",
+      "open_to_400",
+      "open_to_500",
+      "all_in"
+    ],
+    "pf_seq": [
+      "b300",
+      "r900",
+      "r2100",
+      "c"
+    ],
+    "flop": {
+      "class_strategy": {},
+      "specific": null,
+      "bb_modal": null,
+      "pot": 1200,
+      "hero_range_combos": null,
+      "villain_range_combos": null,
+      "wall_solve_s": null,
+      "skipped": true
+    }
+  },
+  "test3": {
+    "pf_seq": [
+      "b300",
+      "c"
+    ],
+    "flop": {
+      "class_strategy": {},
+      "specific": null,
+      "bb_modal": null,
+      "pot": 600,
+      "wall_solve_s": null,
+      "skipped": true
+    },
+    "facing_raise_summary": null,
+    "n_facing_raise_keys_found": 0
+  },
+  "test4": {
+    "two7o_pf_strategy": {
+      "fold": 0.9999999757346928,
+      "call": 1.3274877026889013e-08,
+      "open_to_200": 4.825271781480908e-09,
+      "open_to_300": 3.849219863447134e-09,
+      "open_to_400": 1.1700060787053417e-09,
+      "open_to_500": 6.395167056074557e-10,
+      "all_in": 5.064157975648407e-10
+    },
+    "pf_actions": [
+      "fold",
+      "call",
+      "open_to_200",
+      "open_to_300",
+      "open_to_400",
+      "open_to_500",
+      "all_in"
+    ],
+    "pf_seq": [
+      "b500",
+      "c"
+    ],
+    "flop": {
+      "class_strategy": {},
+      "specific": null,
+      "bb_modal": null,
+      "pot": 1000,
+      "wall_solve_s": null,
+      "skipped": true
+    },
+    "turn": {
+      "class_strategy": {},
+      "specific": null,
+      "bb_modal": null,
+      "pot": null,
+      "wall_solve_s": null,
+      "skipped": true
+    },
+    "river": {
+      "class_strategy": {},
+      "specific": null,
+      "bb_modal": null,
+      "pot": null,
+      "wall_solve_s": null,
+      "skipped": true
+    }
+  }
+}
