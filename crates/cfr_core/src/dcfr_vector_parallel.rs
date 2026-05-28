@@ -164,6 +164,7 @@ pub(crate) fn parallel_traverse_chance(
     reach_opp: &[f64],
     infosets: &mut [Option<VectorInfosetData>],
     offset: usize,
+    has_chance_template: &[bool],
 ) -> Vec<f64> {
     let update_hands = eval_ctx.hand_count[update_player];
 
@@ -248,6 +249,7 @@ pub(crate) fn parallel_traverse_chance(
                 &reach_opp_vec,
                 shard,
                 range.start,
+                has_chance_template,
             )
         })
         .collect();

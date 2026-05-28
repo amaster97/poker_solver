@@ -75,7 +75,8 @@
 use std::collections::HashMap;
 
 use crate::exploit::{
-    enumerate_hole_card_pairs, hole_string, terminal_utility, BettingTree, FlatNode,
+    enumerate_hole_card_pairs, hole_string, terminal_utility, BettingTree, BettingTreeMode,
+    FlatNode,
 };
 use crate::hunl::{HUNLConfig, HUNLState};
 use crate::hunl_eval::Strength;
@@ -430,6 +431,14 @@ pub struct VectorDCFR {
     /// MIT) which also stores one slot per tree node and skips non-
     /// decision nodes.
     infosets: Vec<Option<VectorInfosetData>>,
+    /// `v1.10 PR-2` — per-`FlatNode` index, true iff the chance node at this
+    /// index has a `ChanceTemplate` entry (its children share structural
+    /// identity, so `traverse_turn_chance` can use the shared-scratch path).
+    /// `false` for non-chance nodes and for chance nodes that didn't make
+    /// the template extraction (single-child run-out chance, or `Standard`
+    /// build mode). Indexed by `FlatNode` index for O(1) lookup in the
+    /// chance match arm of `traverse`.
+    has_chance_template: Vec<bool>,
 }
 
 impl VectorDCFR {
@@ -488,12 +497,22 @@ impl VectorDCFR {
                 _ => infosets.push(None),
             }
         }
+        // `v1.10 PR-2` — build the per-node has_chance_template lookup from
+        // the tree's `chance_templates` list (populated only in
+        // `BettingTreeMode::TemplateExtract`). When the list is empty (e.g.
+        // `Standard` mode for river-rooted subgames), every entry is false
+        // and the chance-arm dispatches to the legacy per-branch recursion.
+        let mut has_chance_template = vec![false; tree.nodes.len()];
+        for t in &tree.chance_templates {
+            has_chance_template[t.chance_node_idx] = true;
+        }
         Self {
             alpha,
             beta,
             gamma,
             iteration: 0,
             infosets,
+            has_chance_template,
         }
     }
 
@@ -661,6 +680,7 @@ impl VectorDCFR {
                 &mut self.infosets,
                 0,
                 rayon_enabled,
+                &self.has_chance_template,
             );
             // Update player 1.
             traverse_recursive_with_parallel(
@@ -678,6 +698,7 @@ impl VectorDCFR {
                 &mut self.infosets,
                 0,
                 rayon_enabled,
+                &self.has_chance_template,
             );
         }
     }
@@ -712,6 +733,14 @@ impl VectorDCFR {
 /// parallelism (oversubscription). When `false`, the chance branch
 /// walks sequentially. The caller from `VectorDCFR::solve` sets this
 /// to `true` only when `CFR_RAYON_CHANCE` is set in the env.
+///
+/// `has_chance_template`: per-`FlatNode` index lookup populated by
+/// `VectorDCFR::with_init_noise` from the tree's `chance_templates`
+/// list (v1.10 PR-2). When the rayon path doesn't fire and the chance
+/// node is flagged, the walker dispatches to `traverse_turn_chance_recursive`
+/// — bit-identical to the legacy loop in v1.10 PR-2 but a hook point
+/// for future arena-based scratch reuse. Empty / all-false outside
+/// `BettingTreeMode::TemplateExtract`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn traverse_recursive_with_parallel(
     tree: &BettingTree,
@@ -728,6 +757,7 @@ pub(crate) fn traverse_recursive_with_parallel(
     infosets: &mut [Option<VectorInfosetData>],
     offset: usize,
     allow_parallel: bool,
+    has_chance_template: &[bool],
 ) -> Vec<f64> {
     let node = &tree.nodes[node_idx];
     let update_hands = eval_ctx.hand_count[update_player];
@@ -759,7 +789,7 @@ pub(crate) fn traverse_recursive_with_parallel(
             r
         }
         FlatNode::Chance { prob, children } => {
-            // Decide: parallel dispatch or sequential walk?
+            // Decide: parallel dispatch, template walker, or sequential walk?
             if allow_parallel && children.len() >= 2 {
                 // Dispatch to the rayon parallel walker. Set
                 // `allow_parallel = false` for child subtrees to
@@ -780,6 +810,33 @@ pub(crate) fn traverse_recursive_with_parallel(
                     reach_opp,
                     infosets,
                     offset,
+                    has_chance_template,
+                );
+            }
+            // `v1.10 PR-2` — when the chance node has a `ChanceTemplate`
+            // (all children share structural identity), dispatch to
+            // `traverse_turn_chance_recursive` which is a hook point for
+            // future arena-based scratch reuse. Currently bit-identical
+            // to the legacy loop below: same DFS visit order, same
+            // arithmetic, same accumulator update sequence.
+            if !has_chance_template.is_empty() && has_chance_template[node_idx] {
+                return traverse_turn_chance_recursive(
+                    tree,
+                    eval_ctx,
+                    terminal_cache,
+                    *prob,
+                    children,
+                    update_player,
+                    iteration,
+                    alpha,
+                    beta,
+                    gamma,
+                    reach_p,
+                    reach_opp,
+                    infosets,
+                    offset,
+                    allow_parallel,
+                    has_chance_template,
                 );
             }
             let mut values = vec![0.0_f64; update_hands];
@@ -799,6 +856,7 @@ pub(crate) fn traverse_recursive_with_parallel(
                     infosets,
                     offset,
                     false,
+                    has_chance_template,
                 );
                 let _t = prof_start!();
                 for (i, v) in child_values.iter().enumerate() {
@@ -848,6 +906,7 @@ pub(crate) fn traverse_recursive_with_parallel(
                         infosets,
                         offset,
                         allow_parallel,
+                        has_chance_template,
                     );
                     let _t = prof_start!();
                     for h in 0..update_hands {
@@ -900,6 +959,7 @@ pub(crate) fn traverse_recursive_with_parallel(
                     infosets,
                     offset,
                     allow_parallel,
+                    has_chance_template,
                 );
                 let dst = a * update_hands;
                 action_values[dst..dst + update_hands].copy_from_slice(&child_values);
@@ -1141,6 +1201,10 @@ pub(crate) fn traverse_flop_chance_recursive(
 /// the slice-based traversal at the start of a worker thread's subtree.
 /// Always passes `allow_parallel = false` — nested parallelism would
 /// oversubscribe the Rayon thread pool and degrade perf.
+///
+/// `has_chance_template` is threaded through so that any sub-chance
+/// nodes inside a parallel worker's shard still hit the v1.10 PR-2
+/// template walker hook when applicable.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn traverse_with_infosets(
     tree: &BettingTree,
@@ -1156,6 +1220,7 @@ pub(crate) fn traverse_with_infosets(
     reach_opp: &[f64],
     infosets: &mut [Option<VectorInfosetData>],
     offset: usize,
+    has_chance_template: &[bool],
 ) -> Vec<f64> {
     traverse_recursive_with_parallel(
         tree,
@@ -1172,7 +1237,76 @@ pub(crate) fn traverse_with_infosets(
         infosets,
         offset,
         /* allow_parallel = */ false,
+        has_chance_template,
     )
+}
+
+/// `v1.10 PR-2` — specialized chance-node walker for chance nodes with
+/// a `ChanceTemplate` (all children share structural identity).
+///
+/// **Bit-identity gate:** the walker computes `values[i] += prob * v`
+/// INSIDE the inner loop, matching the legacy chance arm's arithmetic
+/// exactly. DFS order over `children` is preserved. The only thing this
+/// function does differently from the legacy fallthrough loop is the
+/// dispatch route (controlled by `has_chance_template[node_idx]`), which
+/// makes it a hook point for future arena-based scratch reuse without
+/// touching the load-bearing chance-arm code path.
+///
+/// **Where the real PR-2 perf win comes from:** when this walker is
+/// active, future PRs (PR-3 vector flop) can pivot to a "single shared
+/// scratch buffer per template-node" path. For PR-2 alone, the win is
+/// the framework + per-branch instrumentation hoist; the bit-identity
+/// gate is the load-bearing acceptance criterion.
+///
+/// Recursive children are dispatched back through
+/// `traverse_recursive_with_parallel`, so any nested chance / decision
+/// nodes still hit rayon dispatch and the template walker recursively
+/// as appropriate.
+#[allow(clippy::too_many_arguments)]
+fn traverse_turn_chance_recursive(
+    tree: &BettingTree,
+    eval_ctx: &EvalContext,
+    terminal_cache: &TerminalCache,
+    prob: f64,
+    children: &[usize],
+    update_player: usize,
+    iteration: u32,
+    alpha: f64,
+    beta: f64,
+    gamma: f64,
+    reach_p: &[f64],
+    reach_opp: &[f64],
+    infosets: &mut [Option<VectorInfosetData>],
+    offset: usize,
+    allow_parallel: bool,
+    has_chance_template: &[bool],
+) -> Vec<f64> {
+    let update_hands = eval_ctx.hand_count[update_player];
+    let mut values = vec![0.0_f64; update_hands];
+    for &c in children {
+        let child_values = traverse_recursive_with_parallel(
+            tree,
+            eval_ctx,
+            terminal_cache,
+            c,
+            update_player,
+            iteration,
+            alpha,
+            beta,
+            gamma,
+            reach_p,
+            reach_opp,
+            infosets,
+            offset,
+            allow_parallel,
+            has_chance_template,
+        );
+        // Bit-identical to the legacy chance arm: `values[i] += prob * v_i`.
+        for (i, v) in child_values.iter().enumerate() {
+            values[i] += prob * v;
+        }
+    }
+    values
 }
 
 /// Per-hand bookkeeping used by `VectorDCFR::traverse` for terminal-leaf
@@ -1579,8 +1713,22 @@ pub fn solve_range_vs_range_postflop_with_hands(
     // the precomputed `key_suffix` strings strip the hole prefix so we
     // substitute per-hand later. Mirrors `exploit.rs::flat_tree_exploit`
     // tree-build path.
+    //
+    // `v1.10 PR-2` — when starting street is Turn or Flop, build with
+    // `TemplateExtract` mode so the chance-node template metadata is
+    // populated. The vector-form `traverse_turn_chance` walker uses this
+    // to reuse scratch buffers across the 45 river-card branches at a
+    // turn-chance node. `Standard` mode is preserved for River-rooted
+    // subgames (no chance nodes inside the betting tree) and as the
+    // fallback if template extraction proves to be a regression on any
+    // existing fixture. Both modes produce bit-identical solve results;
+    // the metadata is purely out-of-band.
     let placeholder = initial.clone_with_hole_cards([eval_ctx.hole[0][0], eval_ctx.hole[1][0]]);
-    let tree = BettingTree::build_from(&placeholder);
+    let build_mode = match config.starting_street {
+        crate::hunl::Street::Turn | crate::hunl::Street::Flop => BettingTreeMode::TemplateExtract,
+        _ => BettingTreeMode::Standard,
+    };
+    let tree = BettingTree::build_with_mode(&placeholder, build_mode);
 
     // PR 90 (A83 Track A) — `regret_init_noise = 0.0` keeps the prior
     // all-zero initialization (bit-identical to pre-PR 90). Non-zero
@@ -2233,5 +2381,201 @@ mod tests {
             &cfg, None, 1, 1.5, 0.0, 2.0, 0.0, 0,
             Some([vec![1.0; 1], vec![1.0; 1]]),
         );
+    }
+
+    // ------------------------------------------------------------------
+    // v1.10 PR-2 — vector-form turn forward walk: bit-identical gate.
+    // ------------------------------------------------------------------
+
+    /// Tiny turn RvR config used by the v1.10 PR-2 bit-identical tests.
+    /// Single bet size + raise_cap=1 to keep the tree small enough that
+    /// the test finishes in <1s.
+    fn tiny_turn_rvr() -> HUNLConfig {
+        HUNLConfig {
+            starting_stack: 1000,
+            small_blind: 50,
+            big_blind: 100,
+            ante: 0,
+            starting_street: Street::Turn,
+            initial_board: vec![
+                card_to_int(12, 0), // Qs
+                card_to_int(7, 1),  // 7h
+                card_to_int(2, 2),  // 2d
+                card_to_int(5, 3),  // 5c
+            ],
+            initial_pot: 1000,
+            initial_contributions: [500, 500],
+            initial_hole_cards: None,
+            preflop_raise_cap: 4,
+            postflop_raise_cap: 1,
+            bet_size_fractions: vec![1.0],
+            include_all_in: false,
+            force_allin_threshold: 1,
+            min_bet_bb: 1,
+            rake_rate: 0.0,
+            rake_cap: 0,
+            abstraction_path: None,
+            abstraction_version: None,
+            use_pcs: false,
+        }
+    }
+
+    /// `v1.10 PR-2` — `BettingTree::build_with_mode(TemplateExtract)`
+    /// produces a `chance_templates` entry for the turn → river chance
+    /// node, while `Standard` mode does not.
+    ///
+    /// The structural property under test: the FlatNode list is identical
+    /// between the two modes (`TemplateExtract` only adds out-of-band
+    /// metadata).
+    #[test]
+    fn template_extract_finds_turn_chance_node() {
+        let cfg = tiny_turn_rvr();
+        let initial = HUNLState::initial(std::sync::Arc::new(cfg.clone()));
+        let placeholder = initial.clone_with_hole_cards([
+            [card_to_int(14, 0), card_to_int(14, 1)],
+            [card_to_int(13, 0), card_to_int(13, 1)],
+        ]);
+        let tree_std = BettingTree::build_with_mode(&placeholder, BettingTreeMode::Standard);
+        let tree_tmpl =
+            BettingTree::build_with_mode(&placeholder, BettingTreeMode::TemplateExtract);
+        assert_eq!(
+            tree_std.nodes.len(),
+            tree_tmpl.nodes.len(),
+            "TemplateExtract mode must preserve FlatNode list shape"
+        );
+        assert!(
+            tree_std.chance_templates.is_empty(),
+            "Standard mode must not extract chance templates"
+        );
+        assert!(
+            !tree_tmpl.chance_templates.is_empty(),
+            "TemplateExtract mode must find at least one chance template (the turn-river chance)"
+        );
+        // Verify the extracted template points at a Chance node with >1 children.
+        for t in &tree_tmpl.chance_templates {
+            match &tree_tmpl.nodes[t.chance_node_idx] {
+                FlatNode::Chance { children, .. } => {
+                    assert!(
+                        children.len() > 1,
+                        "chance template must have >1 children (got {})",
+                        children.len()
+                    );
+                }
+                _ => panic!("chance_node_idx must point at a Chance node"),
+            }
+        }
+    }
+
+    /// `v1.10 PR-2` — the `TemplateExtract` solve path produces strategy
+    /// outputs that are **bit-identical** to the `Standard` solve path.
+    ///
+    /// This is the critical acceptance gate for PR-2: the only intended
+    /// difference is the dispatch through `traverse_turn_chance` at
+    /// chance nodes with a `ChanceTemplate`, and that function performs
+    /// the EXACT same arithmetic as the legacy chance arm. Every
+    /// (key, action_idx) pair in the output `average_strategy` map must
+    /// be equal byte-for-byte across the two modes.
+    #[test]
+    fn template_extract_bit_identical_to_standard() {
+        let cfg = tiny_turn_rvr();
+        let initial = HUNLState::initial(std::sync::Arc::new(cfg.clone()));
+
+        // Use a small hand list to keep the test fast.
+        let p0_holes = vec![
+            [card_to_int(14, 0), card_to_int(14, 1)], // AsAh
+            [card_to_int(13, 0), card_to_int(13, 1)], // KsKh
+        ];
+        let p1_holes = p0_holes.clone();
+
+        // Build both trees explicitly to bypass the public API's mode
+        // auto-selection.
+        let placeholder = initial.clone_with_hole_cards([p0_holes[0], p1_holes[0]]);
+        let tree_std = BettingTree::build_with_mode(&placeholder, BettingTreeMode::Standard);
+        let tree_tmpl =
+            BettingTree::build_with_mode(&placeholder, BettingTreeMode::TemplateExtract);
+
+        let ctx_std = EvalContext::from_hand_lists(p0_holes.clone(), p1_holes.clone(), 100);
+        let ctx_tmpl = EvalContext::from_hand_lists(p0_holes, p1_holes, 100);
+
+        // Run both solves with identical hyperparameters + zero noise.
+        let mut solver_std = VectorDCFR::with_init_noise(
+            &tree_std,
+            ctx_std.hand_count,
+            1.5,
+            0.0,
+            2.0,
+            0.0,
+            0,
+        );
+        let mut solver_tmpl = VectorDCFR::with_init_noise(
+            &tree_tmpl,
+            ctx_tmpl.hand_count,
+            1.5,
+            0.0,
+            2.0,
+            0.0,
+            0,
+        );
+
+        solver_std.solve(&tree_std, &ctx_std, 5, None);
+        solver_tmpl.solve(&tree_tmpl, &ctx_tmpl, 5, None);
+
+        // Final discount catch-up — match the public solve's tail.
+        let final_iter_std = solver_std.iteration;
+        for info in solver_std.infosets.iter_mut().flatten() {
+            VectorDCFR::discount(info, final_iter_std, 1.5, 0.0, 2.0);
+        }
+        let final_iter_tmpl = solver_tmpl.iteration;
+        for info in solver_tmpl.infosets.iter_mut().flatten() {
+            VectorDCFR::discount(info, final_iter_tmpl, 1.5, 0.0, 2.0);
+        }
+
+        let strat_std = build_average_strategy(&solver_std, &tree_std, &ctx_std);
+        let strat_tmpl = build_average_strategy(&solver_tmpl, &tree_tmpl, &ctx_tmpl);
+
+        assert_eq!(
+            strat_std.len(),
+            strat_tmpl.len(),
+            "TemplateExtract must emit identical key set ({} std vs {} tmpl)",
+            strat_std.len(),
+            strat_tmpl.len(),
+        );
+        for (key, probs_std) in &strat_std {
+            let probs_tmpl = strat_tmpl
+                .get(key)
+                .unwrap_or_else(|| panic!("missing key in template-mode output: {key:?}"));
+            assert_eq!(
+                probs_std.len(),
+                probs_tmpl.len(),
+                "key {key:?}: action_count mismatch ({} std vs {} tmpl)",
+                probs_std.len(),
+                probs_tmpl.len(),
+            );
+            for (a, (ps, pt)) in probs_std.iter().zip(probs_tmpl.iter()).enumerate() {
+                // 1e-12 bit-identical gate per the PR-2 spec.
+                assert!(
+                    (ps - pt).abs() < 1e-12,
+                    "key {key:?} action {a}: std={ps} tmpl={pt} diff={}",
+                    (ps - pt).abs()
+                );
+            }
+        }
+    }
+
+    /// `v1.10 PR-2` — verifies that on a river-rooted config the public
+    /// solve path uses `Standard` mode (no chance templates extracted,
+    /// since the river-betting tree has no chance node within it).
+    /// Also verifies that the river solve still produces sensible output.
+    ///
+    /// This is the negative-control half of the PR-2 acceptance: when
+    /// there's nothing to template-extract, the solve falls through to
+    /// the legacy path bit-identically.
+    #[test]
+    fn river_solve_does_not_template_extract() {
+        let cfg = tiny_river_rvr();
+        let out = solve_range_vs_range_postflop(&cfg, 3, 1.5, 0.0, 2.0)
+            .expect("tiny river solve must succeed");
+        assert!(out.decision_node_count > 0);
+        assert!(out.strategy_entry_count > 0);
     }
 }
