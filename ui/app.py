@@ -33,7 +33,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from poker_solver.hunl import HUNLPoker
+from poker_solver.hunl import HUNLConfig, HUNLPoker, Street
 from ui.state import (
     AppState,
     SolveSession,
@@ -41,7 +41,14 @@ from ui.state import (
     get_state,
     save_state,
 )
-from ui.views import onboarding, range_matrix, run_panel, spot_input, tree_browser
+from ui.views import (
+    onboarding,
+    preflop_chart,
+    range_matrix,
+    run_panel,
+    spot_input,
+    tree_browser,
+)
 
 if TYPE_CHECKING:
     pass
@@ -99,7 +106,77 @@ def build_page() -> None:
         _build_theme_toggle(state)
         ui.button(icon="menu").props("flat").mark("hamburger-menu")
 
-    # ----- Two-pane layout (Q1 LOCKED) -----
+    # ----- Tabs: Solver | Preflop Chart (task #55) -----
+    # The original two-pane layout lives inside the "Solver" tab so every
+    # PR 10a/10b smoke test that looks up ``range-matrix-display`` etc.
+    # still finds those markers on first page open (tab is open by
+    # default). The "Preflop Chart" tab adds the 13x13 widget driven by
+    # ``_rust.solve_hunl_preflop_rvr`` (PR #122).
+    with ui.tabs().classes("w-full").mark("app-tabs") as tabs:
+        solver_tab = ui.tab("Solver", icon="grid_view").mark("tab-solver")
+        preflop_chart_tab = ui.tab(
+            "Preflop Chart", icon="leaderboard"
+        ).mark("tab-preflop-chart")
+    with ui.tab_panels(tabs, value=solver_tab).classes("w-full").mark(
+        "app-tab-panels"
+    ):
+        with ui.tab_panel(solver_tab).mark("tab-panel-solver"):
+            _render_solver_tab(state)
+        with ui.tab_panel(preflop_chart_tab).mark("tab-panel-preflop-chart"):
+            preflop_chart.render(
+                state,
+                on_solve=lambda: _on_preflop_chart_solve(state),
+            )
+
+    # ----- The 500 ms poller (mental model 7: don't block the loop) -----
+    # Track the last preflop_chart_result identity so we only refresh the
+    # chart subtree when the worker actually publishes a new result.
+    last_preflop_chart_id: list[int | None] = [None]
+
+    def _tick() -> None:
+        """Pump worker progress into the UI + flush debounced state."""
+        try:
+            run_panel.refresh_progress(state)
+        except Exception:  # noqa: BLE001 -- never let the timer die
+            logger.exception("run_panel.refresh_progress raised")
+        # Also update the header status (cheap; just a label update).
+        try:
+            status_label.set_text(state.runner.status)
+        except Exception:  # noqa: BLE001
+            logger.exception("status label update failed")
+        # Task #55: refresh the preflop chart widget when its worker
+        # publishes a new result (identity change of
+        # ``runner.preflop_chart_result``).
+        try:
+            current_id = id(getattr(state.runner, "preflop_chart_result", None))
+            if current_id != last_preflop_chart_id[0]:
+                last_preflop_chart_id[0] = current_id
+                refresher = getattr(state.runner, "_preflop_chart_refresh", None)
+                if callable(refresher):
+                    refresher()
+        except Exception:  # noqa: BLE001
+            logger.exception("preflop chart refresh on tick raised")
+        # Debounced state.json flush.
+        try:
+            _maybe_flush_state()
+        except Exception:  # noqa: BLE001
+            logger.exception("_maybe_flush_state raised")
+
+    ui.timer(0.5, _tick)
+
+    # ----- Onboarding (3 steps; ``ui_mockups_and_debates.md`` §4) -----
+    if not state.prefs.onboarding_completed:
+        onboarding.show_modal(state)
+
+
+def _render_solver_tab(state: AppState) -> None:
+    """Render the original two-pane Solver layout (PR 10a Q1 LOCKED).
+
+    Pulled out into a helper so the page builder can compose it inside
+    a tab panel alongside the new "Preflop Chart" tab (task #55).
+    """
+    from nicegui import ui
+
     with ui.row().classes("w-full no-wrap items-stretch"):
         # Center pane: matrix + (Agent B's) combo inspector strip + tree.
         # Agent B owns the actual range_matrix / tree_browser renders;
@@ -157,30 +234,6 @@ def build_page() -> None:
                 ui.label(
                     "Decision tree renders inline below the matrix (Q5 layout)."
                 ).classes("text-gray-500 italic")
-
-    # ----- The 500 ms poller (mental model 7: don't block the loop) -----
-    def _tick() -> None:
-        """Pump worker progress into the UI + flush debounced state."""
-        try:
-            run_panel.refresh_progress(state)
-        except Exception:  # noqa: BLE001 -- never let the timer die
-            logger.exception("run_panel.refresh_progress raised")
-        # Also update the header status (cheap; just a label update).
-        try:
-            status_label.set_text(state.runner.status)
-        except Exception:  # noqa: BLE001
-            logger.exception("status label update failed")
-        # Debounced state.json flush.
-        try:
-            _maybe_flush_state()
-        except Exception:  # noqa: BLE001
-            logger.exception("_maybe_flush_state raised")
-
-    ui.timer(0.5, _tick)
-
-    # ----- Onboarding (3 steps; ``ui_mockups_and_debates.md`` §4) -----
-    if not state.prefs.onboarding_completed:
-        onboarding.show_modal(state)
 
 
 def _format_spot_label(state: AppState) -> str:
@@ -240,6 +293,92 @@ def _open_library_stub() -> None:
             ui.label("Library (stub — Agent C will wire).")
             ui.button("Close", on_click=dialog.close)
         dialog.open()
+
+
+def _on_preflop_chart_solve(state: AppState) -> None:
+    """Solve button handler for the preflop chart widget (task #55).
+
+    Builds a preflop ``HUNLConfig`` from ``state.current_spot`` (stack
+    + blinds) and dispatches to
+    ``state.runner.start_preflop_chart(...)`` which calls
+    ``_rust.solve_hunl_preflop_rvr`` (PR #122) on a daemon thread. The
+    Rust binding emits a full preflop strategy dict keyed by hole-card
+    pairs; the worker projects that into a per-class chart_result that
+    ``ui/views/preflop_chart.py:project_chart`` consumes.
+
+    Per-click parameters (open sizes, reraise multipliers, iterations)
+    are read from ``state.runner._pending_preflop_chart_*`` which the
+    input panel populates on click. Falls back to engine defaults when
+    None.
+    """
+    from nicegui import ui
+
+    spot = state.current_spot
+    iterations = getattr(
+        state.runner, "_pending_preflop_chart_iterations", None
+    ) or 500
+    open_sizes = getattr(state.runner, "_pending_preflop_chart_opens", None)
+    reraise_mults = getattr(state.runner, "_pending_preflop_chart_mults", None)
+
+    # Build a clean preflop HUNLConfig:
+    # - starting_street = PREFLOP
+    # - initial_hole_cards = None (the Rust binding REQUIRES this to be
+    #   None — see ``preflop_rvr.rs:1050-1056``)
+    # - initial_pot = 0, initial_contributions = (0, 0): blinds are
+    #   applied by the engine's tree builder.
+    bb_cents = 100
+    starting_stack_cents = max(1, int(spot.stacks_bb[0])) * bb_cents
+    sb_cents = max(1, int(round(spot.sb_blind * bb_cents)))
+    bb_blind_cents = max(1, int(round(spot.bb_blind * bb_cents)))
+    ante_cents = max(0, int(round(spot.ante * bb_cents)))
+    try:
+        config = HUNLConfig(
+            starting_stack=starting_stack_cents,
+            small_blind=sb_cents,
+            big_blind=bb_blind_cents,
+            ante=ante_cents,
+            starting_street=Street.PREFLOP,
+            initial_board=(),
+            initial_pot=0,
+            initial_contributions=(0, 0),
+            initial_hole_cards=(),  # = None for the binding
+            preflop_raise_cap=spot.preflop_raise_cap,
+            postflop_raise_cap=spot.postflop_raise_cap,
+            bet_size_fractions=tuple(spot.bet_sizes_checked),
+            include_all_in=spot.include_all_in,
+            abstraction=None,
+        )
+    except ValueError as exc:
+        ui.notify(
+            f"Invalid preflop chart config: {exc}",
+            type="negative",
+            position="top",
+        )
+        return
+
+    try:
+        state.runner.start_preflop_chart(
+            config,
+            iterations=int(iterations),
+            open_sizes_bb=list(open_sizes) if open_sizes else None,
+            reraise_multipliers=list(reraise_mults) if reraise_mults else None,
+        )
+    except RuntimeError as exc:
+        ui.notify(
+            f"A solve is already running: {exc}",
+            type="warning",
+            position="top",
+        )
+        return
+    except ImportError as exc:
+        ui.notify(
+            f"Preflop chart binding unavailable: {exc}",
+            type="negative",
+            position="top",
+            timeout=6000,
+            multi_line=True,
+        )
+        return
 
 
 def _on_solve(state: AppState) -> None:
