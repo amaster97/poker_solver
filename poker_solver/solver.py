@@ -19,11 +19,47 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class SolveResult:
+    """Output of :func:`solve` (and any subclass producer).
+
+    v1.8.2 (#47) — added ``reach_probability`` and ``off_path_keys`` so
+    downstream consumers (CLI tree walk, library queries, persona-test
+    fixtures) can cheaply filter the "phantom 5%" infosets the engine
+    visits during training but that have effectively zero joint reach
+    probability in the final average strategy. Fields are populated by
+    :func:`_compute_reach_probabilities` after the solve completes; code
+    paths where the helper cannot run (push/fold chart short-circuit,
+    library deserialization) leave them as empty dict + empty frozenset,
+    which consumers should treat as "annotation unavailable" rather than
+    "everything is on-path".
+
+    Attributes:
+        average_strategy: infoset_key -> action-probability list. The
+            engine's primary output.
+        exploitability_history: per-checkpoint exploitability values.
+        game_value: player-0 EV of ``average_strategy`` under itself.
+        iterations: DCFR iterations run.
+        backend: ``"python"``, ``"rust"``, ``"pushfold_chart"``, or
+            ``"library"``.
+        reach_probability: infoset_key -> joint reach probability (own ×
+            opp × chance) of that node under ``average_strategy``. Empty
+            dict signals the annotation pass was skipped.
+        off_path_keys: ``frozenset`` of infoset keys with
+            ``reach_probability < 1e-6`` -- convenience derivation for
+            the common "filter phantom nodes" call site.
+    """
+
     average_strategy: dict[str, list[float]]
     exploitability_history: list[float] = field(default_factory=list)
     game_value: float = 0.0
     iterations: int = 0
     backend: str = "python"
+    # v1.8.2 (#47) -- phantom-5% annotation. Both fields default to empty
+    # so the addition is fully additive: existing call sites + the
+    # library round-trip (`_dict_to_result`) compile-time-safe without
+    # explicit values, and consumers can read ``result.off_path_keys``
+    # without an attr check. See ``_compute_reach_probabilities``.
+    reach_probability: dict[str, float] = field(default_factory=dict)
+    off_path_keys: frozenset[str] = field(default_factory=frozenset)
 
 
 @dataclass(frozen=True)
@@ -55,6 +91,117 @@ class BestResponseResult:
     on_strategy_value_bb: float
     exploit_gap_bb: float
     hero_player: int
+
+
+# v1.8.2 (#47) -- joint reach below this threshold counts as "phantom" /
+# "off-path". 1e-6 matches the canonical phantom-5% test case (AK vs QQ
+# river -- engine assigns ~5% action mass to nodes whose multiplicative
+# path reach is ~1e-7).
+_OFF_PATH_REACH_THRESHOLD: float = 1e-6
+
+
+def _compute_reach_probabilities(
+    strategy: Mapping[str, Sequence[float]],
+    game: Game,
+) -> dict[str, float]:
+    """Walk the tree from root, summing joint reach probability per infoset.
+
+    Reach probability of an infoset is the sum over all root->infoset
+    paths of (own-player strategy product × opponent strategy product ×
+    chance product) along that path. This is the "joint" reach -- i.e.
+    how often the infoset is actually visited in self-play under
+    ``strategy``. The canonical use case (issue #47) is filtering phantom
+    5% nodes: the engine builds infosets for every action in the action
+    abstraction even when the priors put effectively zero mass on the
+    line, and downstream consumers want to skip those.
+
+    For infosets visited via multiple paths (e.g. preflop with hole-card
+    chance enumeration at the root), reach accumulates across paths --
+    matching what :func:`exploitability` and :func:`_expected_value`
+    integrate over internally.
+
+    Notes:
+        * Missing keys in ``strategy`` default to uniform random -- matches
+          :func:`exploitability` semantics so the reach calc is consistent
+          with the result's other fields.
+        * Threshold-free output: caller derives ``off_path_keys`` via the
+          ``_OFF_PATH_REACH_THRESHOLD`` constant.
+    """
+    reach_acc: dict[str, float] = {}
+    _walk_reach(
+        game, strategy, game.initial_state(), reach=1.0, reach_acc=reach_acc
+    )
+    return reach_acc
+
+
+def _walk_reach(
+    game: Game,
+    strategy: Mapping[str, Sequence[float]],
+    state: Any,
+    reach: float,
+    reach_acc: dict[str, float],
+) -> None:
+    """Recursive helper for :func:`_compute_reach_probabilities`.
+
+    Mirrors :func:`_expected_value`'s tree-walk structure but accumulates
+    a scalar joint reach per infoset instead of a per-player value
+    vector. We do NOT short-circuit at low reach -- the result dataclass
+    captures every infoset's reach so the caller can apply a custom
+    threshold downstream.
+    """
+    if game.is_terminal(state):
+        return
+    player = game.current_player(state)
+    if player == -1:
+        for action, prob in game.chance_outcomes(state):
+            _walk_reach(
+                game,
+                strategy,
+                game.apply(state, action),
+                reach * prob,
+                reach_acc,
+            )
+        return
+    actions = game.legal_actions(state)
+    key = game.infoset_key(state, player)
+    # Accumulate this node's reach (sum over paths reaching the infoset).
+    reach_acc[key] = reach_acc.get(key, 0.0) + reach
+    probs = strategy.get(key)
+    if probs is None:
+        # Match the exploitability walk: uniform random for un-touched
+        # infosets. Keeps the reach calc consistent with what the EV walk
+        # assumes for the same infoset.
+        probs = [1.0 / len(actions)] * len(actions)
+    for idx, action in enumerate(actions):
+        _walk_reach(
+            game,
+            strategy,
+            game.apply(state, action),
+            reach * probs[idx],
+            reach_acc,
+        )
+
+
+def _annotate_off_path(
+    result: "SolveResult", game: Game
+) -> "SolveResult":
+    """Populate ``reach_probability`` and ``off_path_keys`` on ``result``.
+
+    Mutates the result in place (the dataclass is non-frozen, by design --
+    ``HUNLSolveResult`` and ``PreflopSolveResult`` inherit this) and
+    returns it for convenience. Skips the walk when ``average_strategy``
+    is empty (no infosets touched -- typically iterations=0 or an
+    unsolved fixture).
+    """
+    if not result.average_strategy:
+        return result
+    reach = _compute_reach_probabilities(result.average_strategy, game)
+    off_keys = frozenset(
+        k for k, r in reach.items() if r < _OFF_PATH_REACH_THRESHOLD
+    )
+    result.reach_probability = reach
+    result.off_path_keys = off_keys
+    return result
 
 
 def solve(
@@ -281,13 +428,18 @@ def solve(
     value = _game_value(game, avg)
     if log_every is None:
         history.append(exploitability(game, avg))
-    return SolveResult(
+    result = SolveResult(
         average_strategy=avg,
         exploitability_history=history,
         game_value=value,
         iterations=iterations,
         backend=backend,
     )
+    # v1.8.2 (#47) -- annotate the result with phantom-5% reach + off-path
+    # keys so consumers (CLI tree walk, persona-test filters) can skip
+    # infosets with effectively zero joint reach.
+    _annotate_off_path(result, game)
+    return result
 
 
 def exploitability(game: Game, strategy: Mapping[str, Sequence[float]]) -> float:
@@ -711,13 +863,17 @@ def _solve_rust(
             wrap_pf_game = PreflopSubgameGame(game.config)
             expl_pf = exploitability(wrap_pf_game, avg_pf)
             gv_pf = _game_value(wrap_pf_game, avg_pf)
-            return SolveResult(
+            result_pf = SolveResult(
                 average_strategy=avg_pf,
                 exploitability_history=[expl_pf],
                 game_value=gv_pf,
                 iterations=int(raw_pf["iterations"]),
                 backend="rust",
             )
+            # v1.8.2 (#47) -- annotate vs the equity-leaf wrapper (same
+            # game the exploitability/value walks above use).
+            _annotate_off_path(result_pf, wrap_pf_game)
+            return result_pf
         # `poker_solver._rust` is the PyO3 extension and lacks `.pyi`
         # stubs. The `type: ignore[import-untyped]` here silences mypy's
         # untyped-import warning; later imports in this function inherit
@@ -768,13 +924,18 @@ def _solve_rust(
         # paths converge to the same value within 1e-6 BB/hand (verified
         # by `tests/test_exploit_diff.py`).
         expl, gv = _compute_exploitability_rust(game.config, avg)
-        return SolveResult(
+        result_postflop = SolveResult(
             average_strategy=avg,
             exploitability_history=[expl],
             game_value=gv,
             iterations=int(raw["iterations"]),
             backend="rust",
         )
+        # v1.8.2 (#47) -- annotate against the Python game; the Rust path
+        # produces the same average_strategy keyset and the Python walk
+        # matches what `exploitability` walked.
+        _annotate_off_path(result_postflop, game)
+        return result_postflop
 
     # Localized import so non-Rust environments don't pay the import cost.
     # PR 6 note: the HUNL import above carries the `type: ignore[import-untyped]`
@@ -798,7 +959,7 @@ def _solve_rust(
     # accumulation. Re-deriving from the strategy removes that noise.
     expl = exploitability(game, avg)
     game_value = _game_value(game, avg)
-    return SolveResult(
+    out_result = SolveResult(
         average_strategy=avg,
         # Rust tier doesn't stream per-iteration exploitability; surface the
         # final value as a single-entry history so callers can read [-1].
@@ -807,3 +968,6 @@ def _solve_rust(
         iterations=int(result["iterations"]),
         backend="rust",
     )
+    # v1.8.2 (#47) -- annotate phantom-5% reach + off-path keys.
+    _annotate_off_path(out_result, game)
+    return out_result

@@ -999,14 +999,23 @@ def _render_new_mode(
     )
 
     # Walk every per-combo result; cache (combo_label -> nodes).
+    # v1.8.2 (#47) — thread engine-computed reach + off-path keys when
+    # the SolveResult carries them. The solver-level annotation is more
+    # accurate than the per-walk heuristic (accounts for joint reach
+    # including opponent strategy + chance prob); falls back to the
+    # legacy heuristic when the result lacks the fields.
     per_combo_nodes: dict[str, list] = {}
     for combo_label, result in per_combo_results.items():
         cfg = per_combo_cfgs[combo_label]
         game = HUNLPoker_cls(cfg)
+        reach_lookup = getattr(result, "reach_probability", None) or None
+        off_keys = getattr(result, "off_path_keys", None) or None
         nodes = walk_tree(
             game,
             result.average_strategy,  # type: ignore[attr-defined]
             include_off_path=full_tree,
+            reach_lookup=reach_lookup,
+            off_path_keys=off_keys,
         )
         per_combo_nodes[combo_label] = nodes
 

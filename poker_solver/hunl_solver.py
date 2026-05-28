@@ -216,7 +216,7 @@ def solve_hunl_postflop(
 
     game_value = _game_value(game, avg) if avg else 0.0
 
-    return HUNLSolveResult(
+    result = HUNLSolveResult(
         average_strategy=avg,
         exploitability_history=history,
         game_value=game_value,
@@ -224,6 +224,14 @@ def solve_hunl_postflop(
         backend="python",
         memory_report=report,
     )
+    # v1.8.2 (#47) -- annotate phantom-5% reach. Skip when avg is empty
+    # (iterations=0, no infosets touched). The helper itself is
+    # empty-strategy-safe but we mirror the `avg` guard above.
+    if avg:
+        from poker_solver.solver import _annotate_off_path
+
+        _annotate_off_path(result, game)
+    return result
 
 
 def _validate_postflop_config(config: HUNLConfig) -> None:
