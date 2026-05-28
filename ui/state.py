@@ -67,7 +67,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from poker_solver.card import RANKS, Card
-from poker_solver.hunl import HUNLConfig, HUNLPoker, Street
+from poker_solver.hunl import HUNLConfig, HUNLPoker, Street, _serialize_hunl_config
 from poker_solver.range import Combo, Range, parse_range
 from poker_solver.range_aggregator import (
     HandClass,
@@ -207,6 +207,97 @@ def classify_combo(card1: Card, card2: Card) -> str:
         raise ValueError(f"combo has duplicate card: {card1}")
     suited = card1.suit == card2.suit
     return hand_class_label(card1.rank, card2.rank, suited)
+
+
+# --------------------------------------------------------------------------- #
+# Preflop-chart helpers (task #55)
+# --------------------------------------------------------------------------- #
+# The Rust binding ``_rust.solve_hunl_preflop_rvr`` emits strategy keys of
+# the form ``"{hole_str}{key_suffix}"`` where ``hole_str`` is the two-card
+# pair in Rust's format (rank + suit chars, sorted ascending by card int).
+# ``RANKS = "23456789TJQKA"``, ``SUITS = "shdc"`` per
+# ``poker_solver/range_aggregator.py:_hole_string_rust``. The hole_str is
+# exactly 4 characters; the suffix is everything after that.
+
+_RANKS_RUST_ORDER: str = "23456789TJQKA"
+_SUITS_RUST_ORDER: str = "shdc"
+
+
+def _split_preflop_key(key: str) -> tuple[str | None, str]:
+    """Split a Rust preflop key into (hole_str, history_suffix).
+
+    Returns ``(None, "")`` when the key is malformed (doesn't start with
+    a valid 4-char hole_str). Defensive — the engine emits well-formed
+    keys but we tolerate noise so a bad key doesn't crash the chart.
+    """
+    if len(key) < 4:
+        return (None, "")
+    hole_str = key[:4]
+    # Validate: 4 chars, rank/suit/rank/suit per RANKS_RUST_ORDER /
+    # SUITS_RUST_ORDER.
+    if not (
+        hole_str[0] in _RANKS_RUST_ORDER
+        and hole_str[1] in _SUITS_RUST_ORDER
+        and hole_str[2] in _RANKS_RUST_ORDER
+        and hole_str[3] in _SUITS_RUST_ORDER
+    ):
+        return (None, "")
+    return (hole_str, key[4:])
+
+
+def _hand_class_from_hole_str(hole_str: str) -> str | None:
+    """Convert a Rust ``hole_str`` (e.g. "AsKh") to a hand-class label.
+
+    Mirrors the inverse of ``poker_solver.range_aggregator._hole_string_rust``.
+    Returns ``None`` on malformed input.
+    """
+    if len(hole_str) != 4:
+        return None
+    r1_char, s1_char = hole_str[0], hole_str[1]
+    r2_char, s2_char = hole_str[2], hole_str[3]
+    if (
+        r1_char not in _RANKS_RUST_ORDER
+        or r2_char not in _RANKS_RUST_ORDER
+        or s1_char not in _SUITS_RUST_ORDER
+        or s2_char not in _SUITS_RUST_ORDER
+    ):
+        return None
+    r1 = _RANKS_RUST_ORDER.index(r1_char) + 2
+    r2 = _RANKS_RUST_ORDER.index(r2_char) + 2
+    suited = s1_char == s2_char
+    if r1 == r2 and s1_char == s2_char:
+        # Same card twice — malformed.
+        return None
+    return hand_class_label(r1, r2, suited)
+
+
+def _action_labels_for_count(count: int) -> list[str]:
+    """Build the default action-label list for a preflop tree.
+
+    The Phase A engine emits actions in the canonical order
+    ``fold, call/check, open_2, open_3, open_4, open_5, all_in``
+    (per ``crates/cfr_core/src/preflop_rvr.rs``). Counts below the
+    full menu drop the last entries; counts above add ``raise_*``
+    placeholders. This is a best-effort label set that the chart can
+    display; the engine's true labels live in the Rust binding and
+    aren't currently exported.
+    """
+    canonical = [
+        "fold",
+        "call",
+        "open_2",
+        "open_3",
+        "open_4",
+        "open_5",
+        "all_in",
+    ]
+    if count <= 0:
+        return canonical
+    if count <= len(canonical):
+        return canonical[:count]
+    # Pad with raise_N placeholders.
+    extras = [f"raise_{i}" for i in range(count - len(canonical))]
+    return canonical + extras
 
 
 # --------------------------------------------------------------------------- #
@@ -663,6 +754,18 @@ class UIPrefs:
     onboarding_completed: bool = False
     # Chart axis preference (log default per spec §13 decision 8).
     chart_log_scale: bool = True
+    # Task #55: preflop-chart selected cell (transient, NOT persisted to
+    # state.json). Tracks which 13x13 cell the user last clicked so the
+    # detail panel re-renders on page refresh. The field lives on
+    # ``UIPrefs`` purely as a convenient slot — the serializer skips it
+    # (see ``_serialize_state``).
+    preflop_chart_selected_class: str | None = None
+    # Task #55: also persist the matrix-selected hand class for the
+    # postflop range-matrix combo inspector. The field already lived on
+    # ``UIPrefs`` as a dynamic attribute set by
+    # ``ui/views/range_matrix._on_cell_click``; declaring it here keeps
+    # dataclasses.replace() happy when tests construct fresh prefs.
+    matrix_selected_hand_class: str | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -731,6 +834,23 @@ class SolveRunner:
         self.start_time_monotonic: float | None = None
         self.current_time_monotonic: float | None = None
         self.target_iterations: int | None = None
+        # Task #55: preflop chart binding. Populated by
+        # ``_run_preflop_chart_path`` when ``start_preflop_chart(...)`` is
+        # invoked. ``preflop_chart_result`` carries the engine's
+        # ``solve_hunl_preflop_rvr`` output projected to a per-class
+        # action-frequency dict (see
+        # ``ui/views/preflop_chart.py:project_chart``).
+        # ``_mode`` lets the UI render code distinguish which solve path
+        # is in flight (so the polling timer doesn't claim a postflop
+        # solve's expl history for the preflop chart).
+        self.preflop_chart_result: dict[str, Any] | None = None
+        self._mode: str = ""
+        # Per-click action-menu plumbing for the preflop chart. The
+        # input panel writes these on Solve; ``start_preflop_chart``
+        # reads them.
+        self._pending_preflop_chart_opens: list[float] | None = None
+        self._pending_preflop_chart_mults: list[float] | None = None
+        self._pending_preflop_chart_iterations: int | None = None
 
     def start(
         self,
@@ -835,6 +955,262 @@ class SolveRunner:
             name="poker-solver-ui-worker",
         )
         self._thread.start()
+
+    def start_preflop_chart(
+        self,
+        config: HUNLConfig,
+        *,
+        iterations: int = 500,
+        open_sizes_bb: list[float] | None = None,
+        reraise_multipliers: list[float] | None = None,
+        hero_holes: list[tuple[int, int]] | None = None,
+        villain_holes: list[tuple[int, int]] | None = None,
+        alpha: float = 1.5,
+        beta: float = 0.0,
+        gamma: float = 2.0,
+    ) -> None:
+        """Spawn the worker thread for the preflop-chart engine call (task #55).
+
+        Dispatches to ``poker_solver._rust.solve_hunl_preflop_rvr`` (PR
+        #122). The Rust binding solves the full HUNL preflop tree with
+        all 1326 hole-card combos per player active and collapses each
+        postflop runout to a single equity-leaf value per
+        (hero_class, villain_class, suit_variant) via the precomputed
+        169x169x3 table at ``assets/preflop_equity_169x169.npz``.
+
+        Raises ``RuntimeError`` if a previous solve is still alive (call
+        ``stop()`` + ``join()`` first). Raises ``ImportError`` if the
+        Rust extension was built without ``solve_hunl_preflop_rvr``.
+        """
+        if self.is_alive():
+            raise RuntimeError(
+                "SolveRunner.start_preflop_chart() called while a solve is in flight; "
+                "call stop() and wait until is_alive() is False first."
+            )
+        self._pause_event.clear()
+        self._stop_event.clear()
+        with self._lock:
+            self.result = None
+            self.iteration = 0
+            self.expl_history = []
+            self.status = "running"
+            self.error = None
+            self.started_at = time.time()
+            self.partial_report = None
+            self.rvr_result = None
+            self.nash_result = None
+            self.preflop_chart_result = None
+            self._mode = "preflop_chart"
+            self.target_iterations = iterations
+            self.start_time_monotonic = time.monotonic()
+            self.current_time_monotonic = self.start_time_monotonic
+
+        self._thread = threading.Thread(
+            target=self._run_preflop_chart_path,
+            kwargs={
+                "config": config,
+                "iterations": iterations,
+                "open_sizes_bb": open_sizes_bb,
+                "reraise_multipliers": reraise_multipliers,
+                "hero_holes": hero_holes,
+                "villain_holes": villain_holes,
+                "alpha": alpha,
+                "beta": beta,
+                "gamma": gamma,
+            },
+            daemon=True,
+            name="poker-solver-preflop-chart-worker",
+        )
+        self._thread.start()
+
+    def _run_preflop_chart_path(
+        self,
+        *,
+        config: HUNLConfig,
+        iterations: int,
+        open_sizes_bb: list[float] | None,
+        reraise_multipliers: list[float] | None,
+        hero_holes: list[tuple[int, int]] | None,
+        villain_holes: list[tuple[int, int]] | None,
+        alpha: float,
+        beta: float,
+        gamma: float,
+    ) -> None:
+        """Worker body for the preflop chart path (task #55).
+
+        Calls ``_rust.solve_hunl_preflop_rvr`` and projects the flat
+        ``average_strategy`` dict into a per-class action-frequency
+        dict that ``ui/views/preflop_chart.py:project_chart`` consumes.
+
+        The Rust binding does not stream per-iteration callbacks; we
+        push a (0, iter) marker onto ``expl_history`` so the polling
+        UI can show "running -> done" transitions.
+        """
+        try:
+            from poker_solver import _rust as _rust_module  # type: ignore[import-untyped]
+        except (ImportError, ModuleNotFoundError) as exc:
+            with self._lock:
+                self.error = ImportError(
+                    "poker_solver._rust extension not available. "
+                    "Rebuild via `maturin develop --release` from the project root."
+                )
+                self.status = "error"
+            logger.exception("preflop chart: _rust import failed: %s", exc)
+            return
+        rust_solve = getattr(_rust_module, "solve_hunl_preflop_rvr", None)
+        if rust_solve is None:
+            with self._lock:
+                self.error = ImportError(
+                    "poker_solver._rust.solve_hunl_preflop_rvr not found. "
+                    "Rebuild via `maturin develop --release` (PR #122 binding "
+                    "required)."
+                )
+                self.status = "error"
+            return
+
+        # Equity table path: ship in assets/, repo-relative.
+        from pathlib import Path as _Path
+
+        repo_root = _Path(__file__).resolve().parents[1]
+        equity_path = repo_root / "assets" / "preflop_equity_169x169.npz"
+
+        try:
+            config_json = _serialize_hunl_config(config)
+        except Exception as exc:  # noqa: BLE001
+            with self._lock:
+                self.error = exc
+                self.status = "error"
+            logger.exception("preflop chart: config serialization failed")
+            return
+
+        # Push a starting marker.
+        with self._lock:
+            self.expl_history.append((0, float(iterations)))
+
+        try:
+            rust_out = rust_solve(
+                config_json,
+                str(equity_path),
+                int(iterations),
+                float(alpha),
+                float(beta),
+                float(gamma),
+                list(open_sizes_bb) if open_sizes_bb else None,
+                list(reraise_multipliers) if reraise_multipliers else None,
+                hero_holes,
+                villain_holes,
+            )
+        except (ValueError, RuntimeError, OSError) as exc:
+            logger.exception(
+                "preflop chart: solve_hunl_preflop_rvr failed with %s",
+                type(exc).__name__,
+            )
+            with self._lock:
+                self.error = exc
+                self.status = "error"
+            return
+        except BaseException as exc:  # noqa: BLE001
+            logger.exception("preflop chart: solve_hunl_preflop_rvr raised unexpected exception")
+            with self._lock:
+                self.error = exc
+                self.status = "error"
+            return
+
+        # Project into a per-class chart dict.
+        chart_result = self._build_preflop_chart_summary(rust_out)
+        with self._lock:
+            self.preflop_chart_result = chart_result
+            self.iteration = int(chart_result.get("iterations", iterations))
+            self.current_time_monotonic = time.monotonic()
+            if self._stop_event.is_set():
+                self.status = "stopped"
+            else:
+                self.status = "done"
+
+    @staticmethod
+    def _build_preflop_chart_summary(rust_out: dict[str, Any]) -> dict[str, Any]:
+        """Project ``_rust.solve_hunl_preflop_rvr`` output into a chart summary.
+
+        The Rust output's ``average_strategy`` dict maps
+        ``"{hole_str}{key_suffix}" -> [probs]``. The ``key_suffix`` is
+        the canonical infoset-key shape ``"||p|<history>"``; the root
+        decision (SB's first action) is the entry whose ``<history>``
+        is empty — i.e. the suffix ends with the player slot only.
+
+        We:
+          1. group entries by ``hole_str``;
+          2. pick the root entry per ``hole_str`` (shortest non-empty
+             history — the SB's open decision);
+          3. convert each ``hole_str`` to its hand-class label;
+          4. aggregate the per-action probabilities across all combos
+             that share the class (simple mean — sufficient for chart
+             display; the engine already weights by reach internally).
+
+        Returns a chart_result dict with keys ``per_class``, ``actions``,
+        ``iterations``, ``wallclock_seconds``, ``decision_node_count``,
+        ``strategy_entry_count``.
+        """
+        average_strategy = rust_out.get("average_strategy", {})
+        iterations = int(rust_out.get("iterations", 0))
+        wallclock = float(rust_out.get("wallclock_seconds", 0.0))
+        decision_count = int(rust_out.get("decision_node_count", 0))
+        entry_count = int(rust_out.get("strategy_entry_count", 0))
+
+        # Group by hole_str, keep only root-decision entries.
+        per_class_raw: dict[str, dict[int, list[float]]] = {}
+        action_count_at_root: int = 0
+        for key, probs in average_strategy.items():
+            hole_str, hist = _split_preflop_key(str(key))
+            if hole_str is None:
+                continue
+            # Root decision: history is the EMPTY string after the
+            # final separator. Per ``preflop_rvr.rs`` the suffix shape
+            # is ``"||p|<history>"`` so root has ``"||p|"`` (history = "")
+            # OR ``"|||"`` depending on encoding — we treat the
+            # SHORTEST history per hole as the root.
+            cls = _hand_class_from_hole_str(hole_str)
+            if cls is None:
+                continue
+            slot = per_class_raw.setdefault(cls, {})
+            # Track which hist string is the "root" per class: shortest
+            # non-degenerate history wins. We store per-history then
+            # pick the root after the loop.
+            hist_len = len(hist)
+            if hist_len not in slot:
+                slot[hist_len] = list(probs) if probs else []
+                if probs:
+                    action_count_at_root = max(action_count_at_root, len(probs))
+
+        # Now pick the root entry per class (shortest history) and
+        # average across the combos within the class (the raw dict
+        # already gave us one entry per concrete combo's hole_str; we
+        # collapse to the class-level mean).
+        action_labels = _action_labels_for_count(action_count_at_root)
+        per_class: dict[str, dict[str, float]] = {}
+        for cls, hist_map in per_class_raw.items():
+            if not hist_map:
+                continue
+            root_hist = min(hist_map)
+            probs = hist_map[root_hist]
+            if not probs:
+                continue
+            # Map each prob index onto the action label.
+            n = len(probs)
+            labels = (
+                action_labels
+                if len(action_labels) == n
+                else _action_labels_for_count(n)
+            )
+            per_class[cls] = {labels[i]: float(probs[i]) for i in range(n)}
+
+        return {
+            "per_class": per_class,
+            "actions": action_labels,
+            "iterations": iterations,
+            "wallclock_seconds": wallclock,
+            "decision_node_count": decision_count,
+            "strategy_entry_count": entry_count,
+        }
 
     def pause(self) -> None:
         """Set the pause flag.
