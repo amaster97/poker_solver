@@ -1841,4 +1841,122 @@ mod tests {
         }
         assert!(compared > 0, "no terminal leaves walked — fixture broken");
     }
+
+    // ------------------------------------------------------------------
+    // B10 Phase B — per-combo weights (`hand_weights`) tests.
+    // ------------------------------------------------------------------
+
+    /// Back-compat: supplying `Some([vec![1.0; n0], vec![1.0; n1]])` for
+    /// `hand_weights` MUST produce a bit-identical strategy to the legacy
+    /// `None` path. This codifies the multiplicative-only invariant: an
+    /// all-ones weight vector is the same scalar as the default initial
+    /// reach, so every per-(hand, action) regret/strategy update walks
+    /// the exact same trajectory.
+    #[test]
+    fn b10_phase_b_all_ones_weights_matches_legacy_none() {
+        let cfg = tiny_river_rvr();
+        let out_none = solve_range_vs_range_postflop_with_hands(
+            &cfg, None, 5, 1.5, 0.0, 2.0, 0.0, 0, None,
+        )
+        .expect("None-weight baseline must complete");
+        // Build all-ones weight vectors of the right length. We need the
+        // hand counts; rerun `EvalContext::from_root` to get them.
+        let initial = HUNLState::initial(std::sync::Arc::new(cfg.clone()));
+        let ctx = EvalContext::from_root(&initial);
+        let weights = Some([
+            vec![1.0; ctx.hand_count[0]],
+            vec![1.0; ctx.hand_count[1]],
+        ]);
+        let out_ones = solve_range_vs_range_postflop_with_hands(
+            &cfg, None, 5, 1.5, 0.0, 2.0, 0.0, 0, weights,
+        )
+        .expect("all-ones weights solve must complete");
+        assert_eq!(
+            out_none.average_strategy.len(),
+            out_ones.average_strategy.len(),
+            "all-ones weights must produce the same infoset count as None"
+        );
+        for (key, probs_none) in &out_none.average_strategy {
+            let probs_ones = out_ones
+                .average_strategy
+                .get(key)
+                .expect("all-ones weights must produce identical key set");
+            assert_eq!(
+                probs_none, probs_ones,
+                "all-ones weights MUST be bit-identical to None at infoset {key:?}"
+            );
+        }
+    }
+
+    /// Non-uniform `hand_weights` produces a strategy that diverges from
+    /// the all-ones baseline by a non-zero amount. The smoke claim is
+    /// just "the weights actually engage" — we don't assert a specific
+    /// quantitative drift, only that some cell moves.
+    ///
+    /// Mirrors the `regret_init_noise_epsilon_perturbs_strategy` config
+    /// shape: cap=3 + all-in enabled so the tree has multi-action
+    /// infosets (the default `tiny_river_rvr` collapses every decision
+    /// to a single legal action, masking any perturbation).
+    #[test]
+    fn b10_phase_b_non_uniform_weights_perturbs_strategy() {
+        let mut cfg = tiny_river_rvr();
+        cfg.postflop_raise_cap = 3;
+        cfg.include_all_in = true;
+        let initial = HUNLState::initial(std::sync::Arc::new(cfg.clone()));
+        let ctx = EvalContext::from_root(&initial);
+        // All-ones baseline.
+        let out_ones = solve_range_vs_range_postflop_with_hands(
+            &cfg, None, 5, 1.5, 0.0, 2.0, 0.0, 0,
+            Some([vec![1.0; ctx.hand_count[0]], vec![1.0; ctx.hand_count[1]]]),
+        )
+        .expect("baseline must complete");
+        // Skew: half-weight on every other hand for each player. The
+        // kernel scales the initial reach into the root infoset by 0.5
+        // for those hands, so every downstream regret update for them is
+        // correspondingly attenuated. With a multi-action tree this MUST
+        // perturb at least one strategy cell.
+        let mut w0 = vec![1.0; ctx.hand_count[0]];
+        let mut w1 = vec![1.0; ctx.hand_count[1]];
+        for i in (0..ctx.hand_count[0]).step_by(2) {
+            w0[i] = 0.5;
+        }
+        for i in (0..ctx.hand_count[1]).step_by(2) {
+            w1[i] = 0.5;
+        }
+        let out_skewed = solve_range_vs_range_postflop_with_hands(
+            &cfg, None, 5, 1.5, 0.0, 2.0, 0.0, 0, Some([w0, w1]),
+        )
+        .expect("skewed-weight solve must complete");
+        let mut max_diff: f64 = 0.0;
+        for (key, probs_ones) in &out_ones.average_strategy {
+            if let Some(probs_skewed) = out_skewed.average_strategy.get(key) {
+                for (a, b) in probs_ones.iter().zip(probs_skewed.iter()) {
+                    max_diff = max_diff.max((a - b).abs());
+                }
+            }
+        }
+        // Some cell must have moved. We don't claim a specific magnitude
+        // — Nash multiplicity is real and 5 iters is not enough to assert
+        // direction. The key invariant is the weights engage.
+        assert!(
+            max_diff > 0.0,
+            "non-uniform hand_weights must produce non-zero strategy drift \
+             (got max_diff = {max_diff})"
+        );
+    }
+
+    /// Length-mismatched `hand_weights` MUST panic — the assertion guards
+    /// against silent garbage when the caller mis-aligns weights with
+    /// the hand list.
+    #[test]
+    #[should_panic(expected = "p0_weights length")]
+    fn b10_phase_b_mismatched_weight_length_panics() {
+        let cfg = tiny_river_rvr();
+        // Pass a 1-element p0_weights against the full 1081-hand p0 list
+        // from `from_root`. Should panic via the assert_eq! in `solve`.
+        let _ = solve_range_vs_range_postflop_with_hands(
+            &cfg, None, 1, 1.5, 0.0, 2.0, 0.0, 0,
+            Some([vec![1.0; 1], vec![1.0; 1]]),
+        );
+    }
 }
