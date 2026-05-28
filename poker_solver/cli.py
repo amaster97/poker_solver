@@ -358,6 +358,32 @@ _GAMES = {
 
 def _cmd_solve(args: argparse.Namespace) -> int:
     game = _GAMES[args.game](args)
+    # v1.9.0 — SPOT CONFIG header for the HUNL postflop path. (kuhn / leduc
+    # have no chip-denominated bet menu, so the header is HUNL-only.) The
+    # header is suppressed when the user pipes solve into JSON consumers
+    # via stdout redirection — the current solve output is human-readable
+    # text only, so the header is always safe to include here.
+    if args.game == "hunl" and getattr(args, "hunl_mode", "") == "postflop":
+        from poker_solver.action_abstraction import ActionContext as _ActionCtx
+
+        cfg = game.config  # type: ignore[attr-defined]
+        bet_menu = cfg.bet_size_fractions or _ActionCtx.__dataclass_fields__[
+            "bet_size_fractions"
+        ].default
+        default_raise_cap = _ActionCtx.__dataclass_fields__[
+            "postflop_raise_cap"
+        ].default
+        street_label = {0: "PREFLOP", 1: "FLOP", 2: "TURN", 3: "RIVER"}.get(
+            int(cfg.starting_street), str(cfg.starting_street)
+        )
+        _print_spot_header(
+            starting_stack_chips=cfg.starting_stack,
+            initial_pot_chips=cfg.initial_pot,
+            board_cards=list(cfg.initial_board),
+            street_label=street_label,
+            bet_size_fractions=tuple(bet_menu),
+            raise_cap=default_raise_cap,
+        )
     # The HUNL postflop path bypasses solver.solve() so we can thread the
     # extra CLI flags (--max-memory-gb, --log-every, --target-exploitability)
     # through directly. The push/fold short-circuit doesn't fire for
