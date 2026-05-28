@@ -12,6 +12,7 @@ CSV. Re-running the same CSV after a crash is idempotent
 CSV format (per ``docs/pr11_prep/pr11_spec.md`` §5.1):
 
     name,starting_street,initial_board,stacks_bb,bet_sizes,abstraction_path,iterations
+    [,hero_range,villain_range]  # optional, used by --backend rust
 
 Columns:
   - ``name`` — user-facing label, stored as ``SpotMetadata.label``.
@@ -23,12 +24,17 @@ Columns:
   - ``abstraction_path`` — path to PR 4's ``.npz`` artifact, or empty
     for lossless (river-only).
   - ``iterations`` — integer.
+  - ``hero_range`` (optional, used by ``--backend rust``) — comma-separated
+    hand-class labels like ``"AA,KK,QQ,AKs,AKo"``. Defaults to a broad value
+    range when omitted.
+  - ``villain_range`` (optional, used by ``--backend rust``) — same format.
 
 See ``docs/pr11_prep/pr11_spec.md`` §5 for the canonical format.
 
 Usage:
 
     python scripts/batch_solve.py --input spots.csv \\
+        [--backend {python,rust}] \\
         [--workers N] \\
         [--max-memory-gb N] \\
         [--dry-run] \\
@@ -36,10 +42,22 @@ Usage:
 
 Equivalent via the CLI subcommand:
 
-    poker-solver batch-solve --input spots.csv [--dry-run] ...
+    poker-solver batch-solve --input spots.csv [--backend rust] [--dry-run] ...
+
+Backends:
+  - ``python`` (default; backward compatible): per-row dispatch through
+    ``poker_solver.hunl_solver.solve_hunl_postflop``. The Python DCFR
+    reference path. Slow but well-validated; used by Agent C's PR 11
+    overnight solve.
+  - ``rust`` (W2.4): per-row dispatch through
+    ``poker_solver.solve_range_vs_range_nash`` (PR 23 vector-form CFR,
+    PR 114 ``TerminalCache``). ~213× faster on river per ``range_aggregator``
+    docstring; recommended for interactive CSV runs hitting the 180s CLI
+    timeout. Requires ``hero_range`` / ``villain_range`` columns; if absent,
+    falls back to a broad default range (value-heavy + suited connectors).
 
 The ``--dry-run`` path parses the CSV, performs the library skip-check,
-and prints ``[DRY-RUN]`` markers without calling ``solve_hunl_postflop``.
+and prints ``[DRY-RUN]`` markers without calling the solver.
 """
 
 from __future__ import annotations
@@ -82,6 +100,27 @@ class BatchRow:
     bet_sizes: tuple[float, ...]
     abstraction_path: str  # may be ""
     iterations: int
+    # W2.4 (#59): optional range columns. Only consumed by `--backend rust`
+    # (the Python path uses fixed hole cards from HUNLConfig). Empty string
+    # = "use the default broad range" so existing CSVs remain valid.
+    hero_range: str = ""
+    villain_range: str = ""
+
+
+# W2.4 (#59): default ranges used by `--backend rust` when the CSV row
+# omits ``hero_range`` / ``villain_range``. A broad value+bluff combo so
+# the Nash result is non-trivial; callers wanting precise ranges should
+# fill the CSV columns explicitly.
+_DEFAULT_HERO_RANGE: tuple[str, ...] = (
+    "AA", "KK", "QQ", "JJ", "TT", "99", "88",
+    "AKs", "AQs", "AJs", "ATs", "KQs", "KJs", "QJs",
+    "AKo", "AQo",
+)
+_DEFAULT_VILLAIN_RANGE: tuple[str, ...] = (
+    "AA", "KK", "QQ", "JJ", "TT", "99", "88", "77",
+    "AKs", "AQs", "AJs", "KQs", "KJs", "QJs", "JTs",
+    "AKo", "AQo", "AJo", "KQo",
+)
 
 
 def _parse_board(raw: str) -> tuple:
@@ -169,6 +208,12 @@ def _parse_row(row: dict[str, str], lineno: int) -> BatchRow:
             f"CSV row {lineno}: iterations {row['iterations']!r} not an integer"
         ) from exc
 
+    # W2.4 (#59): optional range columns. Tolerate absence so legacy CSVs
+    # (the only schema before #59) keep parsing cleanly under
+    # ``--backend python``. The rust dispatch falls back to defaults.
+    hero_range = row.get("hero_range", "").strip()
+    villain_range = row.get("villain_range", "").strip()
+
     return BatchRow(
         name=name,
         starting_street=street,
@@ -177,6 +222,8 @@ def _parse_row(row: dict[str, str], lineno: int) -> BatchRow:
         bet_sizes=bet_sizes,
         abstraction_path=row["abstraction_path"].strip(),
         iterations=iterations,
+        hero_range=hero_range,
+        villain_range=villain_range,
     )
 
 
@@ -265,6 +312,87 @@ class SolveCounts:
     dry_run: int = 0
 
 
+# W2.4 (#59): valid backend names. Mirrors the ``solve`` subcommand's
+# ``--backend`` choices to keep CLI surface uniform.
+_VALID_BACKENDS: frozenset[str] = frozenset({"python", "rust"})
+
+
+def _resolve_ranges(row: BatchRow) -> tuple[list[str], list[str]]:
+    """Resolve hero/villain range labels for the rust backend.
+
+    Falls back to the module-level ``_DEFAULT_HERO_RANGE`` /
+    ``_DEFAULT_VILLAIN_RANGE`` when the CSV cells are empty. Parses the
+    cell as a comma-separated list of hand-class labels (e.g.
+    ``"AA,KK,AKs,AKo"``).
+    """
+    if row.hero_range:
+        hero = [p.strip() for p in row.hero_range.split(",") if p.strip()]
+    else:
+        hero = list(_DEFAULT_HERO_RANGE)
+    if row.villain_range:
+        villain = [p.strip() for p in row.villain_range.split(",") if p.strip()]
+    else:
+        villain = list(_DEFAULT_VILLAIN_RANGE)
+    if not hero:
+        raise ValueError(f"hero_range parsed empty for row {row.name!r}")
+    if not villain:
+        raise ValueError(f"villain_range parsed empty for row {row.name!r}")
+    return hero, villain
+
+
+def _nash_to_solve_result(nash_result: Any) -> Any:
+    """Adapt a ``RangeVsRangeNashResult`` to a ``SolveResult`` for library
+    persistence.
+
+    The library schema stores ``average_strategy`` (per-infoset → action
+    distribution); the Nash result's ``per_history_strategy`` is the same
+    shape (``{infoset_key: list[float]}``), so we map it 1:1. Other
+    fields (iterations, exploitability, backend tag) are preserved so the
+    library entry remains queryable by Sarah's downstream tools.
+
+    NOTE: The library SQL schema has ``exploitability REAL NOT NULL``
+    (``library_schema.sql:17``), and SQLite treats NaN as NULL on insert.
+    We populate ``exploitability_history`` with at least one finite value
+    (``nash_result.exploitability``, defaulting to ``0.0`` when the rust
+    solve was called with ``compute_exploitability_at_end=False``) so the
+    library round-trip succeeds.
+    """
+    from poker_solver.solver import SolveResult
+
+    # Always populate exploitability_history with a finite float so the
+    # library INSERT doesn't trip the NOT NULL constraint (sqlite: NaN→NULL).
+    expl_history = [float(nash_result.exploitability)]
+    return SolveResult(
+        average_strategy=dict(nash_result.per_history_strategy),
+        exploitability_history=expl_history,
+        game_value=0.0,  # not computed in the vector-form path
+        iterations=int(nash_result.iterations),
+        backend="rust_vector",
+    )
+
+
+def _solve_row_rust(row: BatchRow, spot: Any, max_memory_gb: float) -> Any:
+    """Dispatch a single row through ``solve_range_vs_range_nash``.
+
+    Returns a ``SolveResult`` shim adapted from the Nash result so the
+    library round-trip schema is unchanged. ``max_memory_gb`` is accepted
+    for signature parity with the Python path but currently unused — the
+    rust binding manages its own buffers per
+    ``range_aggregator.solve_range_vs_range_nash`` docstring.
+    """
+    from poker_solver.range_aggregator import solve_range_vs_range_nash
+
+    hero, villain = _resolve_ranges(row)
+    nash_result = solve_range_vs_range_nash(
+        spot.config,
+        hero_range=hero,
+        villain_range=villain,
+        iterations=row.iterations,
+        compute_exploitability_at_end=False,
+    )
+    return _nash_to_solve_result(nash_result)
+
+
 def run_batch(
     rows: list[BatchRow],
     *,
@@ -272,10 +400,22 @@ def run_batch(
     dry_run: bool,
     max_memory_gb: float,
     workers: int,
+    backend: str = "python",
     log_stream: Any = None,
 ) -> SolveCounts:
-    """Execute the batch-solve loop. Returns final counts."""
+    """Execute the batch-solve loop. Returns final counts.
+
+    Args:
+        backend: ``"python"`` (PR 5 default, ``solve_hunl_postflop``) or
+            ``"rust"`` (W2.4, ``solve_range_vs_range_nash`` — ~213× faster
+            on river per PR 114).
+    """
     from poker_solver.library import Library
+
+    if backend not in _VALID_BACKENDS:
+        raise ValueError(
+            f"backend {backend!r} not in {sorted(_VALID_BACKENDS)!r}"
+        )
 
     out = log_stream if log_stream is not None else sys.stdout
     counts = SolveCounts()
@@ -301,34 +441,41 @@ def run_batch(
 
             if dry_run:
                 print(
-                    f"[DRY-RUN] {row.name} {spot_id} (would solve)",
+                    f"[DRY-RUN] {row.name} {spot_id} (would solve, backend={backend})",
                     file=out,
                     flush=True,
                 )
                 counts.dry_run += 1
                 continue
 
-            # Real solve path: call PR 5's solve_hunl_postflop.
+            # Real solve path. ``backend`` switches between the Python
+            # DCFR reference (``solve_hunl_postflop``) and the Rust
+            # vector-form Nash (``solve_range_vs_range_nash``, ~213×
+            # faster on river per PR 114). The library round-trip
+            # schema is identical for both: ``average_strategy`` ←
+            # ``per_history_strategy`` for the rust adapter.
             try:
-                from poker_solver.hunl_solver import solve_hunl_postflop
-
                 start = time.time()
-                # Memory budget per worker; workers > 1 wired but
-                # parallelism is via multiprocessing (not exercised by
-                # the dry-run test). We pass the per-worker budget here
-                # so single-process runs remain in the budget.
-                budget_per_worker = (
-                    max_memory_gb / workers if workers > 0 else max_memory_gb
-                )
-                result = solve_hunl_postflop(
-                    spot.config,
-                    iterations=row.iterations,
-                    memory_budget_gb=budget_per_worker,
-                )
+                if backend == "rust":
+                    result = _solve_row_rust(row, spot, max_memory_gb)
+                else:
+                    from poker_solver.hunl_solver import solve_hunl_postflop
+
+                    # Memory budget per worker; workers > 1 wired but
+                    # parallelism is via multiprocessing (not exercised
+                    # by the dry-run test).
+                    budget_per_worker = (
+                        max_memory_gb / workers if workers > 0 else max_memory_gb
+                    )
+                    result = solve_hunl_postflop(
+                        spot.config,
+                        iterations=row.iterations,
+                        memory_budget_gb=budget_per_worker,
+                    )
                 lib.put(spot, result)
                 elapsed = time.time() - start
                 print(
-                    f"[OK] {row.name} {spot_id} {elapsed:.2f}s",
+                    f"[OK] {row.name} {spot_id} {elapsed:.2f}s backend={backend}",
                     file=out,
                     flush=True,
                 )
@@ -369,15 +516,28 @@ def run(
     max_memory_gb: float = 14.0,
     dry_run: bool = False,
     library_path: Path | None = None,
+    backend: str = "python",
 ) -> int:
     """Parse a CSV at ``input_csv`` and execute the batch solve loop.
 
     Called by ``poker_solver.cli._cmd_batch_solve`` as the public
     dispatcher entry. Returns the same int exit code as ``main`` so the
     caller can ``return run(...)`` directly.
+
+    Args:
+        backend: ``"python"`` (default, backward compat) or ``"rust"``
+            (W2.4 — routes per-row through ``solve_range_vs_range_nash``
+            for ~213× speedup on river).
     """
     if workers < 1:
         print("--workers must be >= 1", file=sys.stderr)
+        return 2
+    if backend not in _VALID_BACKENDS:
+        print(
+            f"batch_solve: --backend {backend!r} not in "
+            f"{sorted(_VALID_BACKENDS)!r}",
+            file=sys.stderr,
+        )
         return 2
     try:
         rows = read_csv(input_csv)
@@ -393,6 +553,7 @@ def run(
         dry_run=dry_run,
         max_memory_gb=max_memory_gb,
         workers=workers,
+        backend=backend,
     )
     return 1 if counts.error > 0 else 0
 
@@ -440,6 +601,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="override the library DB location (defaults to "
         "$POKER_SOLVER_LIBRARY_PATH or ~/.poker_solver/library.db).",
     )
+    parser.add_argument(
+        "--backend",
+        choices=sorted(_VALID_BACKENDS),
+        default="python",
+        help="Solver backend: 'python' (default, DCFR reference) or "
+        "'rust' (W2.4, solve_range_vs_range_nash, ~213x faster on river). "
+        "When 'rust', the optional hero_range/villain_range CSV columns "
+        "select ranges; defaults apply if absent.",
+    )
     return parser
 
 
@@ -460,6 +630,7 @@ def main(argv: list[str] | None = None) -> int:
         max_memory_gb=args.max_memory_gb,
         dry_run=args.dry_run,
         library_path=library_path,
+        backend=args.backend,
     )
 
 
