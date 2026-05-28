@@ -42,6 +42,7 @@ from ui.state import (
     save_state,
 )
 from ui.views import (
+    chained_tab,
     onboarding,
     preflop_chart,
     range_matrix,
@@ -106,32 +107,52 @@ def build_page() -> None:
         _build_theme_toggle(state)
         ui.button(icon="menu").props("flat").mark("hamburger-menu")
 
-    # ----- Tabs: Solver | Preflop Chart (task #55) -----
+    # ----- Tabs: Solver | Preflop Chart (task #55) | Chain solve (task #57) -----
     # The original two-pane layout lives inside the "Solver" tab so every
     # PR 10a/10b smoke test that looks up ``range-matrix-display`` etc.
     # still finds those markers on first page open (tab is open by
     # default). The "Preflop Chart" tab adds the 13x13 widget driven by
-    # ``_rust.solve_hunl_preflop_rvr`` (PR #122).
+    # ``_rust.solve_hunl_preflop_rvr`` (PR #122). The "Chain solve" tab
+    # wraps the chained orchestrator GUI (``ui/views/chained_tab.py``,
+    # PR #148 / task #57).
+    #
+    # The Solver tab carries BOTH ``tab-solver`` (preflop-chart smoke)
+    # and ``tab-solve`` (chained-tab smoke) markers so the two tests can
+    # coexist after the dual merge.
     with ui.tabs().classes("w-full").mark("app-tabs") as tabs:
-        solver_tab = ui.tab("Solver", icon="grid_view").mark("tab-solver")
+        solver_tab = ui.tab("Solver", icon="grid_view").mark(
+            "tab-solver tab-solve"
+        )
         preflop_chart_tab = ui.tab(
             "Preflop Chart", icon="leaderboard"
         ).mark("tab-preflop-chart")
+        chained_tab_marker = ui.tab(
+            "Chain solve", icon="link"
+        ).mark("tab-chained")
     with ui.tab_panels(tabs, value=solver_tab).classes("w-full").mark(
         "app-tab-panels"
     ):
-        with ui.tab_panel(solver_tab).mark("tab-panel-solver"):
+        with ui.tab_panel(solver_tab).mark("tab-panel-solver tab-panel-solve"):
             _render_solver_tab(state)
         with ui.tab_panel(preflop_chart_tab).mark("tab-panel-preflop-chart"):
             preflop_chart.render(
                 state,
                 on_solve=lambda: _on_preflop_chart_solve(state),
             )
+        with ui.tab_panel(chained_tab_marker).mark("tab-panel-chained"):
+            chained_tab.render(
+                state,
+                on_solve=lambda: _on_chained_solve(state),
+            )
 
     # ----- The 500 ms poller (mental model 7: don't block the loop) -----
     # Track the last preflop_chart_result identity so we only refresh the
     # chart subtree when the worker actually publishes a new result.
     last_preflop_chart_id: list[int | None] = [None]
+    # Track chained-solve completion so we only refresh the chained tab
+    # when the result actually lands (one-shot per solve — refresh on
+    # every tick would thrash the DOM grid).
+    chained_state: dict[str, int | None] = {"last_id": None}
 
     def _tick() -> None:
         """Pump worker progress into the UI + flush debounced state."""
@@ -156,6 +177,17 @@ def build_page() -> None:
                     refresher()
         except Exception:  # noqa: BLE001
             logger.exception("preflop chart refresh on tick raised")
+        # Task #57: re-render the chained tab when a chained result lands.
+        try:
+            chained_result = getattr(state.runner, "chained_result", None)
+            current_id_c = id(chained_result) if chained_result is not None else None
+            if current_id_c != chained_state["last_id"]:
+                chained_state["last_id"] = current_id_c
+                refresh = getattr(state.runner, "_chained_refresh", None)
+                if callable(refresh):
+                    refresh()
+        except Exception:  # noqa: BLE001
+            logger.exception("chained tab refresh tick raised")
         # Debounced state.json flush.
         try:
             _maybe_flush_state()
@@ -173,7 +205,8 @@ def _render_solver_tab(state: AppState) -> None:
     """Render the original two-pane Solver layout (PR 10a Q1 LOCKED).
 
     Pulled out into a helper so the page builder can compose it inside
-    a tab panel alongside the new "Preflop Chart" tab (task #55).
+    a tab panel alongside the new "Preflop Chart" tab (task #55) and
+    "Chain solve" tab (task #57).
     """
     from nicegui import ui
 
@@ -202,7 +235,8 @@ def _render_solver_tab(state: AppState) -> None:
             ):
                 spot_input.render(state)
 
-            # Run panel — collapsed by default (per Q1: spot input open, others closed).
+            # Run panel — collapsed by default (per Q1: spot input
+            # open, others closed).
             with (
                 ui.expansion(
                     "Run Panel",
@@ -219,9 +253,9 @@ def _render_solver_tab(state: AppState) -> None:
                     on_stop=lambda: _on_stop(state),
                 )
 
-            # Tree browser slot — collapsed by default; same render call is
-            # already fired in the matrix region's center pane (this is just
-            # the sidebar expansion stub label).
+            # Tree browser slot — collapsed by default; same render
+            # call is already fired in the matrix region's center
+            # pane (this is just the sidebar expansion stub label).
             with (
                 ui.expansion(
                     "Decision Tree",
@@ -232,7 +266,8 @@ def _render_solver_tab(state: AppState) -> None:
                 .mark("sidebar-tree-expansion")
             ):
                 ui.label(
-                    "Decision tree renders inline below the matrix (Q5 layout)."
+                    "Decision tree renders inline below the matrix "
+                    "(Q5 layout)."
                 ).classes("text-gray-500 italic")
 
 
@@ -543,6 +578,92 @@ def _on_solve(state: AppState) -> None:
     # so subsequent solves don't silently bypass the push/fold chart.
     # The notify-remediation button re-arms it per click.
     state.runner._pending_force_tree_solve = False
+
+
+def _on_chained_solve(state: AppState) -> None:
+    """Solve button click handler for the "Chain solve" tab (task #57).
+
+    Routes through :func:`poker_solver.chained.solve_chained` via the
+    ``solver_mode="chained"`` branch on ``SolveRunner.start``. The
+    chained orchestrator requires a preflop config (empty board) and
+    hero / villain ranges; we lift those from ``state.current_spot``
+    using the same accessor (``to_rvr_call_args``) the RvR path uses,
+    swapping out the engine config for a preflop-shaped one.
+
+    Iteration count comes from
+    ``state.runner._pending_chained_iterations`` (set by the chained
+    tab's solve button); falls back to 500 if unset.
+    """
+    from dataclasses import replace as _dataclass_replace
+
+    from nicegui import ui
+
+    from poker_solver.hunl import Street
+
+    spot = state.current_spot
+    try:
+        config = spot.to_hunl_config()
+    except ValueError as exc:
+        ui.notify(
+            f"Invalid chained spot configuration: {exc}",
+            type="negative",
+            position="top",
+        )
+        return
+
+    # The chained orchestrator only accepts preflop configs with
+    # ``initial_hole_cards == ()``. ``Spot.to_hunl_config()`` picks
+    # point-pair hole cards from the ranges — strip those out and pin
+    # the street to preflop.
+    config = _dataclass_replace(
+        config,
+        starting_street=Street.PREFLOP,
+        initial_board=(),
+        initial_hole_cards=(),
+        initial_pot=0,
+        initial_contributions=(0, 0),
+    )
+
+    hero_range = spot._range_hand_classes(spot.ranges[spot.hero_player])
+    villain_range = spot._range_hand_classes(spot.ranges[1 - spot.hero_player])
+    if not hero_range or not villain_range:
+        ui.notify(
+            "Chained solve needs at least one hand class per side.",
+            type="warning",
+            position="top",
+        )
+        return
+
+    iterations = int(
+        getattr(state.runner, "_pending_chained_iterations", 500) or 500
+    )
+    log_every = state.current_solve.log_every if state.current_solve else 50
+
+    from poker_solver.hunl import HUNLPoker
+
+    game = HUNLPoker(config=config)
+    try:
+        state.runner.start(
+            game,
+            iterations=iterations,
+            log_every=log_every,
+            solver_mode="chained",
+            rvr_hero_range=hero_range,
+            rvr_villain_range=villain_range,
+            rvr_hero_player=spot.hero_player,
+        )
+    except RuntimeError as exc:
+        ui.notify(f"Solve already running: {exc}", type="warning", position="top")
+        return
+
+    state.current_solve = SolveSession(
+        spot=spot,
+        iterations=iterations,
+        log_every=log_every,
+        backend="python",
+        started_at=state.runner.started_at,
+        runner=state.runner,
+    )
 
 
 def _on_pause(state: AppState) -> None:
