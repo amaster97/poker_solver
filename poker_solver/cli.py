@@ -799,8 +799,12 @@ def _cmd_river(args: argparse.Namespace) -> int:
 
         poker-solver river --board "As 7c 2d Kh 5s" --hero AhKh \\
             --villain-range "QQ,JJ,AKs" --iters 200
+
+    v1.8.2 — new presentation modes via ``--walk-tree`` / ``--node`` /
+    ``--format``. With NO new flags, the legacy first-decision aggregate
+    output is preserved byte-for-byte (backward-compat invariant).
     """
-    from poker_solver.hunl import HUNLConfig, Street
+    from poker_solver.hunl import HUNLConfig, HUNLPoker, Street
     from poker_solver.hunl_solver import solve_hunl_postflop
 
     board_cards = parse_board(args.board)
@@ -845,18 +849,40 @@ def _cmd_river(args: argparse.Namespace) -> int:
     half = initial_pot // 2
     starting_stack = stack_bb * big_blind
 
-    print(f"Board:        {' '.join(str(c) for c in board_cards)}")
-    print(f"Hero:         {' '.join(str(c) for c in hero_pair)}")
-    print(
-        f"Villain range: {args.villain_range} "
-        f"({len(villain_combos)} combos after card removal)"
-    )
-    print(f"Iterations:   {args.iters}")
-    print()
+    # v1.8.2 — extract new presentation knobs (all default to off, preserving
+    # the legacy code path byte-for-byte). The variables persist across the
+    # solve loop so we can route into walk-tree / drill-down formatters
+    # after all per-combo solves complete.
+    walk_tree_flag: bool = bool(getattr(args, "walk_tree", False))
+    full_tree: bool = bool(getattr(args, "full_tree", False))
+    node_history: str | None = getattr(args, "node", None)
+    fmt: str = getattr(args, "format", "text") or "text"
+    full_classes: bool = bool(getattr(args, "full_classes", False))
+    top_n: int = int(getattr(args, "top_n", 12) or 12)
+    new_mode = walk_tree_flag or node_history is not None or fmt != "text"
+
+    # When in text mode (default formatter), emit the legacy preamble. JSON /
+    # CSV modes suppress preamble so the output is parser-friendly.
+    if fmt == "text":
+        print(f"Board:        {' '.join(str(c) for c in board_cards)}")
+        print(f"Hero:         {' '.join(str(c) for c in hero_pair)}")
+        print(
+            f"Villain range: {args.villain_range} "
+            f"({len(villain_combos)} combos after card removal)"
+        )
+        print(f"Iterations:   {args.iters}")
+        print()
 
     aggregate: dict[str, float] = {}
     total_weight = 0.0
     ev_sum = 0.0
+    # v1.8.2: when new modes are active we retain the full per-combo solve
+    # result so walk_tree / drill-down can re-walk the engine tree. Held in
+    # insertion order; combos are keyed by their canonical 4-char hole
+    # label (matches the infoset_key hole prefix).
+    per_combo_results: dict[str, object] = {}
+    per_combo_cfgs: dict[str, HUNLConfig] = {}
+
     for villain_pair in villain_combos:
         cfg = HUNLConfig(
             starting_stack=starting_stack,
@@ -889,17 +915,281 @@ def _cmd_river(args: argparse.Namespace) -> int:
                 aggregate[f"action_{i}"] += p
         total_weight += 1.0
         ev_sum += result.game_value
+        if new_mode:
+            # Canonicalize the combo to its sorted-string form so it matches
+            # the infoset_key hole prefix.
+            combo_label = _sorted_combo_label(villain_pair)
+            per_combo_results[combo_label] = result
+            per_combo_cfgs[combo_label] = cfg
 
     if total_weight == 0:
         raise ValueError("no hero infosets aggregated (unexpected)")
     for k in aggregate:
         aggregate[k] /= total_weight
 
+    # ---- v1.8.2 new-mode dispatch (walk-tree / node drill-down / format) ----
+    if new_mode:
+        return _render_new_mode(
+            per_combo_results=per_combo_results,
+            per_combo_cfgs=per_combo_cfgs,
+            hero_pair=hero_pair,
+            board_cards=board_cards,
+            walk_tree_flag=walk_tree_flag,
+            full_tree=full_tree,
+            node_history=node_history,
+            fmt=fmt,
+            full_classes=full_classes,
+            top_n=top_n,
+            villain_range_spec=args.villain_range,
+            iters=args.iters,
+            mean_ev=ev_sum / total_weight,
+            HUNLPoker_cls=HUNLPoker,
+        )
+
+    # Legacy default-mode output (preserved byte-for-byte from PR 39).
     print("Hero first-decision aggregate (average over villain combos):")
     for k in sorted(aggregate):
         print(f"  {k:<10}  {aggregate[k]:.6f}")
     print(f"\nMean game value (BB, P0 perspective): {ev_sum / total_weight:+.6f}")
     return 0
+
+
+def _sorted_combo_label(combo: tuple) -> str:
+    """Sort a (Card, Card) tuple by (rank, suit) ascending and stringify.
+
+    Matches the sort used by ``_sorted_card_string`` inside the HUNL
+    infoset_key — i.e. ``"QcQh"`` (Qc < Qh by suit ordering, where the
+    engine sorts ascending). The infoset_key prefix for the player-1 hole
+    is exactly this string.
+    """
+    c1, c2 = combo
+    if (c1.rank, c1.suit) > (c2.rank, c2.suit):
+        c1, c2 = c2, c1
+    return f"{c1}{c2}"
+
+
+def _render_new_mode(
+    *,
+    per_combo_results: dict[str, object],
+    per_combo_cfgs: dict,
+    hero_pair: tuple,
+    board_cards: list,
+    walk_tree_flag: bool,
+    full_tree: bool,
+    node_history: str | None,
+    fmt: str,
+    full_classes: bool,
+    top_n: int,
+    villain_range_spec: str,
+    iters: int,
+    mean_ev: float,
+    HUNLPoker_cls: type,
+) -> int:
+    """Dispatch into the v1.8.2 walk-tree / drill-down / format paths.
+
+    Pulled out of ``_cmd_river`` to keep the legacy code path readable. All
+    state passed in explicitly so this stays a pure presentation function.
+    """
+    from poker_solver.cli_tree_walk import (
+        aggregate_class_strategies,
+        compute_mdf_threshold,
+        format_per_class_text,
+        format_text,
+        walk_tree,
+    )
+
+    # Walk every per-combo result; cache (combo_label -> nodes).
+    per_combo_nodes: dict[str, list] = {}
+    for combo_label, result in per_combo_results.items():
+        cfg = per_combo_cfgs[combo_label]
+        game = HUNLPoker_cls(cfg)
+        nodes = walk_tree(
+            game,
+            result.average_strategy,  # type: ignore[attr-defined]
+            include_off_path=full_tree,
+        )
+        per_combo_nodes[combo_label] = nodes
+
+    if fmt == "json":
+        # Full dict dump — every combo, every node.
+        out_payload: dict = {
+            "board": " ".join(str(c) for c in board_cards),
+            "hero": "".join(str(c) for c in hero_pair),
+            "villain_range": villain_range_spec,
+            "iterations": iters,
+            "mean_game_value_bb": mean_ev,
+            "combos": {},
+        }
+        for combo_label, nodes in per_combo_nodes.items():
+            out_payload["combos"][combo_label] = _nodes_to_json(nodes)
+        print(_json.dumps(out_payload, indent=2, sort_keys=True))
+        return 0
+
+    if fmt == "csv":
+        # One CSV body covering all combos. Reuse the per-combo formatter
+        # with the combo label as the hand_class column.
+        import csv as _csv_mod
+        import io as _io_mod
+
+        buf = _io_mod.StringIO()
+        writer = _csv_mod.writer(buf)
+        writer.writerow(
+            ["combo", "node_history", "action_label", "probability", "reach_prob"]
+        )
+        for combo_label, nodes in per_combo_nodes.items():
+            for node in nodes:
+                for _, label, prob in node.actions:
+                    writer.writerow(
+                        [
+                            combo_label,
+                            node.history or "(root)",
+                            label,
+                            f"{prob:.6f}",
+                            f"{node.reach_prob:.6f}",
+                        ]
+                    )
+        print(buf.getvalue(), end="")
+        return 0
+
+    # Text mode — walk-tree and/or node drill-down.
+    if node_history is not None:
+        # Drill-down: aggregate per-class strategy at the requested history.
+        classes = aggregate_class_strategies(per_combo_nodes, node_history)
+        if not classes:
+            print(
+                f"No nodes match history {node_history!r} for any villain combo. "
+                "Try a shorter / different history (e.g. 'xb750', 'b330')."
+            )
+            return 0
+        # Determine the MDF threshold from the first matching combo (all
+        # combos share state at the same history, so action_ctx.to_call and
+        # pot are identical).
+        mdf: float | None = None
+        for nodes in per_combo_nodes.values():
+            for n in nodes:
+                if n.history == node_history:
+                    # Re-derive ActionContext via a fresh game walk.
+                    cfg = next(iter(per_combo_cfgs.values()))
+                    game = HUNLPoker_cls(cfg)
+                    ctx = _action_ctx_at_history(game, node_history)
+                    if ctx is not None:
+                        mdf = compute_mdf_threshold(ctx)
+                    break
+            if mdf is not None:
+                break
+        out = format_per_class_text(
+            classes,
+            node_history,
+            top_n=None if full_classes else top_n,
+            mdf_threshold=mdf,
+        )
+        print(out)
+        return 0
+
+    # Plain --walk-tree (no --node): print each combo's tree.
+    if walk_tree_flag:
+        for combo_label, nodes in per_combo_nodes.items():
+            title = (
+                f"Villain combo {combo_label} — {len(nodes)} on-path nodes"
+                + (" (incl. off-path phantoms)" if full_tree else "")
+            )
+            print(format_text(nodes, title=title, include_off_path=full_tree))
+        print(f"Mean game value (BB, P0 perspective): {mean_ev:+.6f}")
+        return 0
+
+    # Should not reach here — new_mode triggered something but no branch matched.
+    print("(no presentation mode selected)")
+    return 0
+
+
+def _nodes_to_json(nodes: list) -> list[dict]:
+    """Serialize a list of TreeNodes to JSON-ready dicts."""
+    out: list[dict] = []
+    for node in nodes:
+        out.append(
+            {
+                "history": node.history,
+                "player": node.player,
+                "hole_label": node.hole_label,
+                "infoset_key": node.infoset_key,
+                "reach_prob": node.reach_prob,
+                "off_path": node.off_path,
+                "actions": [
+                    {"action_id": aid, "label": label, "prob": prob}
+                    for aid, label, prob in node.actions
+                ],
+            }
+        )
+    return out
+
+
+def _action_ctx_at_history(game, history: str):
+    """Re-walk the engine to the state at ``history`` and return its ActionContext.
+
+    Returns ``None`` if the history is unreachable (e.g. token sequence
+    inconsistent with the engine's state machine).
+    """
+    from poker_solver.cli_tree_walk import _split_history_tokens, parse_token
+
+    state = game.initial_state()
+    # Advance past chance root.
+    while game.current_player(state) == -1 and not game.is_terminal(state):
+        outcomes = game.chance_outcomes(state)
+        if not outcomes:
+            return None
+        state = game.apply(state, outcomes[0][0])
+    for tok in _split_history_tokens(history):
+        kind, amt = parse_token(tok)
+        legal = game.legal_actions(state)
+        ctx = game._action_context(state)  # type: ignore[attr-defined]
+        match = _action_id_for_token(kind, amt, legal, ctx)
+        if match is None:
+            return None
+        state = game.apply(state, match)
+        if game.is_terminal(state):
+            return None
+    if game.current_player(state) == -1:
+        return None
+    return game._action_context(state)  # type: ignore[attr-defined]
+
+
+def _action_id_for_token(kind: str, amt, legal: list, ctx) -> int | None:
+    """Map a single (kind, amount) history token to a legal action ID.
+
+    Walks the legal-action list at the current state and selects the one
+    whose computed chip amount matches. Returns ``None`` when no match
+    (caller should treat this as "history unreachable in current config").
+    """
+    from poker_solver.action_abstraction import (
+        ACTION_ALL_IN,
+        ACTION_CALL,
+        ACTION_CHECK,
+        ACTION_FOLD,
+        compute_bet_amount,
+        compute_raise_to,
+    )
+
+    if kind == "f":
+        return ACTION_FOLD if ACTION_FOLD in legal else None
+    if kind == "x":
+        return ACTION_CHECK if ACTION_CHECK in legal else None
+    if kind == "c":
+        return ACTION_CALL if ACTION_CALL in legal else None
+    if kind == "A":
+        return ACTION_ALL_IN if ACTION_ALL_IN in legal else None
+    if kind == "b":
+        for aid in legal:
+            # ACTION_BET_33..BET_200 are ids 3..7.
+            if 3 <= aid <= 7 and compute_bet_amount(aid, ctx) == amt:
+                return aid
+        return None
+    if kind == "r":
+        for aid in legal:
+            # ACTION_RAISE_33..RAISE_200 are ids 8..12.
+            if 8 <= aid <= 12 and compute_raise_to(aid, ctx) == amt:
+                return aid
+        return None
+    return None
 
 
 def _hole_matches(hole_str: str, hero_pair: tuple) -> bool:
@@ -1432,6 +1722,65 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=100,
         help="Per-player effective stack in BB (default: 100).",
+    )
+    # v1.8.2 — tree-walk presentation modes. Defaults preserve the legacy
+    # first-decision aggregate output byte-for-byte (no new flags = no
+    # behavior change).
+    rv.add_argument(
+        "--walk-tree",
+        action="store_true",
+        help=(
+            "Walk the full decision tree and print every on-path node "
+            "(reach prob > 1e-4) with action-label decoding and ASCII bar "
+            "charts. Default: off (legacy first-decision aggregate)."
+        ),
+    )
+    rv.add_argument(
+        "--full-tree",
+        action="store_true",
+        help=(
+            "When combined with --walk-tree, also emit off-path phantom "
+            "nodes (reach prob <= 1e-4) marked [OFF-PATH]. Default: off."
+        ),
+    )
+    rv.add_argument(
+        "--node",
+        type=str,
+        default=None,
+        help=(
+            "Drill into a specific decision node by its history string "
+            "(e.g. 'xb750' = villain checks, hero bets 750). For range "
+            "queries, prints per-hand-class strategy at that node."
+        ),
+    )
+    rv.add_argument(
+        "--top-n",
+        type=int,
+        default=12,
+        help=(
+            "When --node selects a per-class drill-down, show only the "
+            "top-N hand classes by Shannon entropy (mixing hands ranked "
+            "first). Default: 12."
+        ),
+    )
+    rv.add_argument(
+        "--full-classes",
+        action="store_true",
+        help=(
+            "With --node, show ALL hand classes (no top-N truncation). "
+            "Default: off."
+        ),
+    )
+    rv.add_argument(
+        "--format",
+        choices=("text", "json", "csv"),
+        default="text",
+        help=(
+            "Output format. 'text' (default) prints the pretty tree; "
+            "'json' dumps the full strategy dict per combo/node/action; "
+            "'csv' emits (combo, node_history, action_label, probability, "
+            "reach_prob) rows with a header."
+        ),
     )
     rv.set_defaults(func=_cmd_river)
 
