@@ -141,10 +141,7 @@ macro_rules! prof_start {
 macro_rules! prof_end {
     ($t:expr, $field:ident) => {
         if let Some(t) = $t {
-            $crate::preflop_rvr::profile::add(
-                $crate::preflop_rvr::profile::PhaseField::$field,
-                t,
-            );
+            $crate::preflop_rvr::profile::add($crate::preflop_rvr::profile::PhaseField::$field, t);
         }
     };
 }
@@ -226,9 +223,54 @@ struct PreflopRvrState {
 }
 
 impl PreflopRvrState {
+    /// Build the initial preflop state.
+    ///
+    /// # Invariant honored: `config.initial_contributions`
+    ///
+    /// The downstream leaf-payoff math (`build_equity_leaf_payoff` and the
+    /// `Fold` leaf builder in `PreflopTerminalCache::build`) computes
+    /// `cs[i] = contributions[i] - config.initial_contributions[i]` — the
+    /// chips player `i` has voluntarily committed since the subgame root.
+    /// `cs[i]` is the per-player "risk" subtracted from each leaf payoff;
+    /// `pot_total = config.initial_pot + cs0 + cs1` is the size of the
+    /// pot fought over at the leaf.
+    ///
+    /// Two well-formed preflop configurations must produce identical
+    /// strategies (the engine is agnostic to which way blinds are
+    /// declared):
+    ///
+    /// 1. `initial_contributions = [0, 0]`, `initial_pot = 0` — engine
+    ///    posts the blinds internally; `cs = [SB+ante, BB+ante]`,
+    ///    `pot_total = SB+BB+2*ante`.
+    /// 2. `initial_contributions = [SB+ante, BB+ante]`,
+    ///    `initial_pot = SB+BB+2*ante` — caller declared blinds as
+    ///    already-in-pot dead money; `cs = [0, 0]`, `pot_total =
+    ///    SB+BB+2*ante`.
+    ///
+    /// Both configurations yield the same `pot_total` per leaf; the per-leaf
+    /// payoffs differ only by a constant per-player shift (`SB+ante` for P0,
+    /// `BB+ante` for P1), which leaves Nash strategies invariant.
+    ///
+    /// **Bug pre-fix (PR #67 / issue #159):** `contributions` was
+    /// unconditionally set to `[SB+ante, BB+ante]` regardless of
+    /// `config.initial_contributions`. With config (2) above, the leaf
+    /// math then computed `cs = [0, 0]` and `pot_total = 0` (because
+    /// caller's `initial_pot` defaulted to 0), collapsing every fold/equity
+    /// payoff to ~0 and yielding a degenerate fold-everything Nash.
     fn initial(config: &HUNLConfig) -> Self {
-        let sb_contrib = config.small_blind + config.ante;
-        let bb_contrib = config.big_blind + config.ante;
+        let blind_sb = config.small_blind + config.ante;
+        let blind_bb = config.big_blind + config.ante;
+        let init_c0 = config.initial_contributions[0];
+        let init_c1 = config.initial_contributions[1];
+        // Honor caller's `initial_contributions`: contribution at root is the
+        // larger of (a) the blind that this player must post and (b) any
+        // dead money the caller declared (e.g. blinds already-in-pot).
+        // - `[0,0]` config: max(blind, 0) = blind  → engine posts blinds.
+        // - `[SB+ante,BB+ante]` config: max(blind, blind) = blind → no
+        //   double-post; the leaf's `cs = contributions - initial_contributions
+        //   = 0` and `pot_total = initial_pot` (caller-declared).
+        let sb_contrib = blind_sb.max(init_c0);
+        let bb_contrib = blind_bb.max(init_c1);
         let stacks = [
             config.starting_stack - sb_contrib,
             config.starting_stack - bb_contrib,
@@ -407,8 +449,7 @@ fn apply_action(state: &PreflopRvrState, action: PreflopAction) -> PreflopRvrSta
             next.stacks[player] = 0;
             next.all_in[player] = true;
             next.to_call = (next.contributions[player] - state.contributions[opp]).max(0);
-            next.last_bet_size =
-                (next.contributions[player] - state.contributions[opp]).max(1);
+            next.last_bet_size = (next.contributions[player] - state.contributions[opp]).max(1);
             next.street_aggressor = player as i8;
             next.street_num_raises += 1;
             // If opponent already all-in, no further action.
@@ -474,7 +515,12 @@ impl PreflopBettingTree {
     ) -> Self {
         let mut tree = PreflopBettingTree { nodes: Vec::new() };
         let root = PreflopRvrState::initial(config);
-        tree.add(&root, config, preflop_open_sizes_bb, preflop_reraise_multipliers);
+        tree.add(
+            &root,
+            config,
+            preflop_open_sizes_bb,
+            preflop_reraise_multipliers,
+        );
         tree
     }
 
@@ -748,11 +794,7 @@ fn build_blocker_mask(ctx: &EvalContext) -> [Vec<f64>; 2] {
 }
 
 impl PreflopTerminalCache {
-    pub fn build(
-        tree: &PreflopBettingTree,
-        ctx: &EvalContext,
-        equity_table: &Array3<f64>,
-    ) -> Self {
+    pub fn build(tree: &PreflopBettingTree, ctx: &EvalContext, equity_table: &Array3<f64>) -> Self {
         let mut leaves: Vec<PreflopLeafEntry> = Vec::with_capacity(tree.nodes.len());
         for node in &tree.nodes {
             match node {
@@ -849,7 +891,9 @@ impl PreflopVectorDCFR {
         let mut infosets: Vec<Option<VectorInfosetData>> = Vec::with_capacity(tree.nodes.len());
         for node in &tree.nodes {
             match node {
-                PreflopFlatNode::Decision { player, actions, .. } => {
+                PreflopFlatNode::Decision {
+                    player, actions, ..
+                } => {
                     let hand_count = hand_count_per_player[*player as usize];
                     infosets.push(Some(VectorInfosetData::new(actions.len(), hand_count)));
                 }
@@ -1241,7 +1285,9 @@ fn terminal_value_vector_baseline(
                 out[hp] = total;
             }
         }
-        PreflopLeafEntryBaseline::Equity { payoff_table_hp_major } => {
+        PreflopLeafEntryBaseline::Equity {
+            payoff_table_hp_major,
+        } => {
             // pre-PR layout: payoff_table[update_player][hp * opp_hands + ho]
             let table = &payoff_table_hp_major[update_player];
             for hp in 0..update_hands {
@@ -1272,8 +1318,12 @@ fn terminal_value_vector_baseline(
 /// outputs lane-for-lane.
 #[cfg(test)]
 enum PreflopLeafEntryBaseline {
-    Fold { payoff: [f64; 2] },
-    Equity { payoff_table_hp_major: [Vec<f64>; 2] },
+    Fold {
+        payoff: [f64; 2],
+    },
+    Equity {
+        payoff_table_hp_major: [Vec<f64>; 2],
+    },
 }
 
 /// Phase B (#53) — build the pre-PR (hp-major) equity table from the same
@@ -1425,6 +1475,15 @@ pub fn solve_hunl_preflop_rvr_with_hands(
     beta: f64,
     gamma: f64,
 ) -> Result<PreflopRvrOutput, String> {
+    // PR #67 (issue #159): defense-in-depth validation. The Python tier's
+    // `HUNLConfig.__post_init__` blocks the malformed-`initial_contributions`
+    // trigger combination, but PyO3 callers deserialize straight into
+    // `HUNLConfig` and skip the Python `__post_init__`. Without this guard,
+    // `[SB,BB]+pot=0` produces a fold-everywhere Nash silently. See
+    // `HUNLConfig::validate` for the exact rules.
+    config
+        .validate()
+        .map_err(|e| format!("solve_hunl_preflop_rvr: {e}"))?;
     if config.starting_street != Street::Preflop {
         return Err(format!(
             "solve_hunl_preflop_rvr requires starting_street = Preflop (got {:?})",
@@ -1438,19 +1497,13 @@ pub fn solve_hunl_preflop_rvr_with_hands(
                 .into(),
         );
     }
-    if config.rake_rate != 0.0 || config.rake_cap != 0 {
-        return Err("solve_hunl_preflop_rvr: rake support is a post-Phase-A follow-up".into());
-    }
 
     let started = Instant::now();
-    let equity_table: Array3<f64> = load_equity_table(equity_table_path)
-        .map_err(|e| format!("load equity table: {e}"))?;
+    let equity_table: Array3<f64> =
+        load_equity_table(equity_table_path).map_err(|e| format!("load equity table: {e}"))?;
 
-    let tree = PreflopBettingTree::build(
-        config,
-        preflop_open_sizes_bb,
-        preflop_reraise_multipliers,
-    );
+    let tree =
+        PreflopBettingTree::build(config, preflop_open_sizes_bb, preflop_reraise_multipliers);
     let ctx = match hand_lists {
         Some([p0, p1]) => {
             if p0.is_empty() || p1.is_empty() {
@@ -1462,13 +1515,7 @@ pub fn solve_hunl_preflop_rvr_with_hands(
     };
     let cache = PreflopTerminalCache::build(&tree, &ctx, &equity_table);
 
-    let mut solver = PreflopVectorDCFR::new(
-        &tree,
-        ctx.hand_count,
-        alpha,
-        beta,
-        gamma,
-    );
+    let mut solver = PreflopVectorDCFR::new(&tree, ctx.hand_count, alpha, beta, gamma);
     solver.solve(&tree, &ctx, &cache, iterations);
 
     // Final discount catch-up.
@@ -1555,12 +1602,11 @@ mod tests {
     #[test]
     fn betting_tree_builds_with_default_menu() {
         let cfg = tiny_config();
-        let tree = PreflopBettingTree::build(
-            &cfg,
-            &[2.0, 3.0, 4.0, 5.0],
-            &[2.0, 3.0, 4.0, 5.0],
+        let tree = PreflopBettingTree::build(&cfg, &[2.0, 3.0, 4.0, 5.0], &[2.0, 3.0, 4.0, 5.0]);
+        assert!(
+            tree.nodes.len() > 1,
+            "preflop tree must have multiple nodes"
         );
-        assert!(tree.nodes.len() > 1, "preflop tree must have multiple nodes");
         // At least one decision node and one terminal.
         let mut decision_count = 0usize;
         let mut terminal_count = 0usize;
@@ -1599,8 +1645,14 @@ mod tests {
     fn rejects_fixed_hole_cards() {
         let mut cfg = tiny_config();
         cfg.initial_hole_cards = Some([
-            [crate::hunl::card_to_int(14, 0), crate::hunl::card_to_int(14, 1)],
-            [crate::hunl::card_to_int(13, 2), crate::hunl::card_to_int(13, 3)],
+            [
+                crate::hunl::card_to_int(14, 0),
+                crate::hunl::card_to_int(14, 1),
+            ],
+            [
+                crate::hunl::card_to_int(13, 2),
+                crate::hunl::card_to_int(13, 3),
+            ],
         ]);
         let stub_table = Array3::<f64>::zeros((169, 169, 3));
         let tmp = std::env::temp_dir().join("__phase_a_test_stub2.npz");
@@ -1635,12 +1687,30 @@ mod tests {
     /// Build a small 6-hand × 6-hand EvalContext for parity testing.
     fn small_eval_ctx() -> EvalContext {
         let p_hands = vec![
-            [crate::hunl::card_to_int(14, 0), crate::hunl::card_to_int(14, 1)], // AsAh
-            [crate::hunl::card_to_int(14, 2), crate::hunl::card_to_int(14, 3)], // AdAc
-            [crate::hunl::card_to_int(13, 0), crate::hunl::card_to_int(13, 1)], // KsKh
-            [crate::hunl::card_to_int(13, 2), crate::hunl::card_to_int(13, 3)], // KdKc
-            [crate::hunl::card_to_int(7, 0), crate::hunl::card_to_int(2, 1)],   // 7s2h
-            [crate::hunl::card_to_int(7, 2), crate::hunl::card_to_int(2, 3)],   // 7d2c
+            [
+                crate::hunl::card_to_int(14, 0),
+                crate::hunl::card_to_int(14, 1),
+            ], // AsAh
+            [
+                crate::hunl::card_to_int(14, 2),
+                crate::hunl::card_to_int(14, 3),
+            ], // AdAc
+            [
+                crate::hunl::card_to_int(13, 0),
+                crate::hunl::card_to_int(13, 1),
+            ], // KsKh
+            [
+                crate::hunl::card_to_int(13, 2),
+                crate::hunl::card_to_int(13, 3),
+            ], // KdKc
+            [
+                crate::hunl::card_to_int(7, 0),
+                crate::hunl::card_to_int(2, 1),
+            ], // 7s2h
+            [
+                crate::hunl::card_to_int(7, 2),
+                crate::hunl::card_to_int(2, 3),
+            ], // 7d2c
         ];
         EvalContext::from_hand_lists(p_hands.clone(), p_hands, 100)
     }
@@ -1810,4 +1880,3 @@ mod tests {
         }
     }
 }
-

@@ -261,6 +261,118 @@ impl Default for HUNLConfig {
     }
 }
 
+impl HUNLConfig {
+    /// Validate the config against the invariants enforced by Python's
+    /// `HUNLConfig.__post_init__` in `poker_solver/hunl.py`.
+    ///
+    /// **Why on the Rust tier too:** PR #67 (issue #159) traced a degenerate
+    /// preflop Nash to a caller passing `initial_contributions=[SB,BB]` with
+    /// `initial_pot=0` — a malformed config the Python guard rejects but the
+    /// Rust entry point silently accepted, producing `pot_total=0` at every
+    /// leaf and a fold-everywhere equilibrium. The
+    /// `feedback_silent_skip_hazard` rule (memory file) requires
+    /// defense-in-depth here: the Python guard is no substitute for the same
+    /// check in the Rust tier, because Rust solvers can be invoked
+    /// independently of Python (PyO3 `solve_*` calls deserialize from a
+    /// `serde_json::Value` straight into `HUNLConfig`, skipping
+    /// `__post_init__`).
+    ///
+    /// Rules (mirror `poker_solver/hunl.py:124-176`):
+    /// - `rake_rate == 0.0` and `rake_cap == 0` (rake support deferred).
+    /// - At preflop: either
+    ///   `initial_pot == 0` AND `initial_contributions == [0, 0]`
+    ///   (engine posts blinds), OR
+    ///   `initial_contributions == [SB+ante, BB+ante]` AND
+    ///   `initial_pot == small_blind + big_blind + 2*ante`
+    ///   (caller declared blinds as already-in-pot dead money).
+    ///   The Python tier accepts only the first form; the Rust tier is
+    ///   stricter about consistency between `initial_pot` and
+    ///   `initial_contributions` and accepts both forms — `State::initial`
+    ///   produces Nash-equivalent results in either case.
+    /// - At postflop: `initial_board` non-empty, `initial_contributions`
+    ///   non-negative and `<= starting_stack` per player, and
+    ///   `sum(initial_contributions)` either `0` (dead-money subgame) or
+    ///   `== initial_pot`.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.rake_rate != 0.0 {
+            return Err(format!(
+                "HUNLConfig.validate: rake_rate must be 0.0 (got {})",
+                self.rake_rate
+            ));
+        }
+        if self.rake_cap != 0 {
+            return Err(format!(
+                "HUNLConfig.validate: rake_cap must be 0 (got {})",
+                self.rake_cap
+            ));
+        }
+        if self.starting_stack <= 0 {
+            return Err(format!(
+                "HUNLConfig.validate: starting_stack must be > 0 (got {})",
+                self.starting_stack
+            ));
+        }
+        if self.big_blind <= 0 {
+            return Err(format!(
+                "HUNLConfig.validate: big_blind must be > 0 (got {})",
+                self.big_blind
+            ));
+        }
+        if self.small_blind < 0 || self.ante < 0 || self.initial_pot < 0 {
+            return Err(
+                "HUNLConfig.validate: small_blind, ante, initial_pot must be non-negative".into(),
+            );
+        }
+        let [c0, c1] = self.initial_contributions;
+        if self.starting_street == Street::Preflop {
+            if c0 == 0 && c1 == 0 && self.initial_pot == 0 {
+                return Ok(());
+            }
+            let blind_sb = self.small_blind + self.ante;
+            let blind_bb = self.big_blind + self.ante;
+            let expected_pot = blind_sb + blind_bb;
+            if c0 == blind_sb && c1 == blind_bb && self.initial_pot == expected_pot {
+                return Ok(());
+            }
+            return Err(format!(
+                "HUNLConfig.validate: at preflop, initial_contributions / initial_pot \
+                 must be either [0,0]/0 (engine posts blinds) or [{blind_sb},{blind_bb}]/\
+                 {expected_pot} (caller declared blinds); got [{c0},{c1}]/{}",
+                self.initial_pot
+            ));
+        }
+        // Postflop branch (mirrors poker_solver/hunl.py:151-176).
+        if self.initial_board.is_empty() {
+            return Err("HUNLConfig.validate: initial_board must be non-empty when \
+                 starting_street > PREFLOP"
+                .into());
+        }
+        if c0 < 0 || c1 < 0 {
+            return Err(format!(
+                "HUNLConfig.validate: initial_contributions must be non-negative; \
+                 got ({c0}, {c1})"
+            ));
+        }
+        if c0 > self.starting_stack || c1 > self.starting_stack {
+            return Err(format!(
+                "HUNLConfig.validate: initial_contributions ({c0}, {c1}) must not exceed \
+                 starting_stack ({}); a player cannot have contributed more than their \
+                 starting stack",
+                self.starting_stack
+            ));
+        }
+        let contrib_sum = c0 + c1;
+        if contrib_sum != 0 && contrib_sum != self.initial_pot {
+            return Err(
+                "HUNLConfig.validate: initial_contributions must sum to initial_pot \
+                 (or be (0,0) for dead-money subgames)"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+}
+
 // ============================================================================
 // HUNLState
 // ============================================================================
@@ -329,9 +441,7 @@ impl HUNLState {
         // `street_num_raises=0`, `cur_player=1` (existing behavior unchanged).
         let c0 = contributions[0];
         let c1 = contributions[1];
-        let (to_call, street_aggressor, postflop_first_actor): (i32, i8, i8) = if c0
-            == c1
-        {
+        let (to_call, street_aggressor, postflop_first_actor): (i32, i8, i8) = if c0 == c1 {
             (0, -1, 1)
         } else if c0 < c1 {
             // P0 has less in; P0 faces the bet, P1 is the aggressor.
@@ -380,8 +490,32 @@ impl HUNLState {
     /// set to -1 (chance) which would then try to enumerate hole cards and
     /// panic in the caller.
     fn initial_preflop(config: Arc<HUNLConfig>) -> Self {
-        let sb_contrib = config.small_blind + config.ante;
-        let bb_contrib = config.big_blind + config.ante;
+        // PR #67 (issue #159): honor `config.initial_contributions`.
+        //
+        // Two equivalent preflop configurations both produce a state with
+        // `contributions = [SB+ante, BB+ante]`:
+        //
+        // 1. `initial_contributions=[0,0]+initial_pot=0`: engine posts the
+        //    blinds → contributions := blinds.
+        // 2. `initial_contributions=[SB+ante,BB+ante]+initial_pot=SB+BB+2*ante`:
+        //    caller declared blinds as already-in-pot dead money → blinds are
+        //    NOT re-posted (still contributions := blinds, but the leaf
+        //    `cs = contributions - initial_contributions = [0,0]`).
+        //
+        // Both yield identical `pot_total` at every leaf and Nash-equivalent
+        // strategies. See `PreflopRvrState::initial` for the full invariant.
+        //
+        // Pre-fix bug: `contributions` was always `[SB+ante, BB+ante]`
+        // regardless of `initial_contributions`; with config (2) and a caller
+        // who passed only `[50,100]` (no matching `initial_pot=150`), every
+        // leaf saw `cs=[0,0]` and `pot_total=0`, collapsing the equilibrium
+        // to fold-everywhere.
+        let blind_sb = config.small_blind + config.ante;
+        let blind_bb = config.big_blind + config.ante;
+        let init_c0 = config.initial_contributions[0];
+        let init_c1 = config.initial_contributions[1];
+        let sb_contrib = blind_sb.max(init_c0);
+        let bb_contrib = blind_bb.max(init_c1);
         let contributions = [sb_contrib, bb_contrib];
         let stacks = [
             config.starting_stack - sb_contrib,
