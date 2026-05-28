@@ -355,6 +355,39 @@ def _on_preflop_chart_solve(state: AppState) -> None:
     open_sizes = getattr(state.runner, "_pending_preflop_chart_opens", None)
     reraise_mults = getattr(state.runner, "_pending_preflop_chart_mults", None)
 
+    # Task #68 Phase 6: try blueprint first. When the user's
+    # (stack_bb, ante) is covered by the Premium-A asset bundle (or
+    # falls between two anchor depths), this returns instantly without
+    # touching the Rust solver and stashes the chart_result + the
+    # route_info badge directly. The polling timer in ``_tick`` picks
+    # up the new ``preflop_chart_result`` identity and refreshes the
+    # chart widget on the next tick.
+    #
+    # TODO(Phase 5): replace ``try_blueprint_preflop_chart`` with a
+    # ``SolverRouter.solve(...)`` call once
+    # ``poker_solver.solver_router.SolverRouter`` lands. For now we
+    # consume the underlying ``BlueprintLoader`` + ``interpolate_strategy``
+    # directly via ``ui.blueprint_router.BlueprintRouter``.
+    try:
+        blueprint_hit = state.runner.try_blueprint_preflop_chart(
+            stack_bb=int(spot.stacks_bb[0]),
+            ante=float(spot.ante),
+        )
+    except (RuntimeError, ImportError, OSError, ValueError) as exc:
+        logger.exception("blueprint preflop chart lookup raised: %s", exc)
+        blueprint_hit = False
+    if blueprint_hit:
+        # Refresh the chart widget so the badge + cells update on the
+        # current frame; the polling timer would catch it on the next
+        # tick anyway, but instant refresh feels snappier.
+        refresher = getattr(state.runner, "_preflop_chart_refresh", None)
+        if callable(refresher):
+            try:
+                refresher()
+            except Exception:  # noqa: BLE001
+                logger.exception("blueprint refresh raised")
+        return
+
     # Build a clean preflop HUNLConfig:
     # - starting_street = PREFLOP
     # - initial_hole_cards = None (the Rust binding REQUIRES this to be

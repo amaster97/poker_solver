@@ -272,6 +272,13 @@ def render(state: AppState, on_solve: Callable[[], None] | None = None) -> None:
     def _right_pane_slot() -> None:
         _render_right_pane(state, on_solve, _refresh_all)
 
+    # Task #68 Phase 6: routing-path indicator slot. Refreshed alongside
+    # the grid + right-pane so updates after a postflop solve show the
+    # new wall time.
+    @ui.refreshable  # type: ignore[untyped-decorator]
+    def _routing_slot() -> None:
+        _render_routing_indicator(state)
+
     def _refresh_all() -> None:
         try:
             _grid_slot.refresh()
@@ -281,6 +288,10 @@ def render(state: AppState, on_solve: Callable[[], None] | None = None) -> None:
             _right_pane_slot.refresh()
         except Exception:  # noqa: BLE001
             logger.exception("chained tab right-pane refresh failed")
+        try:
+            _routing_slot.refresh()
+        except Exception:  # noqa: BLE001
+            logger.exception("chained tab routing slot refresh failed")
 
     with (
         ui.element("div")
@@ -296,6 +307,13 @@ def render(state: AppState, on_solve: Callable[[], None] | None = None) -> None:
             ui.label(_subtitle(state)).mark("chained-tab-status").style(
                 "color:#aaaaaa;font-size:12px"
             )
+        # Task #68 Phase 6: routing-path indicator. Shows the preflop +
+        # postflop route on one line under the header so the user sees
+        # the full chained route at a glance (e.g. "preflop: live 30
+        # iter / postflop: live subgame"). Refreshed on every grid /
+        # right-pane refresh by ``_refresh_all`` via the chained
+        # tab's polling-timer hook in ``ui/app.py``.
+        _routing_slot()
         with ui.row().style("align-items:flex-start;gap:14px;flex-wrap:nowrap"):
             with ui.element("div").style(
                 f"min-width:{_CELL_PX * 13 + 30}px;flex:0 0 auto"
@@ -325,6 +343,77 @@ def _subtitle(state: AppState) -> str:
     wall = float(getattr(preflop, "wall_clock_s", 0.0))
     n_terms = len(result.continuation_ranges)
     return f"{iters} iters / {wall:.1f}s / {n_terms} flop-reaching terminals"
+
+
+def _render_routing_indicator(state: AppState) -> None:
+    """Task #68 Phase 6: render the chained-tab routing indicator.
+
+    Renders TWO badges on one row:
+
+      * preflop: source label + wall time + confidence (e.g. ``[live]
+        30 iter Route A aggregator (wall 1.2s)``).
+      * postflop: same shape but tracking the last-triggered postflop
+        subgame solve.
+
+    Each badge reads its ``RouteInfo`` from ``state.runner``; when no
+    chained solve has run yet, both badges render an "unrouted"
+    placeholder so the badge slot stays present and the smoke tests
+    can assert on ``chained-tab-route-preflop`` /
+    ``chained-tab-route-postflop`` markers regardless.
+    """
+    ui = _import_nicegui()
+    runner = getattr(state, "runner", None)
+    preflop_info = (
+        getattr(runner, "chained_preflop_route_info", None)
+        if runner is not None
+        else None
+    )
+    postflop_info = (
+        getattr(runner, "chained_postflop_route_info", None)
+        if runner is not None
+        else None
+    )
+
+    from ui.blueprint_router import SourceLabel, describe_route
+
+    pre_text = (
+        f"preflop: {describe_route(preflop_info)}"
+        if preflop_info is not None
+        else "preflop: [unrouted] click Solve chained"
+    )
+    post_text = (
+        f"postflop: {describe_route(postflop_info)}"
+        if postflop_info is not None
+        else "postflop: [unrouted] pick a flop to trigger"
+    )
+
+    def _color(info: object | None) -> str:
+        if info is None:
+            return "#7a7a7a"
+        label = getattr(info, "source", None)
+        if label == SourceLabel.BLUEPRINT:
+            return "#9ad29a"
+        if label == SourceLabel.INTERPOLATED:
+            return "#e0d27c"
+        if label == SourceLabel.LIVE:
+            return "#e8e8e8"
+        return "#7a7a7a"
+
+    with (
+        ui.element("div")
+        .mark("chained-tab-route-indicator")
+        .style(
+            "display:flex;flex-direction:column;gap:2px;"
+            "padding:4px 0;margin-bottom:6px;"
+            "font-family:Menlo,Consolas,monospace;font-size:11px"
+        )
+    ):
+        ui.label(pre_text).mark("chained-tab-route-preflop").style(
+            f"color:{_color(preflop_info)}"
+        )
+        ui.label(post_text).mark("chained-tab-route-postflop").style(
+            f"color:{_color(postflop_info)}"
+        )
 
 
 def _render_grid(state: AppState) -> None:
@@ -755,6 +844,12 @@ def _render_postflop_panel(
             # runs synchronously here — for production wall-clock this is
             # roughly seconds to tens of seconds; an async dispatch path
             # is a Phase B concern (issue #31 §3 future work).
+            #
+            # Task #68 Phase 6: time the solve so we can update the
+            # postflop badge with the real wall time the user just paid.
+            import time as _time
+
+            t_post = _time.monotonic()
             try:
                 cached = result.solve_postflop(action_seq, board_tuple)
             except (KeyError, ValueError) as exc:
@@ -766,6 +861,28 @@ def _render_postflop_panel(
                 logger.exception("chained postflop solve raised")
                 ui.label(f"Postflop solve error: {exc}").style("color:#e07070")
                 return
+            wall_post = _time.monotonic() - t_post
+            # Update the postflop route info badge in-place. The
+            # ``_routing_slot`` refreshable is owned by ``render(...)``
+            # — calling ``refresh_after_change`` would re-render the
+            # right pane too, but we want the badge to update without
+            # bouncing the postflop strategy section. The polling timer
+            # in ``ui/app.py`` catches this on the next tick anyway.
+            from ui.blueprint_router import RouteInfo, SourceLabel
+
+            runner = getattr(state, "runner", None)
+            if runner is not None:
+                runner.chained_postflop_route_info = RouteInfo(
+                    source=SourceLabel.LIVE,
+                    wall_time_s=wall_post,
+                    confidence=f"live subgame ({len(action_seq)}-token line)",
+                )
+                refresh = getattr(runner, "_chained_refresh", None)
+                if callable(refresh):
+                    try:
+                        refresh()
+                    except Exception:  # noqa: BLE001
+                        logger.exception("chained refresh after postflop solve")
 
         per_class = getattr(cached, "per_class_strategy", {}) or {}
         if selected_class not in per_class:
