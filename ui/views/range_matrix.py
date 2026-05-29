@@ -807,12 +807,35 @@ def _build_grid_summaries_rvr(
 
 # Cell visual constants — single source of truth.
 _CELL_PX: int = 54  # 13*54 ~= 700 px, meets 24px floor (spec anti-pattern §3.3)
-_LABEL_COLOR: str = "#f5f5f5"
-_FADED_COLOR: str = "#3a3a3a"
+# Theme-aware neutrals (F04): the cell LABEL/faded text reads via CSS vars
+# (defined in ``ui/app.py``) so it stays legible in both light + dark. The
+# CELL BACKGROUND blend (``cell_color``) is a semantic RYG/grey value locked
+# by smoke tests and is intentionally left as-is.
+_LABEL_COLOR: str = "var(--ps-cell-label)"
+_FADED_COLOR: str = "var(--ps-faded)"
 
 
 def _cell_style(summary: CellSummary) -> str:
     color = cell_color(summary)
+    # F04: blocked / out-of-range / empty cells return the neutral grey
+    # sentinel from ``cell_color`` (``#3a3a3a``, test-locked). That value is
+    # a NEUTRAL, not a strategy color, so re-route it through the theme var
+    # here — the only place it reaches the DOM — so the faded cell tracks the
+    # active theme (light-grey on light, near-black on dark) and its tag text
+    # stays legible. ``cell_color`` itself is untouched (unit-tested).
+    if summary.blocked or summary.out_of_range or summary.empty:
+        color = "var(--ps-faded)"
+    elif summary.fold + summary.call + summary.raise_ <= 0.0:
+        # F04 round 2: an IN-RANGE cell with no strategy mass (no solve yet,
+        # or no strategy entry for this infoset) blends to rgb(0,0,0) in
+        # ``cell_color`` — pure black, the default-range "MIX" look. That is
+        # a NEUTRAL base fill, not a semantic strategy color, so re-route it
+        # through ``--ps-cell-bg`` here (the only place it reaches the DOM):
+        # black on dark (pixel-identical to before), pale on light so the
+        # cell + its dark label/tag stay legible. SOLVED cells (any action
+        # mass, incl. faded fractional ranges) keep their RYG blend untouched
+        # — ``cell_color`` is still authoritative for those and unit-tested.
+        color = "var(--ps-cell-bg)"
     text_color = _LABEL_COLOR
     extras = ""
     if summary.blocked:
@@ -823,12 +846,12 @@ def _cell_style(summary: CellSummary) -> str:
             "; background-image: repeating-linear-gradient(45deg, "
             "rgba(255,255,255,0.18) 0 4px, transparent 4px 8px)"
         )
-        text_color = "#dadada"
+        text_color = "var(--ps-cell-tag-blocked)"
     elif summary.out_of_range or summary.empty:
-        text_color = "#7a7a7a"
+        text_color = "var(--ps-text-fainter)"
     return (
         f"width:{_CELL_PX}px;height:{_CELL_PX}px;background:{color};"
-        f"color:{text_color};border:1px solid #1f1f1f;"
+        f"color:{text_color};border:1px solid var(--ps-cell-border);"
         f"display:flex;flex-direction:column;justify-content:space-between;"
         f"padding:3px 4px;font-size:11px;cursor:pointer{extras}"
     )
@@ -943,13 +966,16 @@ def inspect_panel(state: AppState, hand_class: str) -> None:
     with (
         ui_mod.element("div")
         .mark("combo-inspector-strip")
-        .style("padding:8px 12px;background:#1b1b1b;border-top:1px solid #303030")
+        .style(
+            "padding:8px 12px;background:var(--ps-strip-bg);"
+            "border-top:1px solid var(--ps-border-strong)"
+        )
     ):
         ui_mod.label(f"Combo inspector — {hand_class} ({len(rows)} combos)").style(
-            "font-weight:600;color:#f0f0f0;margin-bottom:6px"
+            "font-weight:600;color:var(--ps-text);margin-bottom:6px"
         )
         if not rows:
-            ui_mod.label("No combos in range").style("color:#9a9a9a")
+            ui_mod.label("No combos in range").style("color:var(--ps-text-faint)")
             return
         for row in rows:
             marker = f"combo-inspector-row-{row.label}"
@@ -959,11 +985,12 @@ def inspect_panel(state: AppState, hand_class: str) -> None:
                 .style("align-items:center;gap:10px;padding:2px 0")
             ):
                 ui_mod.label(row.label).style(
-                    "font-family:Menlo,Consolas,monospace;width:64px;color:#e8e8e8"
+                    "font-family:Menlo,Consolas,monospace;width:64px;"
+                    "color:var(--ps-text-dim)"
                 )
                 if row.blocked:
                     ui_mod.label("BLOCKED — card on board").style(
-                        "color:#c0c0c0;font-style:italic"
+                        "color:var(--ps-text-muted);font-style:italic"
                     )
                     continue
                 # Horizontal stacked bar: red (fold) / yellow (call) /
@@ -974,7 +1001,7 @@ def inspect_panel(state: AppState, hand_class: str) -> None:
                 fw = max(0, bar_width - rw - cw)
                 with ui_mod.element("div").style(
                     f"display:flex;width:{bar_width}px;height:12px;"
-                    "border:1px solid #2a2a2a"
+                    "border:1px solid var(--ps-border-soft)"
                 ):
                     ui_mod.element("div").style(
                         f"width:{rw}px;background:rgb(40,180,60)"
@@ -989,16 +1016,17 @@ def inspect_panel(state: AppState, hand_class: str) -> None:
                     f"R {int(round(row.raise_ * 100))}% · "
                     f"C {int(round(row.call * 100))}% · "
                     f"F {int(round(row.fold * 100))}%"
-                ).style("color:#cccccc;font-family:Menlo,Consolas,monospace")
+                ).style("color:var(--ps-text-mono);font-family:Menlo,Consolas,monospace")
                 ui_mod.label(f"EV {row.ev_mbb:+.0f} mBB").style(
-                    "color:#9ad29a;font-family:Menlo,Consolas,monospace"
+                    "color:var(--ps-accent-ev);font-family:Menlo,Consolas,monospace"
                 )
                 ui_mod.label(f"reach {row.reach:.3f}").style(
-                    "color:#a8c8e8;font-family:Menlo,Consolas,monospace"
+                    "color:var(--ps-accent-reach);font-family:Menlo,Consolas,monospace"
                 )
                 if row.infoset_key:
                     ui_mod.label(row.infoset_key).style(
-                        "color:#8a8a8a;font-family:Menlo,Consolas,monospace;"
+                        "color:var(--ps-text-fainter);"
+                        "font-family:Menlo,Consolas,monospace;"
                         "font-size:10px"
                     ).tooltip("infoset key — click to copy from devtools")
 
@@ -1033,8 +1061,9 @@ def render(state: AppState) -> None:
                 ui_mod.element("div")
                 .mark("combo-inspector-strip")
                 .style(
-                    "padding:8px 12px;background:#1b1b1b;"
-                    "border-top:1px solid #303030;color:#909090"
+                    "padding:8px 12px;background:var(--ps-strip-bg);"
+                    "border-top:1px solid var(--ps-border-strong);"
+                    "color:var(--ps-text-faint)"
                 )
             ):
                 ui_mod.label("Click a cell to inspect its combos").style(
@@ -1046,15 +1075,17 @@ def render(state: AppState) -> None:
     with (
         ui_mod.element("div")
         .mark("range-matrix-display")
-        .style("background:#0f0f0f;padding:12px;border-radius:6px")
+        .style("background:var(--ps-panel-bg);padding:12px;border-radius:6px")
     ):
         with ui_mod.row().style(
             "align-items:center;justify-content:space-between;margin-bottom:6px"
         ):
             ui_mod.label("RANGE MATRIX").style(
-                "font-weight:700;letter-spacing:0.05em;color:#f5f5f5"
+                "font-weight:700;letter-spacing:0.05em;color:var(--ps-text-strong)"
             )
-            ui_mod.label(_matrix_subtitle(state)).style("color:#aaaaaa;font-size:12px")
+            ui_mod.label(_matrix_subtitle(state)).style(
+                "color:var(--ps-text-muted);font-size:12px"
+            )
 
         with ui_mod.element("div").style(
             f"display:grid;grid-template-columns:repeat(13, {_CELL_PX}px);"
@@ -1086,7 +1117,8 @@ def render(state: AppState) -> None:
                     )
                     if cell.summary.out_of_range:
                         ui_mod.label("—").style(
-                            "align-self:center;font-size:18px;color:#7a7a7a"
+                            "align-self:center;font-size:18px;"
+                            "color:var(--ps-text-fainter)"
                         )
                     else:
                         tag = _cell_tag(cell.summary)
@@ -1094,11 +1126,11 @@ def render(state: AppState) -> None:
                             ui_mod.label(tag).style(
                                 "font-family:Menlo,Consolas,monospace;"
                                 "font-size:10px;align-self:flex-end;"
-                                "color:#1a1a1a"
+                                "color:var(--ps-cell-tag)"
                                 if not (cell.summary.blocked)
                                 else "font-family:Menlo,Consolas,monospace;"
                                 "font-size:10px;align-self:flex-end;"
-                                "color:#dadada"
+                                "color:var(--ps-cell-tag-blocked)"
                             )
                     ui_mod.tooltip(_tooltip_text(cell.hand_class, cell.summary))
                     cell_el.on(
@@ -1108,13 +1140,26 @@ def render(state: AppState) -> None:
 
         # Legend (single line under the matrix). Locked principle 4:
         # strategy palette is RYG; input-matrix palette is white->blue
-        # (rendered in Agent A's spot input view).
-        with ui_mod.row().style("gap:14px;margin-top:6px;color:#a8a8a8;font-size:11px"):
-            ui_mod.html("<span style='color:rgb(40,180,60)'>&#9632;</span> raise/bet")
-            ui_mod.html("<span style='color:rgb(220,200,40)'>&#9632;</span> call/check")
-            ui_mod.html("<span style='color:rgb(220,40,40)'>&#9632;</span> fold")
-            ui_mod.html("<span style='color:#3a3a3a'>&#9632;</span> out of range")
-            ui_mod.html("<span style='color:#a0a0a0'>&#9740;</span> blocked by board")
+        # (rendered in Agent A's spot input view). The RYG swatches are
+        # semantic (kept verbatim); the row text + neutral swatches read
+        # via theme vars so the legend is legible on light backgrounds too.
+        with ui_mod.row().style(
+            "gap:14px;margin-top:6px;color:var(--ps-text-muted);font-size:11px"
+        ):
+            ui_mod.html(
+                "<span style='color:var(--ps-act-raise)'>&#9632;</span> raise/bet"
+            )
+            ui_mod.html(
+                "<span style='color:var(--ps-act-call)'>&#9632;</span> call/check"
+            )
+            ui_mod.html("<span style='color:var(--ps-act-fold)'>&#9632;</span> fold")
+            ui_mod.html(
+                "<span style='color:var(--ps-faded)'>&#9632;</span> out of range"
+            )
+            ui_mod.html(
+                "<span style='color:var(--ps-text-muted)'>&#9740;</span> "
+                "blocked by board"
+            )
 
         # Combo inspector strip (BELOW the matrix per Q5 locked).
         _inspector_slot()

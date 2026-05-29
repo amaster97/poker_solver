@@ -608,16 +608,19 @@ def render(state: AppState, on_solve: Callable[[], None] | None = None) -> None:
     with (
         ui.element("div")
         .mark("preflop-chart-display")
-        .style("background:#0f0f0f;padding:12px;border-radius:6px;width:100%")
+        .style(
+            "background:var(--ps-panel-bg);padding:12px;"
+            "border-radius:6px;width:100%"
+        )
     ):
         with ui.row().style(
             "align-items:center;justify-content:space-between;margin-bottom:8px"
         ):
             ui.label("PREFLOP CHART").style(
-                "font-weight:700;letter-spacing:0.05em;color:#f5f5f5"
+                "font-weight:700;letter-spacing:0.05em;color:var(--ps-text-strong)"
             )
             ui.label(_chart_subtitle(state)).mark("preflop-chart-subtitle").style(
-                "color:#aaaaaa;font-size:12px"
+                "color:var(--ps-text-muted);font-size:12px"
             )
         with ui.row().style("align-items:flex-start;gap:14px;flex-wrap:nowrap"):
             with ui.element("div").style(
@@ -744,17 +747,17 @@ def _badge_color(info: Any) -> str:
     route has been chosen yet.
     """
     if info is None:
-        return "#7a7a7a"
+        return "var(--ps-text-fainter)"
     from ui.blueprint_router import SourceLabel
 
     label = getattr(info, "source", None)
     if label == SourceLabel.BLUEPRINT:
-        return "#9ad29a"
+        return "var(--ps-accent-ev)"
     if label == SourceLabel.INTERPOLATED:
-        return "#e0d27c"
+        return "var(--ps-accent-warn)"
     if label == SourceLabel.LIVE:
-        return "#e8e8e8"
-    return "#7a7a7a"
+        return "var(--ps-text-dim)"
+    return "var(--ps-text-fainter)"
 
 
 def _line_options(state: AppState) -> dict[str, str]:
@@ -798,11 +801,12 @@ def _render_line_selector(
         .style("margin-bottom:8px;display:flex;align-items:center;gap:8px")
     ):
         ui.label("Line").style(
-            "color:#cfcfcf;font-size:12px;font-weight:600;letter-spacing:0.03em"
+            "color:var(--ps-text-label);font-size:12px;font-weight:600;"
+            "letter-spacing:0.03em"
         )
         if not options:
             ui.label("open only — solve to reveal deeper lines").style(
-                "color:#7a7a7a;font-size:11px;font-style:italic"
+                "color:var(--ps-text-fainter);font-size:11px;font-style:italic"
             )
             return
         sel = _selected_line(state)
@@ -820,7 +824,7 @@ def _render_line_selector(
         )
         if len(options) == 1:
             ui.label("(open only at this depth)").style(
-                "color:#7a7a7a;font-size:11px;font-style:italic"
+                "color:var(--ps-text-fainter);font-size:11px;font-style:italic"
             )
 
 
@@ -844,9 +848,15 @@ def _render_cell(state: AppState, hand_class: str, summary: CellSummary) -> None
     """Render a single matrix cell."""
     ui = _import_nicegui()
     color = cell_color_css(summary)
+    # F04: empty cells fall back to a NEUTRAL grey anchor (``_COLOR_EMPTY``)
+    # — re-route that to the theme var so an unsolved chart isn't dark-on-dark
+    # in light mode. Non-empty cells keep their semantic fold/call/raise/jam
+    # blend (``cell_color_rgb`` is unit-tested).
+    if summary.empty:
+        color = "var(--ps-faded)"
     tag = _cell_tag(summary)
     selected = _selected_cell_label(state) == hand_class
-    border = "#ffffff" if selected else "#1f1f1f"
+    border = "var(--ps-cell-border-sel)" if selected else "var(--ps-cell-border)"
     cell_marker = f"preflop-chart-cell preflop-chart-cell-{hand_class}"
 
     def _on_click(_event: object = None, cls: str = hand_class) -> None:
@@ -863,7 +873,7 @@ def _render_cell(state: AppState, hand_class: str, summary: CellSummary) -> None
 
     style = (
         f"width:{_CELL_PX}px;height:{_CELL_PX}px;"
-        f"background:{color};color:#f5f5f5;"
+        f"background:{color};color:var(--ps-cell-label);"
         f"border:1px solid {border};"
         f"display:flex;flex-direction:column;justify-content:space-between;"
         f"padding:2px 3px;font-size:10px;cursor:pointer;"
@@ -876,12 +886,12 @@ def _render_cell(state: AppState, hand_class: str, summary: CellSummary) -> None
         .on("click", _on_click)
     ):
         ui.label(hand_class).style(
-            "font-weight:600;line-height:1;color:#f5f5f5"
+            "font-weight:600;line-height:1;color:var(--ps-cell-label)"
         )
         if tag:
             ui.label(tag).style(
                 "font-family:Menlo,Consolas,monospace;font-size:9px;"
-                "align-self:flex-end;color:#1a1a1a"
+                "align-self:flex-end;color:var(--ps-cell-tag)"
             )
         ui.tooltip(_tooltip_text(hand_class, summary))
 
@@ -925,12 +935,12 @@ def _render_input_panel(
         ui.element("div")
         .mark("preflop-chart-input-panel")
         .style(
-            "background:#181818;padding:10px;border-radius:4px;"
-            "border:1px solid #2a2a2a;margin-bottom:10px"
+            "background:var(--ps-input-bg);padding:10px;border-radius:4px;"
+            "border:1px solid var(--ps-border-soft);margin-bottom:10px"
         )
     ):
         ui.label("Configure preflop solve").style(
-            "font-weight:600;color:#f0f0f0;margin-bottom:8px"
+            "font-weight:600;color:var(--ps-text);margin-bottom:8px"
         )
 
         spot = state.current_spot
@@ -1141,21 +1151,21 @@ def _render_detail_panel(state: AppState) -> None:
         ui.element("div")
         .mark("preflop-chart-detail")
         .style(
-            "background:#1b1b1b;padding:10px;border-radius:4px;"
-            "border:1px solid #303030"
+            "background:var(--ps-strip-bg);padding:10px;border-radius:4px;"
+            "border:1px solid var(--ps-border-strong)"
         )
     ):
         if selected is None:
             ui.label("Click a cell to see per-action breakdown").style(
-                "color:#9a9a9a;font-style:italic"
+                "color:var(--ps-text-faint);font-style:italic"
             )
             return
         ui.label(f"Hand class: {selected}").style(
-            "font-weight:600;color:#f0f0f0;margin-bottom:6px"
+            "font-weight:600;color:var(--ps-text);margin-bottom:6px"
         )
         if summary is None or summary.empty:
             ui.label("No chart data for this class yet — run Solve.").style(
-                "color:#a8a8a8;font-style:italic"
+                "color:var(--ps-text-muted);font-style:italic"
             )
             return
         rows = build_detail_rows(summary)
@@ -1165,7 +1175,8 @@ def _render_detail_panel(state: AppState) -> None:
             ).mark(f"preflop-chart-detail-row-{r.label}"):
                 # Action label
                 ui.label(r.label).style(
-                    "width:90px;color:#e8e8e8;font-family:Menlo,Consolas,monospace"
+                    "width:90px;color:var(--ps-text-dim);"
+                    "font-family:Menlo,Consolas,monospace"
                 )
                 # Bar
                 bar_width = 160
@@ -1181,14 +1192,15 @@ def _render_detail_panel(state: AppState) -> None:
                 )
                 with ui.element("div").style(
                     f"width:{bar_width}px;height:12px;"
-                    f"background:#0a0a0a;border:1px solid #2a2a2a;"
+                    f"background:var(--ps-track-bg);"
+                    f"border:1px solid var(--ps-border-soft);"
                     f"position:relative"
                 ):
                     ui.element("div").style(
                         f"width:{fill_px}px;height:100%;background:{anchor_css}"
                     )
                 ui.label(f"{r.probability * 100:.1f}%").style(
-                    "color:#cccccc;font-family:Menlo,Consolas,monospace;"
+                    "color:var(--ps-text-mono);font-family:Menlo,Consolas,monospace;"
                     "width:60px;text-align:right"
                 )
 
@@ -1198,12 +1210,13 @@ def _render_detail_panel(state: AppState) -> None:
         if isinstance(ev_map, dict) and selected in ev_map:
             ev_val = float(ev_map[selected])
             ui.label(f"EV: {ev_val:+.2f} mBB").style(
-                "color:#9ad29a;font-family:Menlo,Consolas,monospace;"
+                "color:var(--ps-accent-ev);font-family:Menlo,Consolas,monospace;"
                 "margin-top:6px"
             ).mark(f"preflop-chart-detail-ev-{selected}")
         else:
             ui.label("EV: (not exported by engine in v1.x)").style(
-                "color:#7a7a7a;font-style:italic;font-size:11px;margin-top:6px"
+                "color:var(--ps-text-fainter);font-style:italic;"
+                "font-size:11px;margin-top:6px"
             )
 
 

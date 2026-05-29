@@ -407,9 +407,13 @@ def _action_token(action: int) -> str:
 # -- NiceGUI label rendering --------------------------------------------------
 
 # Color thresholds for inline action badges (Pio palette per spec §7.3).
-_FOLD_COLOR: str = "rgb(220,40,40)"
-_CALL_COLOR: str = "rgb(220,200,40)"
-_RAISE_COLOR: str = "rgb(40,180,60)"
+# F04: these badges are inline-HTML TEXT, so a saturated yellow/green washes
+# out on a light tree row. Route them through the theme action-text vars
+# (defined in ``ui/app.py``) — dark resolves to the exact Pio RYG verbatim,
+# light darkens for contrast. The Pio convention is preserved either way.
+_FOLD_COLOR: str = "var(--ps-act-fold)"
+_CALL_COLOR: str = "var(--ps-act-call)"
+_RAISE_COLOR: str = "var(--ps-act-raise)"
 
 
 def _action_color(action: int) -> str:
@@ -467,13 +471,13 @@ def tree_node_to_dict(
     lock_indicator = ""
     if node.id in locked_keys:
         lock_indicator = (
-            '<span style="color:#d4a017;margin-right:6px" '
+            '<span style="color:var(--ps-accent-lock);margin-right:6px" '
             'title="Locked strategy applied at this infoset">🔒</span>'
         )
     label_html = (
         f"{lock_indicator}"
-        f'<span style="color:#f0f0f0;font-weight:500">{node.label}</span>'
-        f'<span style="color:#9a9a9a">{summary}</span>'
+        f'<span style="color:var(--ps-text);font-weight:500">{node.label}</span>'
+        f'<span style="color:var(--ps-text-faint)">{summary}</span>'
         f'<span style="margin-left:10px">{"".join(badges)}</span>'
     )
     out: dict[str, object] = {
@@ -822,17 +826,19 @@ def _render_tree_body(state: AppState, ui_mod: Any) -> None:
     with (
         ui_mod.element("div")
         .mark("tree-browser")
-        .style("background:#0f0f0f;padding:10px;border-radius:6px")
+        .style("background:var(--ps-panel-bg);padding:10px;border-radius:6px")
     ):
         if tree is None:
             ui_mod.label("Solve to populate the decision tree").style(
-                "color:#9a9a9a;font-style:italic"
+                "color:var(--ps-text-faint);font-style:italic"
             )
             return
 
         # Reach-filter slider (Q6 locked: default 0.01).
         with ui_mod.row().style("align-items:center;gap:10px;margin-bottom:6px"):
-            ui_mod.label("Reach >=").style("color:#dcdcdc;font-weight:600")
+            ui_mod.label("Reach >=").style(
+                "color:var(--ps-text-label);font-weight:600"
+            )
             slider = ui_mod.slider(
                 min=0.0,
                 max=1.0,
@@ -846,7 +852,7 @@ def _render_tree_body(state: AppState, ui_mod: Any) -> None:
                 "leaves with <1% reach (study-irrelevant)."
             )
             reach_label = ui_mod.label(f"{tree.min_reach:.2f}").style(
-                "font-family:Menlo,Consolas,monospace;color:#a8c8e8"
+                "font-family:Menlo,Consolas,monospace;color:var(--ps-accent-reach)"
             )
 
         # PR 24b §3.5: "Lock current node" button. The button affordance
@@ -880,7 +886,7 @@ def _render_tree_body(state: AppState, ui_mod: Any) -> None:
             lock_btn.on_click(_open_lock_for_current)
 
             ui_mod.label(f"{len(state.current_spot.locked_strategies)} lock(s)").style(
-                "color:#9a9a9a;font-size:11px"
+                "color:var(--ps-text-faint);font-size:11px"
             ).mark("tree-lock-count-label")
 
         @ui_mod.refreshable  # type: ignore[untyped-decorator]
@@ -893,12 +899,12 @@ def _render_tree_body(state: AppState, ui_mod: Any) -> None:
             reach_label.text = f"{tree.min_reach:.2f}"
             with ui_mod.row().style("gap:8px;margin-bottom:4px"):
                 ui_mod.label(f"Visible: {rendered.visible} nodes").style(
-                    "color:#9a9a9a;font-size:11px"
+                    "color:var(--ps-text-faint);font-size:11px"
                 )
                 if rendered.truncated > 0:
                     badge = ui_mod.label(f"{rendered.truncated} hidden by cap")
                     badge.mark("tree-truncation-badge")
-                    badge.style("color:#d09a4a;font-size:11px")
+                    badge.style("color:var(--ps-accent-warn);font-size:11px")
             widget = ui_mod.tree(rendered.nodes, label_key="label", node_key="id")
             # NiceGUI markers via `.mark()`; the `no-selection-unset` token
             # is a Quasar prop and must stay on `.props()`.

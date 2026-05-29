@@ -79,6 +79,11 @@ def build_page() -> None:
     # optional dep gated by the ``[ui]`` extra owned by Agent C).
     from nicegui import ui
 
+    # F04: inject the single theme-aware stylesheet (CSS custom properties
+    # per Quasar body--light / body--dark) BEFORE any view renders so the
+    # ``var(--ps-*)`` neutrals the views reference resolve on first paint.
+    _inject_theme_stylesheet()
+
     state = get_state()
 
     # The legacy "Mock mode" banner was removed once the real-solver
@@ -522,6 +527,114 @@ def _show_about_dialog() -> None:
     dialog.open()
 
 
+# F04 (light-mode legibility): a single theme-aware stylesheet, injected
+# once per page build. Quasar flips ``body.body--light`` / ``body.body--dark``
+# the instant the header AUTO/LIGHT/DARK toggle changes ``ui.dark_mode``, so
+# scoping the CSS custom properties on those body classes gives an instant,
+# re-render-free recolor. The view modules reference these vars from their
+# inline ``.style(...)`` strings (e.g. ``background:var(--ps-panel-bg)``).
+#
+# DARK values are the pre-F04 hardcoded literals VERBATIM so dark mode stays
+# pixel-identical (it is the default + already legible). LIGHT values are the
+# legible inversions. The dark set is also placed on bare ``body`` as the
+# fallback so an unclassed/transitional state still matches the documented
+# dark default rather than flashing unstyled.
+#
+# Only NEUTRAL chrome (panel/strip backgrounds, borders, near-white vs near-
+# black text, muted captions) is themed here. The SEMANTIC strategy colors
+# (RYG action blend, white→blue range-input gradient) are computed in Python
+# and locked by smoke tests (``cell_color``, ``DISPLAY_PALETTE``,
+# ``INPUT_PALETTE``); they are saturated enough to read on both a near-black
+# and a light-grey cell, so they are intentionally NOT overridden. The few
+# semantic ACCENT text colors that washed out on white (EV green, reach blue,
+# lock gold, truncation amber) get a per-theme var so they darken on light.
+_THEME_STYLESHEET: str = """
+body, body.body--dark {
+  --ps-panel-bg: #0f0f0f;
+  --ps-strip-bg: #1b1b1b;
+  --ps-input-bg: #181818;
+  --ps-track-bg: #0a0a0a;
+  --ps-border-strong: #303030;
+  --ps-border-soft: #2a2a2a;
+  --ps-cell-border: #1f1f1f;
+  --ps-cell-border-sel: #ffffff;
+  /* In-range cell base fill for the no-strategy-mass ("unsolved MIX")
+     state. ``cell_color`` blends to rgb(0,0,0) when fold=call=raise=0;
+     dark mode keeps that pure-black look verbatim, light mode swaps in a
+     pale fill so the cell + its dark label stay legible. SOLVED cells keep
+     their semantic RYG blend (untouched). */
+  --ps-cell-bg: #000000;
+  --ps-text: #f0f0f0;
+  --ps-text-strong: #f5f5f5;
+  --ps-text-dim: #e8e8e8;
+  --ps-text-muted: #aaaaaa;
+  --ps-text-faint: #9a9a9a;
+  --ps-text-fainter: #7a7a7a;
+  --ps-text-mono: #cccccc;
+  --ps-text-label: #cfcfcf;
+  --ps-cell-label: #f5f5f5;
+  --ps-cell-tag: #1a1a1a;
+  --ps-cell-tag-blocked: #dadada;
+  --ps-faded: #3a3a3a;
+  --ps-accent-ev: #9ad29a;
+  --ps-accent-reach: #a8c8e8;
+  --ps-accent-lock: #d4a017;
+  --ps-accent-warn: #d09a4a;
+  /* Semantic action TEXT (tree badges + legend glyphs). Dark = the Pio RYG
+     verbatim; light darkens them so yellow/green text clears white. The
+     filled-cell blend (cell_color) is unaffected — these are text-only. */
+  --ps-act-raise: rgb(40,180,60);
+  --ps-act-call: rgb(220,200,40);
+  --ps-act-fold: rgb(220,40,40);
+}
+body.body--light {
+  --ps-panel-bg: #fafafa;
+  --ps-strip-bg: #f2f2f2;
+  --ps-input-bg: #f4f4f5;
+  --ps-track-bg: #e4e4e7;
+  --ps-border-strong: #c4c4c4;
+  --ps-border-soft: #d4d4d4;
+  --ps-cell-border: #d4d4d4;
+  --ps-cell-border-sel: #1a1a1a;
+  --ps-cell-bg: #ececec;
+  --ps-text: #1a1a1a;
+  --ps-text-strong: #111111;
+  --ps-text-dim: #222222;
+  --ps-text-muted: #555555;
+  --ps-text-faint: #6b6b6b;
+  --ps-text-fainter: #8a8a8a;
+  --ps-text-mono: #3a3a3a;
+  --ps-text-label: #333333;
+  --ps-cell-label: #1a1a1a;
+  --ps-cell-tag: #1a1a1a;
+  --ps-cell-tag-blocked: #444444;
+  --ps-faded: #d8d8d8;
+  --ps-accent-ev: #1f7a3d;
+  --ps-accent-reach: #1e64dc;
+  --ps-accent-lock: #9a6b00;
+  --ps-accent-warn: #a85f12;
+  --ps-act-raise: rgb(22,120,45);
+  --ps-act-call: rgb(150,120,0);
+  --ps-act-fold: rgb(200,30,30);
+}
+"""
+
+
+def _inject_theme_stylesheet() -> None:
+    """Inject the F04 theme-aware CSS custom properties for this page.
+
+    ``ui.add_css`` appends the block to the current page's ``<head>``.
+    ``build_page`` runs once per ``@ui.page('/')`` request, so this adds
+    exactly one copy per page load (a fresh head per request — no
+    cross-request accumulation). Called before any view renders so the
+    ``var(--ps-*)`` neutrals resolve on first paint rather than flashing
+    unstyled.
+    """
+    from nicegui import ui
+
+    ui.add_css(_THEME_STYLESHEET)
+
+
 def _build_theme_toggle(state: AppState) -> None:
     """Build the Auto / Light / Dark toggle in the header."""
     from nicegui import ui
@@ -531,9 +644,14 @@ def _build_theme_toggle(state: AppState) -> None:
     def _on_change(e: Any) -> None:
         state.prefs.dark_mode = str(e.value)
         save_state()
-        # NiceGUI 2.x: ui.dark_mode().value accepts True/False/None.
         dark = {"auto": None, "light": False, "dark": True}[state.prefs.dark_mode]
         ui.dark_mode().value = dark
+        # NiceGUI 3.x: a fresh ``ui.dark_mode()`` created inside an event
+        # handler does not reliably broadcast to the client, so the theme
+        # only ever applied on page load via the persisted pref. Flip Quasar
+        # directly here (verified: ``Quasar.Dark.set`` toggles live).
+        _js = "'auto'" if dark is None else ("true" if dark else "false")
+        ui.run_javascript(f"Quasar.Dark.set({_js})")
 
     ui.toggle(
         options,
