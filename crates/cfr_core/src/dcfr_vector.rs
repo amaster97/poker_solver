@@ -83,6 +83,17 @@ use crate::hunl::{HUNLConfig, HUNLState};
 use crate::hunl_eval::Strength;
 use crate::simd;
 
+thread_local! {
+    /// Per-thread prefix-sum scratch for [`terminal_value_vector_ie`].
+    ///
+    /// Reused across every IE terminal eval on this thread (cleared and
+    /// resized in-place), so the opt-in IE path never allocates per call.
+    /// Thread-local so each rayon worker on the parallel chance path owns
+    /// its own buffer with no cross-thread borrow. Never allocated unless
+    /// the IE path runs (`CFR_TERMINAL_IE` set).
+    static TLS_IE_SCRATCH: std::cell::RefCell<Vec<f64>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 // ---------------------------------------------------------------------------
 // HIGH-2 follow-up: terminal-leaf precomputation cache.
 //
@@ -114,6 +125,17 @@ use crate::simd;
 /// index by `node_idx` directly without a side-map.
 pub(crate) struct TerminalCache {
     pub(crate) leaves: Vec<LeafCacheEntry>,
+    /// Board-independent fold blocker unions, present iff the inclusion-
+    /// exclusion terminal evaluator (`CFR_TERMINAL_IE`) is enabled for
+    /// this solve. `fold_blockers[up][hp]` lists the deduped opp hand
+    /// indices that share at least one card with player `up`'s hand
+    /// `hp` (opp = `1 - up`). `None` when the flag is unset — zero
+    /// default memory cost.
+    ///
+    /// Computed once per `up` because the fold blocker set depends only
+    /// on hole cards (not on the leaf/board), so it is identical for
+    /// every Fold leaf in the tree.
+    pub(crate) fold_blockers: Option<[Vec<Vec<u32>>; 2]>,
 }
 
 pub(crate) enum LeafCacheEntry {
@@ -134,14 +156,53 @@ pub(crate) enum LeafCacheEntry {
         win_payoff: [[f64; 2]; 2],
         /// Per-update_player tie payoff (split pot).
         tie_payoff: [f64; 2],
+        /// Inclusion-exclusion precompute, present iff `CFR_TERMINAL_IE`
+        /// is enabled. `None` (a null pointer — no allocation, no compute
+        /// cost) when the flag is unset. Boxed so the enum's inline size
+        /// stays small on the flag-off (default) path. One entry per
+        /// update_player perspective.
+        ie: Option<Box<[ShowdownIE; 2]>>,
     },
+}
+
+/// Per-(update_player) inclusion-exclusion precompute for one Showdown
+/// leaf. Enables an O(N + N·B) showdown evaluation (prefix-sum over
+/// sorted opp strengths, minus per-hand blocker corrections) in place of
+/// the O(N²) per-pair scan.
+///
+/// Algorithm: Noam Brown poker_solver vector_eval.cpp
+/// build_cache/showdown_values/fold_values (MIT, (c) 2025 Noam Brown).
+pub(crate) struct ShowdownIE {
+    /// Opp hand indices sorted ascending by opp `Strength`. Length `n_op`.
+    pub(crate) sorted_idx: Vec<u32>,
+    /// `range_start[hp]` = count of opp hands strictly weaker than
+    /// player hand `hp` (partition_point on the sorted strengths).
+    pub(crate) range_start: Vec<u32>,
+    /// `range_end[hp]` = count of opp hands weaker-or-equal to `hp`.
+    /// `[range_start, range_end)` is the tie band.
+    pub(crate) range_end: Vec<u32>,
+    /// Deduped blocker opp idxs (sharing a card with `hp`) that are
+    /// strictly WEAKER than `hp` (player wins vs these).
+    pub(crate) blk_less: Vec<Vec<u32>>,
+    /// Deduped blocker opp idxs that TIE `hp`.
+    pub(crate) blk_equal: Vec<Vec<u32>>,
+    /// Deduped blocker opp idxs that are strictly STRONGER than `hp`
+    /// (player loses vs these).
+    pub(crate) blk_greater: Vec<Vec<u32>>,
 }
 
 impl TerminalCache {
     /// Build a per-leaf cache for every terminal in `tree`. Showdown
     /// leaves are evaluated once per player; Fold leaves only need their
     /// chip-flow precomputed (no per-hand evaluation needed).
-    pub(crate) fn build(tree: &BettingTree, ctx: &EvalContext) -> Self {
+    ///
+    /// `terminal_ie`: when `true`, additionally precompute the
+    /// inclusion-exclusion data ([`ShowdownIE`] per Showdown leaf, plus a
+    /// board-independent fold-blocker union) used by
+    /// [`terminal_value_vector_ie`]. When `false` (default), no IE data is
+    /// built — `ie` fields stay `None` and `fold_blockers` stays `None`,
+    /// so the flag-off path carries zero added memory/compute cost.
+    pub(crate) fn build(tree: &BettingTree, ctx: &EvalContext, terminal_ie: bool) -> Self {
         let mut leaves: Vec<LeafCacheEntry> = Vec::with_capacity(tree.nodes.len());
         for node in &tree.nodes {
             match node {
@@ -203,16 +264,160 @@ impl TerminalCache {
                             strength_p[p].push(Strength::evaluate_7(&seven));
                         }
                     }
+                    let ie = if terminal_ie {
+                        Some(Box::new([
+                            build_showdown_ie(&strength_p, ctx, 0),
+                            build_showdown_ie(&strength_p, ctx, 1),
+                        ]))
+                    } else {
+                        None
+                    };
                     leaves.push(LeafCacheEntry::Showdown {
                         strength: strength_p,
                         win_payoff,
                         tie_payoff,
+                        ie,
                     });
                 }
                 _ => leaves.push(LeafCacheEntry::NonTerminal),
             }
         }
-        Self { leaves }
+        let fold_blockers = if terminal_ie {
+            Some([
+                build_fold_blockers(ctx, 0),
+                build_fold_blockers(ctx, 1),
+            ])
+        } else {
+            None
+        };
+        Self {
+            leaves,
+            fold_blockers,
+        }
+    }
+}
+
+/// Board-independent fold-blocker union for player `up` (opp = `1 - up`).
+///
+/// `out[hp]` = deduped opp hand indices sharing ≥1 card with player `up`'s
+/// hand `hp`. Depends only on hole cards, so it is computed once and
+/// reused for every Fold leaf (which has constant-in-holes utility).
+///
+/// Algorithm: Noam Brown poker_solver vector_eval.cpp build_cache
+/// (card_to_indices + epoch-stamped dedup) (MIT, (c) 2025 Noam Brown).
+fn build_fold_blockers(ctx: &EvalContext, up: usize) -> Vec<Vec<u32>> {
+    let op = 1 - up;
+    let n_op = ctx.hand_count[op];
+    let n_up = ctx.hand_count[up];
+
+    // Card encoding is `rank*4 + suit`, range [8, 59] (NOT [0, 51]), so
+    // size the table to 64 to hold every legal card int.
+    let mut card_to_idx: [Vec<u32>; 64] = std::array::from_fn(|_| Vec::new());
+    for (idx, hole) in ctx.hole[op].iter().enumerate() {
+        card_to_idx[hole[0] as usize].push(idx as u32);
+        card_to_idx[hole[1] as usize].push(idx as u32);
+    }
+
+    let mut out: Vec<Vec<u32>> = Vec::with_capacity(n_up);
+    // Epoch-stamp dedup: the {c0,c1} opp hand appears in BOTH card lists,
+    // so guard each idx with the per-hand `stamp` (never clearing `seen`).
+    // `stamp` starts at 1 so it differs from the all-zero initial `seen`.
+    let mut seen: Vec<u32> = vec![0u32; n_op];
+    for (stamp, hole) in (1_u32..).zip(ctx.hole[up].iter()) {
+        let mut blocked: Vec<u32> = Vec::new();
+        for &card in hole.iter() {
+            for &idx in &card_to_idx[card as usize] {
+                if seen[idx as usize] != stamp {
+                    seen[idx as usize] = stamp;
+                    blocked.push(idx);
+                }
+            }
+        }
+        out.push(blocked);
+    }
+    out
+}
+
+/// Per-(update_player) inclusion-exclusion precompute for one Showdown
+/// leaf. `strength_p[p][h]` is the precomputed 7-card strength for player
+/// `p`'s hand `h`; `up` is the perspective player (opp = `1 - up`).
+///
+/// Algorithm: Noam Brown poker_solver vector_eval.cpp build_cache
+/// (MIT, (c) 2025 Noam Brown). Sorts opp strengths, derives strength
+/// partition points via binary search, and partitions each player hand's
+/// deduped blocker union by relative strength.
+fn build_showdown_ie(strength_p: &[Vec<Strength>; 2], ctx: &EvalContext, up: usize) -> ShowdownIE {
+    let op = 1 - up;
+    let n_op = ctx.hand_count[op];
+    let n_up = ctx.hand_count[up];
+    let s_up = &strength_p[up];
+    let s_op = &strength_p[op];
+
+    // Opp indices sorted ascending by opp strength. `Strength(u64)`
+    // derives Ord, so we sort by it directly.
+    let mut sorted_idx: Vec<u32> = (0..n_op as u32).collect();
+    sorted_idx.sort_unstable_by_key(|&i| s_op[i as usize]);
+    let strengths_sorted: Vec<Strength> =
+        sorted_idx.iter().map(|&i| s_op[i as usize]).collect();
+
+    // Strength partition points per player hand.
+    let mut range_start: Vec<u32> = Vec::with_capacity(n_up);
+    let mut range_end: Vec<u32> = Vec::with_capacity(n_up);
+    for &sp in s_up.iter() {
+        let start = strengths_sorted.partition_point(|&s| s < sp);
+        let end = strengths_sorted.partition_point(|&s| s <= sp);
+        range_start.push(start as u32);
+        range_end.push(end as u32);
+    }
+
+    // card -> opp idxs, for the blocker union. Card encoding is
+    // `rank*4 + suit`, range [8, 59], so size the table to 64.
+    let mut card_to_idx: [Vec<u32>; 64] = std::array::from_fn(|_| Vec::new());
+    for (idx, hole) in ctx.hole[op].iter().enumerate() {
+        card_to_idx[hole[0] as usize].push(idx as u32);
+        card_to_idx[hole[1] as usize].push(idx as u32);
+    }
+
+    let mut blk_less: Vec<Vec<u32>> = Vec::with_capacity(n_up);
+    let mut blk_equal: Vec<Vec<u32>> = Vec::with_capacity(n_up);
+    let mut blk_greater: Vec<Vec<u32>> = Vec::with_capacity(n_up);
+    // Epoch-stamp dedup so the {c0,c1} opp hand is counted exactly once.
+    // `stamp` starts at 1 so it differs from the all-zero initial `seen`.
+    let mut seen: Vec<u32> = vec![0u32; n_op];
+    for (stamp, (hp, hole)) in (1_u32..).zip(ctx.hole[up].iter().enumerate()) {
+        let sp = s_up[hp];
+        let mut less: Vec<u32> = Vec::new();
+        let mut equal: Vec<u32> = Vec::new();
+        let mut greater: Vec<u32> = Vec::new();
+        for &card in hole.iter() {
+            for &idx in &card_to_idx[card as usize] {
+                if seen[idx as usize] != stamp {
+                    seen[idx as usize] = stamp;
+                    let so = s_op[idx as usize];
+                    // blk_less = opp WEAKER => player WINS (win_self).
+                    // blk_greater = opp STRONGER => player LOSES (win_opp).
+                    if so < sp {
+                        less.push(idx);
+                    } else if so > sp {
+                        greater.push(idx);
+                    } else {
+                        equal.push(idx);
+                    }
+                }
+            }
+        }
+        blk_less.push(less);
+        blk_equal.push(equal);
+        blk_greater.push(greater);
+    }
+
+    ShowdownIE {
+        sorted_idx,
+        range_start,
+        range_end,
+        blk_less,
+        blk_equal,
+        blk_greater,
     }
 }
 
@@ -669,7 +874,12 @@ impl VectorDCFR {
                 vec![1.0; eval_ctx.hand_count[1]],
             ),
         };
-        let terminal_cache = TerminalCache::build(tree, eval_ctx);
+        // Read `CFR_TERMINAL_IE` ONCE per solve (mirroring `rayon_enabled`).
+        // When set, the inclusion-exclusion terminal evaluator is used and
+        // its precompute is built into the cache; when unset, no IE data is
+        // built and the legacy cached path runs unchanged.
+        let terminal_ie = terminal_ie_enabled();
+        let terminal_cache = TerminalCache::build(tree, eval_ctx, terminal_ie);
         // v1.10 PR-3 — build the RunoutCache once at solve-start so the
         // flop-level walker can reuse its scratch buffers across all
         // iterations. When the tree has no depth==2 chance template
@@ -725,6 +935,7 @@ impl VectorDCFR {
                     &mut self.infosets,
                     0,
                     rayon_enabled,
+                    terminal_ie,
                     &self.has_chance_template,
                     &mut runout_cache,
                 );
@@ -746,6 +957,7 @@ impl VectorDCFR {
                     &mut self.infosets,
                     0,
                     rayon_enabled,
+                    terminal_ie,
                     &self.has_chance_template,
                     &mut runout_cache,
                 );
@@ -793,6 +1005,13 @@ impl VectorDCFR {
 /// for future arena-based scratch reuse. Empty / all-false outside
 /// `BettingTreeMode::TemplateExtract`.
 ///
+/// `terminal_ie`: when `true`, terminal leaves are evaluated with the
+/// O(N + N·B) inclusion-exclusion evaluator (`terminal_value_vector_ie`)
+/// instead of the O(N²) cached scan. Read once per solve from
+/// `CFR_TERMINAL_IE` and threaded UNCHANGED through the whole traversal
+/// (including rayon workers). When `false` the legacy dispatch (uncached
+/// vs cached) is byte-for-byte unchanged.
+///
 /// `runout_cache`: pre-allocated scratch buffers for v1.10 PR-3's
 /// `traverse_flop_chance_recursive` (the flop-level chance walker).
 /// When the chance node has a `chance_depth == 2` template AND the
@@ -817,6 +1036,7 @@ pub(crate) fn traverse_recursive_with_parallel(
     infosets: &mut [Option<VectorInfosetData>],
     offset: usize,
     allow_parallel: bool,
+    terminal_ie: bool,
     has_chance_template: &[bool],
     runout_cache: &mut RunoutCache,
 ) -> Vec<f64> {
@@ -841,7 +1061,20 @@ pub(crate) fn traverse_recursive_with_parallel(
         FlatNode::Fold { .. } | FlatNode::Showdown { .. } => {
             let opp_player = 1 - update_player;
             let _t = prof_start!();
-            let r = if std::env::var("CFR_VECTOR_NO_TERMINAL_CACHE").is_ok() {
+            let r = if terminal_ie {
+                TLS_IE_SCRATCH.with(|cell| {
+                    let mut scratch = cell.borrow_mut();
+                    terminal_value_vector_ie(
+                        &terminal_cache.leaves[node_idx],
+                        terminal_cache.fold_blockers.as_ref(),
+                        eval_ctx,
+                        update_player,
+                        opp_player,
+                        reach_opp,
+                        &mut scratch,
+                    )
+                })
+            } else if std::env::var("CFR_VECTOR_NO_TERMINAL_CACHE").is_ok() {
                 terminal_value_vector(node, eval_ctx, update_player, opp_player, reach_opp)
             } else {
                 terminal_value_vector_cached(
@@ -900,6 +1133,7 @@ pub(crate) fn traverse_recursive_with_parallel(
                     reach_opp,
                     infosets,
                     offset,
+                    terminal_ie,
                     has_chance_template,
                 );
                 arena.reset_to(entry_mark);
@@ -944,6 +1178,7 @@ pub(crate) fn traverse_recursive_with_parallel(
                     infosets,
                     offset,
                     allow_parallel,
+                    terminal_ie,
                     has_chance_template,
                     runout_cache,
                 );
@@ -974,6 +1209,7 @@ pub(crate) fn traverse_recursive_with_parallel(
                     infosets,
                     offset,
                     allow_parallel,
+                    terminal_ie,
                     has_chance_template,
                     runout_cache,
                 );
@@ -1002,6 +1238,7 @@ pub(crate) fn traverse_recursive_with_parallel(
                     infosets,
                     offset,
                     false,
+                    terminal_ie,
                     has_chance_template,
                     runout_cache,
                 );
@@ -1068,6 +1305,7 @@ pub(crate) fn traverse_recursive_with_parallel(
                         infosets,
                         offset,
                         allow_parallel,
+                        terminal_ie,
                         has_chance_template,
                         runout_cache,
                     );
@@ -1141,6 +1379,7 @@ pub(crate) fn traverse_recursive_with_parallel(
                     infosets,
                     offset,
                     allow_parallel,
+                    terminal_ie,
                     has_chance_template,
                     runout_cache,
                 );
@@ -1485,6 +1724,7 @@ pub(crate) fn traverse_flop_chance_recursive(
     infosets: &mut [Option<VectorInfosetData>],
     offset: usize,
     _allow_parallel: bool,
+    terminal_ie: bool,
     has_chance_template: &[bool],
     runout_cache: &mut RunoutCache,
 ) -> Vec<f64> {
@@ -1529,6 +1769,7 @@ pub(crate) fn traverse_flop_chance_recursive(
             infosets,
             offset,
             /* allow_parallel = */ false,
+            terminal_ie,
             has_chance_template,
             runout_cache,
         );
@@ -1589,6 +1830,7 @@ pub(crate) fn traverse_with_infosets(
     reach_opp: &[f64],
     infosets: &mut [Option<VectorInfosetData>],
     offset: usize,
+    terminal_ie: bool,
     has_chance_template: &[bool],
 ) -> Vec<f64> {
     let mut local_cache = RunoutCache::empty();
@@ -1612,6 +1854,7 @@ pub(crate) fn traverse_with_infosets(
             infosets,
             offset,
             /* allow_parallel = */ false,
+            terminal_ie,
             has_chance_template,
             &mut local_cache,
         );
@@ -1659,6 +1902,7 @@ fn traverse_turn_chance_recursive(
     infosets: &mut [Option<VectorInfosetData>],
     offset: usize,
     allow_parallel: bool,
+    terminal_ie: bool,
     has_chance_template: &[bool],
     runout_cache: &mut RunoutCache,
 ) -> Vec<f64> {
@@ -1685,6 +1929,7 @@ fn traverse_turn_chance_recursive(
             infosets,
             offset,
             allow_parallel,
+            terminal_ie,
             has_chance_template,
             runout_cache,
         );
@@ -1918,6 +2163,7 @@ fn terminal_value_vector_cached(
             strength,
             win_payoff,
             tie_payoff,
+            ..
         } => {
             // Showdown leaf: per-pair outcome from precomputed `Strength`
             // comparison. Branch on `s_p` vs `s_o` and pick the right
@@ -1958,6 +2204,119 @@ fn terminal_value_vector_cached(
         }
     }
     out
+}
+
+/// **Inclusion-exclusion terminal-leaf value vector (opt-in, `CFR_TERMINAL_IE`).**
+///
+/// Same math as [`terminal_value_vector_cached`] (the parity reference)
+/// but evaluated in O(N + N·B) instead of O(N²): a prefix sum over opp
+/// reach reordered by sorted opp strength gives each player hand's
+/// win/tie/lose weight against the WHOLE opp range, then per-hand blocker
+/// corrections subtract the (small) set of opp hands sharing a card.
+///
+/// Requires the leaf to carry IE precompute (built by `TerminalCache::build`
+/// with `terminal_ie = true`) and `terminal_cache.fold_blockers` to be
+/// `Some` for Fold leaves. Both hold whenever `CFR_TERMINAL_IE` is set.
+///
+/// `scratch` is reused across calls to avoid per-call allocation; it is
+/// resized to `n_op + 1` and overwritten each call.
+///
+/// Reorders FP summation relative to the cached path, so output is
+/// tolerance-close (NOT bit-exact) to [`terminal_value_vector_cached`].
+///
+/// Algorithm: Noam Brown poker_solver vector_eval.cpp
+/// build_cache/showdown_values/fold_values (MIT, (c) 2025 Noam Brown).
+fn terminal_value_vector_ie(
+    leaf: &LeafCacheEntry,
+    fold_blockers: Option<&[Vec<Vec<u32>>; 2]>,
+    ctx: &EvalContext,
+    update_player: usize,
+    opp_player: usize,
+    reach_opp: &[f64],
+    scratch: &mut Vec<f64>,
+) -> Vec<f64> {
+    let update_hands = ctx.hand_count[update_player];
+    let mut out = vec![0.0_f64; update_hands];
+
+    match leaf {
+        LeafCacheEntry::Fold { payoff } => {
+            let util = payoff[update_player];
+            let union = &fold_blockers
+                .expect("terminal_value_vector_ie: fold_blockers must be built (CFR_TERMINAL_IE)")
+                [update_player];
+            let total: f64 = reach_opp.iter().sum();
+            if total <= 0.0 {
+                return out;
+            }
+            for (hp, slot) in out.iter_mut().enumerate() {
+                let mut blocked = 0.0_f64;
+                for &idx in &union[hp] {
+                    blocked += reach_opp[idx as usize];
+                }
+                *slot = util * (total - blocked);
+            }
+        }
+        LeafCacheEntry::Showdown {
+            win_payoff,
+            tie_payoff,
+            ie,
+            ..
+        } => {
+            let ie = ie
+                .as_ref()
+                .expect("terminal_value_vector_ie: showdown IE must be built (CFR_TERMINAL_IE)");
+            let ie = &ie[update_player];
+            // Hoist payoff constants identically to the cached fn.
+            let win_self = win_payoff[update_player][update_player];
+            let win_opp = win_payoff[opp_player][update_player];
+            let tie = tie_payoff[update_player];
+
+            let n_op = ie.sorted_idx.len();
+            scratch.clear();
+            scratch.reserve(n_op + 1);
+            scratch.push(0.0);
+            // Prefix sum over opp reach reordered by ascending strength.
+            for i in 0..n_op {
+                let prev = scratch[i];
+                scratch.push(prev + reach_opp[ie.sorted_idx[i] as usize]);
+            }
+            let total = scratch[n_op];
+            if total <= 0.0 {
+                return out;
+            }
+
+            for (hp, slot) in out.iter_mut().enumerate() {
+                let start = ie.range_start[hp] as usize;
+                let end = ie.range_end[hp] as usize;
+                let mut win = scratch[start];
+                let mut tiew = scratch[end] - scratch[start];
+                let mut lose = total - win - tiew;
+                // Blocker corrections: remove opp hands sharing a card.
+                for &idx in &ie.blk_less[hp] {
+                    win -= reach_opp[idx as usize];
+                }
+                for &idx in &ie.blk_equal[hp] {
+                    tiew -= reach_opp[idx as usize];
+                }
+                for &idx in &ie.blk_greater[hp] {
+                    lose -= reach_opp[idx as usize];
+                }
+                *slot = win * win_self + tiew * tie + lose * win_opp;
+            }
+        }
+        LeafCacheEntry::NonTerminal => {
+            unreachable!("terminal_value_vector_ie called on a non-terminal node")
+        }
+    }
+    out
+}
+
+/// Read `CFR_TERMINAL_IE` from the environment. Returns `true` iff the
+/// variable is set to any non-empty value. Called ONCE per
+/// `VectorDCFR::solve` and threaded through the traversal (mirroring
+/// `parallel_chance_enabled`), so flag-off solves never touch the IE path.
+pub(crate) fn terminal_ie_enabled() -> bool {
+    matches!(std::env::var("CFR_TERMINAL_IE"), Ok(v) if !v.is_empty())
 }
 
 /// Build an output `HashMap<String, Vec<f64>>` matching Python's
@@ -2605,7 +2964,7 @@ mod tests {
             ctx.hole[1][0],
         ]);
         let tree = BettingTree::build_from(&placeholder);
-        let cache = TerminalCache::build(&tree, &ctx);
+        let cache = TerminalCache::build(&tree, &ctx, false);
 
         // Random-ish reach vectors for both players (deterministic so the
         // test is reproducible; we want non-uniform reach to stress the
@@ -2659,6 +3018,142 @@ mod tests {
                                 c.to_bits(),
                                 "bit-mismatch at node={node_idx} update={update_player} \
                                  hp={hp}: uncached={u} cached={c}"
+                            );
+                        }
+                        compared += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(compared > 0, "no terminal leaves walked — fixture broken");
+    }
+
+    /// Parity gate for the inclusion-exclusion terminal evaluator
+    /// (`CFR_TERMINAL_IE`): `terminal_value_vector_ie` must match
+    /// `terminal_value_vector_cached` to FP tolerance on every Fold and
+    /// Showdown leaf of `tiny_river_rvr()` (full C(47,2)=1081-hand river,
+    /// NON-UNIFORM reach), for BOTH update_player perspectives.
+    ///
+    /// Tolerance (not bit-identity): the IE path reorders summation
+    /// (prefix sum over sorted strengths minus blocker corrections), so
+    /// it is FP-close, not bit-exact. Per element:
+    ///   `|ie - cached| <= 1e-9 + 1e-9 * max(|ie|, |cached|)`.
+    ///
+    /// Also exercises the dedup edge case: in `from_root` both players
+    /// share an identical hole list, so for every player hand `hp` there
+    /// is an opp hand whose two cards coincide with `hp`'s — that opp idx
+    /// appears in BOTH of `hp`'s card lists and MUST be counted exactly
+    /// once. We assert this structurally on the IE buckets in addition to
+    /// the numeric parity (a double-count would skew bucket weights).
+    #[test]
+    fn ie_matches_cached_terminal_value() {
+        let cfg = tiny_river_rvr();
+        let initial = HUNLState::initial(std::sync::Arc::new(cfg.clone()));
+        let ctx = EvalContext::from_root(&initial);
+        let placeholder = initial.clone_with_hole_cards([ctx.hole[0][0], ctx.hole[1][0]]);
+        let tree = BettingTree::build_from(&placeholder);
+        // IE data built ONLY here (flag-on equivalent); the cached cache
+        // (flag-off) is the parity reference.
+        let cache_ie = TerminalCache::build(&tree, &ctx, true);
+        let cache_ref = TerminalCache::build(&tree, &ctx, false);
+
+        let mk_reach = |n: usize, seed: u64| -> Vec<f64> {
+            let mut r = vec![0.0_f64; n];
+            let mut state = seed;
+            for v in r.iter_mut() {
+                state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = state;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^= z >> 31;
+                *v = (z as f64) / (u64::MAX as f64);
+            }
+            r
+        };
+        let reach_p0 = mk_reach(ctx.hand_count[0], 42);
+        let reach_p1 = mk_reach(ctx.hand_count[1], 99);
+
+        // --- Structural dedup edge case on the IE precompute itself. ---
+        // For each Showdown leaf and update_player, find a player hand
+        // `hp` whose exact cards match an opp hand `ho`; assert that opp
+        // idx appears EXACTLY ONCE across the three IE blocker buckets.
+        let mut dedup_checked = 0usize;
+        for entry in &cache_ie.leaves {
+            if let LeafCacheEntry::Showdown { ie: Some(ie_arr), .. } = entry {
+                for up in 0..2 {
+                    let op = 1 - up;
+                    let ie = &ie_arr[up];
+                    // hp == ho works because both players share the same
+                    // hole list (identical exact-match cards) under
+                    // `from_root`. Pick a representative hand index.
+                    let hp = ctx.hand_count[up] / 2;
+                    let exact = ctx.hole[up][hp];
+                    // Locate the opp idx with identical cards.
+                    let twin = ctx.hole[op]
+                        .iter()
+                        .position(|&h| h == exact)
+                        .expect("opp must hold the identical exact-match hand under from_root");
+                    let twin = twin as u32;
+                    let count = ie.blk_less[hp].iter().filter(|&&i| i == twin).count()
+                        + ie.blk_equal[hp].iter().filter(|&&i| i == twin).count()
+                        + ie.blk_greater[hp].iter().filter(|&&i| i == twin).count();
+                    assert_eq!(
+                        count, 1,
+                        "dedup edge case: exact-match opp idx {twin} for hp={hp} \
+                         up={up} appears {count}× across IE blocker buckets (must be 1)"
+                    );
+                    // The exact-match hand has equal strength, so it lands
+                    // in blk_equal.
+                    assert!(
+                        ie.blk_equal[hp].contains(&twin),
+                        "exact-match opp idx must be in the tie bucket"
+                    );
+                    dedup_checked += 1;
+                }
+            }
+        }
+        assert!(dedup_checked > 0, "no Showdown leaf exercised the dedup edge case");
+
+        // --- Numeric parity over every terminal leaf. ---
+        let tol = |a: f64, b: f64| 1e-9 + 1e-9 * a.abs().max(b.abs());
+        let mut scratch: Vec<f64> = Vec::new();
+        let mut compared = 0usize;
+        for (node_idx, node) in tree.nodes.iter().enumerate() {
+            match node {
+                FlatNode::Fold { .. } | FlatNode::Showdown { .. } => {
+                    for update_player in 0..2 {
+                        let opp_player = 1 - update_player;
+                        let reach_opp = if opp_player == 0 { &reach_p0 } else { &reach_p1 };
+                        let cached = terminal_value_vector_cached(
+                            &cache_ref.leaves[node_idx],
+                            &ctx,
+                            update_player,
+                            opp_player,
+                            reach_opp,
+                        );
+                        let ie = terminal_value_vector_ie(
+                            &cache_ie.leaves[node_idx],
+                            cache_ie.fold_blockers.as_ref(),
+                            &ctx,
+                            update_player,
+                            opp_player,
+                            reach_opp,
+                            &mut scratch,
+                        );
+                        assert_eq!(
+                            ie.len(),
+                            cached.len(),
+                            "size mismatch node={node_idx} update={update_player}"
+                        );
+                        for (hp, (i, c)) in ie.iter().zip(cached.iter()).enumerate() {
+                            let diff = (i - c).abs();
+                            assert!(
+                                diff <= tol(*i, *c),
+                                "IE/cached divergence at node={node_idx} \
+                                 update={update_player} hp={hp}: ie={i} cached={c} \
+                                 diff={diff} tol={}",
+                                tol(*i, *c),
                             );
                         }
                         compared += 1;
@@ -3207,5 +3702,107 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// End-to-end parity gate for the inclusion-exclusion terminal
+    /// evaluator (`CFR_TERMINAL_IE`): a FULL multi-iteration river solve
+    /// must produce the same average-strategy map with the flag OFF
+    /// (legacy `terminal_value_vector_cached`) and ON (the O(N + N·B)
+    /// `terminal_value_vector_ie` path). Belt-and-suspenders over the
+    /// per-leaf gate `ie_matches_cached_terminal_value`: this proves the
+    /// two terminal evaluators stay in lockstep across the WHOLE CFR
+    /// recursion (reach-weighted regret/strategy accumulation over many
+    /// iterations), not just at a single leaf.
+    ///
+    /// **Isolation contract.** `CFR_TERMINAL_IE` is process-global and
+    /// cargo runs tests on parallel threads, so this test must be run
+    /// with `--test-threads=1` (or `--exact` in isolation). It does the
+    /// baseline (flag UNSET) solve FIRST, then sets the var, then removes
+    /// it, leaving the environment clean for any subsequent test.
+    ///
+    /// We boost `postflop_raise_cap`/`include_all_in` so the tree has
+    /// genuine multi-action infosets (the default `tiny_river_rvr` tree
+    /// collapses to single-action rows that are `[1.0]` regardless of the
+    /// terminal-value math, which would make the comparison vacuous).
+    ///
+    /// Tolerance `|a-b| <= 1e-6 + 1e-6 * max(|a|,|b|)` is looser than the
+    /// per-leaf 1e-9 because FP error accumulates across iterations, but
+    /// is still tight enough that any real divergence in the IE path
+    /// fails the gate rather than being masked.
+    #[test]
+    fn ie_full_solve_matches_cached() {
+        let mut cfg = tiny_river_rvr();
+        // Multi-action tree so the terminal-value path actually shapes a
+        // non-degenerate strategy (mirrors `regret_init_noise_epsilon_
+        // perturbs_strategy`'s rationale).
+        cfg.postflop_raise_cap = 3;
+        cfg.include_all_in = true;
+        let iters: u32 = 40;
+
+        // Step 1 — baseline with the flag UNSET (legacy cached path).
+        std::env::remove_var("CFR_TERMINAL_IE");
+        let out_off = solve_range_vs_range_postflop(&cfg, iters, 1.5, 0.0, 2.0)
+            .expect("flag-off solve must complete");
+
+        // Step 2 — same solve with the flag SET (inclusion-exclusion path).
+        std::env::set_var("CFR_TERMINAL_IE", "1");
+        let out_on = solve_range_vs_range_postflop(&cfg, iters, 1.5, 0.0, 2.0)
+            .expect("flag-on solve must complete");
+        // Restore clean environment regardless of the assertions below.
+        std::env::remove_var("CFR_TERMINAL_IE");
+
+        assert_eq!(
+            out_off.iterations, out_on.iterations,
+            "iteration counts must match"
+        );
+        assert_eq!(
+            out_off.average_strategy.len(),
+            out_on.average_strategy.len(),
+            "IE flag must not change the infoset key-set size \
+             ({} off vs {} on)",
+            out_off.average_strategy.len(),
+            out_on.average_strategy.len(),
+        );
+
+        let mut max_abs_diff = 0.0_f64;
+        let mut worst_key = String::new();
+        for (key, probs_off) in &out_off.average_strategy {
+            let probs_on = out_on
+                .average_strategy
+                .get(key)
+                .unwrap_or_else(|| panic!("IE flag dropped infoset key: {key:?}"));
+            assert_eq!(
+                probs_off.len(),
+                probs_on.len(),
+                "key {key:?}: action_count mismatch ({} off vs {} on)",
+                probs_off.len(),
+                probs_on.len(),
+            );
+            for (a, (po, pn)) in probs_off.iter().zip(probs_on.iter()).enumerate() {
+                let diff = (po - pn).abs();
+                if diff > max_abs_diff {
+                    max_abs_diff = diff;
+                    worst_key = format!("{key:?}#{a}");
+                }
+                let tol = 1e-6 + 1e-6 * po.abs().max(pn.abs());
+                assert!(
+                    diff <= tol,
+                    "IE-vs-cached strategy divergence at {key:?} action {a}: \
+                     off={po} on={pn} diff={diff} tol={tol}"
+                );
+            }
+        }
+        // Surface the max observed value-difference (visible with
+        // `cargo test -- --nocapture`).
+        println!(
+            "ie_full_solve_matches_cached: compared {} infosets over {} iters; \
+             max |off - on| = {max_abs_diff:e} at {worst_key}",
+            out_off.average_strategy.len(),
+            iters,
+        );
+        assert!(
+            max_abs_diff.is_finite(),
+            "max diff must be finite (got {max_abs_diff})"
+        );
     }
 }

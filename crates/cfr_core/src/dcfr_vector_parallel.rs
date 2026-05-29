@@ -147,6 +147,10 @@ fn derive_child_ranges(tree: &BettingTree, children: &[usize]) -> Vec<ChildRange
 /// `par_iter().collect()` preserves source order), so the reduction is
 /// performed sequentially against the collected child-value vectors.
 /// That keeps the reduction deterministic and bit-stable across runs.
+///
+/// `terminal_ie` is threaded unchanged into each worker's
+/// `traverse_with_infosets` so workers use the inclusion-exclusion
+/// terminal evaluator iff `CFR_TERMINAL_IE` was set at solve start.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn parallel_traverse_chance(
     tree: &BettingTree,
@@ -164,6 +168,7 @@ pub(crate) fn parallel_traverse_chance(
     reach_opp: &[f64],
     infosets: &mut [Option<VectorInfosetData>],
     offset: usize,
+    terminal_ie: bool,
     has_chance_template: &[bool],
 ) -> Vec<f64> {
     let update_hands = eval_ctx.hand_count[update_player];
@@ -249,6 +254,7 @@ pub(crate) fn parallel_traverse_chance(
                 &reach_opp_vec,
                 shard,
                 range.start,
+                terminal_ie,
                 has_chance_template,
             )
         })
