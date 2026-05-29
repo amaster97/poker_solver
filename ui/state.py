@@ -232,6 +232,15 @@ def classify_combo(card1: Card, card2: Card) -> str:
 _RANKS_RUST_ORDER: str = "23456789TJQKA"
 _SUITS_RUST_ORDER: str = "shdc"
 
+# Engine-default preflop action menu (opens 2/3/4/5bb, reraise ×2/3/4/5).
+# These mirror ``ui.views.preflop_chart._DEFAULT_OPEN_SIZES_BB`` /
+# ``_DEFAULT_RERAISE_MULTIPLIERS`` and the FIXED menu the Premium-A blueprint
+# asset was solved against. They are the bypass reference for U05: a click
+# whose parsed sizes match these can be served from the blueprint; a click
+# that diverges must route to a live ``solve_hunl_preflop_rvr`` solve.
+_DEFAULT_PREFLOP_OPEN_SIZES_BB: tuple[float, ...] = (2.0, 3.0, 4.0, 5.0)
+_DEFAULT_PREFLOP_RERAISE_MULTIPLIERS: tuple[float, ...] = (2.0, 3.0, 4.0, 5.0)
+
 
 def _split_preflop_key(key: str) -> tuple[str | None, str]:
     """Split a Rust preflop key into (hole_str, history_suffix).
@@ -1189,6 +1198,29 @@ class SolveRunner:
         )
         self._thread.start()
 
+    def _preflop_custom_sizes_bypass_blueprint(self) -> bool:
+        """Whether the pending action sizes diverge from the engine defaults.
+
+        The input panel stashes the parsed open-size / reraise-multiplier
+        lists on ``self._pending_preflop_chart_opens`` / ``_mults`` at click
+        time (``None`` until the first click → treated as defaults). When
+        either diverges from the FIXED engine menu the blueprint was solved
+        against, the blueprint cannot honor the user's sizes and we must route
+        to a live solve (U05). Comparison is exact + order-sensitive, matching
+        how the engine keys its action menu.
+        """
+        from ui.blueprint_router import custom_sizes_bypass_note
+
+        return (
+            custom_sizes_bypass_note(
+                open_sizes=self._pending_preflop_chart_opens,
+                reraise_multipliers=self._pending_preflop_chart_mults,
+                default_open_sizes=_DEFAULT_PREFLOP_OPEN_SIZES_BB,
+                default_reraise_multipliers=_DEFAULT_PREFLOP_RERAISE_MULTIPLIERS,
+            )
+            is not None
+        )
+
     def try_blueprint_preflop_chart(
         self,
         *,
@@ -1219,9 +1251,39 @@ class SolveRunner:
         """
         from ui.blueprint_router import (
             BlueprintRouter,
+            RouteInfo,
             SourceLabel,
+            custom_sizes_bypass_note,
             default_asset_dir,
         )
+
+        # U05: custom action sizes must bypass the blueprint and route to a
+        # LIVE Rust solve. The blueprint asset is solved against the FIXED
+        # engine action menu (opens 2/3/4/5bb, reraise ×2/3/4/5); if the user
+        # edits the open sizes or reraise multipliers, serving the blueprint
+        # would silently show the DEFAULT menu instead of what they typed. The
+        # input panel stashes the parsed lists on the runner at click time, so
+        # we compare them against the engine defaults here and decline the
+        # blueprint (return False) when they diverge — the caller then falls
+        # through to ``start_preflop_chart`` → ``solve_hunl_preflop_rvr``.
+        if self._preflop_custom_sizes_bypass_blueprint():
+            note = custom_sizes_bypass_note(
+                open_sizes=self._pending_preflop_chart_opens,
+                reraise_multipliers=self._pending_preflop_chart_mults,
+                default_open_sizes=_DEFAULT_PREFLOP_OPEN_SIZES_BB,
+                default_reraise_multipliers=_DEFAULT_PREFLOP_RERAISE_MULTIPLIERS,
+            )
+            with self._lock:
+                # Pre-solve LIVE hint so the badge reads "live solve" rather
+                # than a stale blueprint label; the worker overwrites the
+                # wall_time on completion.
+                self.preflop_route_info = RouteInfo(
+                    source=SourceLabel.LIVE,
+                    wall_time_s=0.0,
+                    confidence=(note or "custom action sizes")
+                    + " (live solve required)",
+                )
+            return False
 
         router = BlueprintRouter.from_asset_dir(default_asset_dir())
         if router is None:
@@ -1248,6 +1310,30 @@ class SolveRunner:
             for k in action_map:
                 if k not in action_labels:
                     action_labels.append(k)
+
+        # U06: surface the DEEPER lines (BB vs open / 3-bet / 4-bet / limped
+        # pots), not just the root open. The blueprint shard carries every
+        # infoset history; extract them all so the line selector unlocks for a
+        # blueprint route exactly as it does for a live solve. Keyed by the
+        # shard's ``"||p|<tokens>"`` history suffix (the same shape
+        # ``available_preflop_lines`` / ``preflop_chart_summary_for_line`` and
+        # ``ui.views.preflop_chart.preflop_line_label`` consume). On any
+        # failure we fall back to root-only so the chart still renders.
+        by_line: dict[str, dict[str, dict[str, float]]] = {}
+        try:
+            by_line = router.extract_all_lines(stack_bb=int(stack_bb), ante=ante)
+        except Exception:  # noqa: BLE001
+            logger.exception("blueprint extract_all_lines failed; root-only")
+        # The router's lookup_chart already resolved the root per_class; key it
+        # under the normalized root history so the root line is always present
+        # and selectable even if all-line extraction returned nothing.
+        from ui.blueprint_router import _normalize_root_history
+
+        root_hist = _normalize_root_history(action_history)
+        if root_hist not in by_line and info.per_class:
+            by_line[root_hist] = info.per_class
+        available_lines = sorted(by_line, key=lambda h: (len(h), h))
+
         chart_result: dict[str, Any] = {
             "per_class": info.per_class,
             "actions": action_labels,
@@ -1258,6 +1344,8 @@ class SolveRunner:
                 len(m) for m in info.per_class.values()
             ),
             "source": info.source.value,
+            "available_lines": available_lines,
+            "_by_line": by_line,
         }
         with self._lock:
             self.preflop_chart_result = chart_result
@@ -1375,7 +1463,9 @@ class SolveRunner:
         UI can show "running -> done" transitions.
         """
         try:
-            from poker_solver import _rust as _rust_module  # type: ignore[import-untyped]
+            from poker_solver import (
+                _rust as _rust_module,  # type: ignore[import-untyped]
+            )
         except (ImportError, ModuleNotFoundError) as exc:
             with self._lock:
                 self.error = ImportError(
@@ -3010,10 +3100,7 @@ def _serialize_spot_ranges(spot: Spot) -> dict[str, Any] | None:
     """
 
     def _has_fractional(rw: RangeWithFreqs) -> bool:
-        for combo in rw.base_range.combos:
-            if rw.frequency_of(combo) < 1.0:
-                return True
-        return False
+        return any(rw.frequency_of(combo) < 1.0 for combo in rw.base_range.combos)
 
     if not any(_has_fractional(rw) for rw in spot.ranges):
         return None

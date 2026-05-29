@@ -155,9 +155,18 @@ async def test_solve_button_dispatches_rust_binding(
     isolated_state_dir: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Clicking Solve invokes ``_rust.solve_hunl_preflop_rvr`` (mocked
-    here) with the iteration count + action menu the input panel
-    populates."""
+    """Clicking Solve with CUSTOM action sizes invokes
+    ``_rust.solve_hunl_preflop_rvr`` (mocked here) with the iteration count
+    + the edited action menu.
+
+    The default ``(100BB, no-ante)`` spot is covered by the Premium-A
+    blueprint asset, so a *default*-sizes click is correctly served from the
+    blueprint and never touches Rust (the blueprint-vs-live fast path). To
+    assert the LIVE dispatch this test edits the open sizes to a non-default
+    value (``2.5,3.5,4.5``), which diverges from the FIXED menu the blueprint
+    was solved against. Per U05 that divergence MUST bypass the blueprint and
+    route to a live ``solve_hunl_preflop_rvr`` solve — which is exactly what
+    we verify here."""
     calls: dict[str, Any] = {"count": 0, "args": None}
 
     def _fake_solve(
@@ -203,6 +212,13 @@ async def test_solve_button_dispatches_rust_binding(
     monkeypatch.setattr(poker_solver, "_rust", fake_module, raising=False)
 
     await user.open("/")
+    # Edit the open sizes to a NON-default value so the click diverges from
+    # the blueprint's fixed menu (2/3/4/5bb) and is forced down the live Rust
+    # path (U05). Without this the default-100BB spot is blueprint-covered and
+    # Solve would (correctly) serve from the asset without touching Rust.
+    opens_field = user.find(marker="preflop-chart-open-sizes")
+    opens_field.clear()
+    opens_field.type("2.5,3.5,4.5")
     # Click Solve directly (no need to navigate the tab — the button is
     # in the page DOM regardless of which tab is visible).
     user.find(marker="preflop-chart-solve-button").click()
@@ -216,11 +232,12 @@ async def test_solve_button_dispatches_rust_binding(
     )
     # Iteration count was forwarded.
     assert calls["args"]["iterations"] >= 1
-    # Action menu defaults made it through (None means engine defaults).
-    # The input panel pre-fills both fields with comma-separated lists, so
-    # they should be parsed lists, not None.
+    # The edited action menu made it through as parsed lists (not None).
+    # ``opens`` reflects the custom value we typed; ``mults`` keeps the
+    # pre-filled default list. Both arrive as lists, not None.
     assert isinstance(calls["args"]["opens"], list)
     assert isinstance(calls["args"]["mults"], list)
+    assert calls["args"]["opens"] == [2.5, 3.5, 4.5]
 
 
 # ---------------------------------------------------------------------------
