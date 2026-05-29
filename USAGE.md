@@ -16,7 +16,9 @@ utilities), §5.6 (aggregator vs. true-Nash range-vs-range, v1.7.0+),
 + interpolation + postflop subgame chaining), §5.10 (CLI
 BB-normalization — canonical `--pot N --stack M` flags), and updates
 §7b with the v1.10 postflop optimization stream (live flop subgame
-unblocked from OOM). v1.9.0 was drafted but never tagged — the
+now completes — was OOM/jetsam-killed — though full-range flop
+memory still exceeds budget, deferred to v1.11). v1.9.0 was drafted
+but never tagged — the
 Premium-A blueprint feature train (PRs #149/#154/#158/#160 B10
 per-combo train; PRs #163/#167/#171/#173/#174/#175/#176/#177/#178/#181/#182
 Premium-A blueprint chain; PRs #165/#170 engine fixes; PR #152 CLI
@@ -854,16 +856,26 @@ solve: it looks up the per-player 169-class strategy → expands to
 1326-combo reach via suit-symmetric weighting → live-solves the
 postflop street with the expanded reaches as priors via the
 vector-form CFR backend. v1.10's arena allocator + vector-form turn /
-flop forward walks + opt-in rayon (task #70) unblock the live **flop**
-path from the v1.9.0 OOM-killed state; target is flop top_k=169 in
-<120 s on the J7o A♦8♥9♦ 40 BB reference fixture. Turn and river
-live-solves are fast today (sub-second to seconds on the Rust tier).
+flop forward walks + opt-in rayon (task #70) take the live **flop**
+path from OOM/jetsam-killed (~5 min) to a solve that **completes**
+and is bit-identical to the reference — a real wall-time +
+reliability win. **However, full-range flop is still memory-bound:
+RSS is ~6.7 GB at top_k=4 and ~7.7 GB+ at top_k=169 (where it does
+NOT finish). The "flop top_k=169 in <120 s AND ≤ 1 GB RSS" gate is
+NOT met.** PR-3 shipped the wall-time half (scratch-buffer reuse);
+the board-tree memory collapse is deferred to v1.11. Use the flop
+path for small-`top_k` / small-range spots that fit in memory. Turn
+and river live-solves are real interactive wins (sub-second to
+seconds on the Rust tier; exact measured wall/RSS at top_k 4/15/50:
+[PENDING bench — fill from docs/v1_10_perf_bench_results.jsonl]).
 
 ```python
 from poker_solver.blueprint_subgame import solve_postflop_from_blueprint
 
 # v1.10.0 — chained flop solve, blueprint preflop priors.
-# Turn / river were live-solvable in v1.9.0; flop is new in v1.10.0.
+# Turn / river were live-solvable in v1.9.0; the flop path completes
+# in v1.10.0 for small-top_k / small-range spots (full-range flop is
+# memory-bound — see honest framing below).
 result = solve_postflop_from_blueprint(
     loader=loader,
     stack_bb=40, ante="none", action_history="b300c",
@@ -897,12 +909,26 @@ result = router.solve(stack_bb=67, ante="none", hand="AKs",
 print(result.backend)   # "interp" (67 BB is between 60 and 80 anchors)
 ```
 
-**Honest perf framing.** The v1.10.0 flop subgame target (<120 s at
-top_k=169) is the **unblock** of the v1.9.0 OOM state — actual
-12-cell benchmark numbers (top_k ∈ {4, 15, 50, 169} × {flop, turn,
-river}) land in `docs/v1_10_perf_bench_results.jsonl` once PR-1 and
-PR-3 of task #70 merge. Treat flop top_k=169 as "not OOM" rather
-than "interactive" until the published benchmark confirms otherwise.
+**Honest perf framing.** The v1.10.0 flop subgame now **completes**
+(was OOM/jetsam-killed at ~5 min) and the result is bit-identical to
+the reference — that is the correctness + wall-time win PR-3
+(`cda3eeb`) delivered. **The original "flop top_k=169 in <120 s AND
+≤ 1 GB RSS" headline gate is NOT achieved and is not claimed.**
+Measured: full-range flop solve uses **~6.7 GB RSS at top_k=4** and
+spikes to **~7.7 GB+ at top_k=169, where it does NOT finish**.
+Flop-solve memory is dominated by the materialized board chance tree
+(45 turn × 44 river betting subtrees) + per-node infoset storage at
+full combo width — **independent of `top_k`**, so lowering `top_k`
+does not bring it under budget. The board-tree memory collapse was
+scaffolded but deferred (`RunoutCache::runout_values` allocated but
+never read; audit S-4); full-range flop memory optimization is
+deferred to v1.11
+([`docs/v1_11_postflop_deeper_optimization_research.md`](docs/v1_11_postflop_deeper_optimization_research.md)).
+Turn / river live-solves are real interactive wins (exact measured
+wall/RSS at top_k 4/15/50:
+[PENDING bench — fill from docs/v1_10_perf_bench_results.jsonl]).
+Full honest narrative:
+[`docs/v1_10_perf_benchmark_2026-05-28.md`](docs/v1_10_perf_benchmark_2026-05-28.md).
 
 ---
 
@@ -1192,10 +1218,14 @@ short pushfold (§3a) and fixed-cards postflop subgames (§3b). The
 v1.10 postflop optimization stream (task #70 — arena allocator,
 vector-form turn + flop forward walks, opt-in rayon, perf harness)
 materially improves the third regime (full-range postflop subgame on
-the vector-form Nash path) by unblocking the live flop subgame from
-the v1.9.0 OOM-killed state. The §5.2 aggregator remains the
-production-safe workaround for cases where wall-time matters more
-than joint-Nash semantics.
+the vector-form Nash path): turn and river are real interactive
+wins, and the live **flop** subgame now **completes** (was
+OOM/jetsam-killed at ~5 min) for small-`top_k` / small-range spots.
+**Full-range flop, however, remains memory-bound (~6.7 GB+ RSS;
+does not finish at top_k=169) — full-range optimization is deferred
+to v1.11.** The §5.2 aggregator remains the production-safe
+workaround for full-range flop charts and for cases where wall-time
+matters more than joint-Nash semantics.
 
 Regime guidance at a glance (v1.10.0):
 
@@ -1210,17 +1240,29 @@ Regime guidance at a glance (v1.10.0):
   vector-form Nash path (PR #114 + PR #170 vector-form BR walk +
   PR #190 vector-form turn forward walk). Interactive on the Rust
   tier today.
-- **Flop subgame spots:** **unblocked in v1.10.0.** v1.9.0 OOM-killed
-  at ~2.3 GB RSS within 5 min wall on the J7o A♦8♥9♦ 40 BB
+- **Flop subgame spots:** **completes in v1.10.0 (small ranges),
+  but full-range remains memory-bound.** The pre-v1.10 flop path was
+  OOM/jetsam-killed at the ~5-min mark on the J7o A♦8♥9♦ 40 BB
   reference fixture; v1.10's task #70 PR train (arena allocator,
-  vector-form flop forward walk, opt-in rayon) targets top_k=169
-  in <120 s wall, RSS ≤ 1 GB. **Treat as "not OOM" rather than
-  "interactive" until the 12-cell benchmark in
-  `docs/v1_10_perf_bench_results.jsonl` publishes final numbers.**
-  Opt-in `CFR_RAYON_CHANCE=1` env var gives an empirical 4.79×
-  speedup on flop top_k=169 (14-core M-series; PR #189). Aggregator
-  (§5.2) remains the recommended path for production-scale flop
-  charts where joint-Nash is not the gating constraint.
+  vector-form flop forward walk `cda3eeb`, opt-in rayon) makes the
+  flop solve **complete** and bit-identical to the reference — a
+  real wall-time + reliability win. **The original "flop top_k=169
+  in <120 s AND ≤ 1 GB RSS" gate is NOT met.** Measured: full-range
+  flop solve uses ~6.7 GB RSS at top_k=4 and ~7.7 GB+ at top_k=169
+  (where it does NOT finish). Flop-solve memory is dominated by the
+  materialized board chance tree (45 turn × 44 river betting
+  subtrees) + per-node infoset storage at full combo width —
+  **independent of `top_k`**, so lowering `top_k` does not bring it
+  under budget. PR-3 shipped the wall-time half (scratch-buffer
+  reuse); the board-tree memory collapse was scaffolded but deferred
+  to v1.11 (`docs/v1_11_postflop_deeper_optimization_research.md`).
+  The opt-in `CFR_RAYON_CHANCE=1` env var enables rayon-parallel
+  chance branches; PR #189's microbench reported ~4.79× on flop
+  top_k=169 (14-core M-series), but treat that as a TARGET until the
+  formal 12-cell bench run confirms it. **For full-range flop charts
+  today, use the §5.2 aggregator** — the live flop Nash path is only
+  usable for small-`top_k` / small-range spots that fit in memory.
+  Full honest narrative: `docs/v1_10_perf_benchmark_2026-05-28.md`.
 
 - **`initial_hole_cards=()` on flop / turn / river is slow.** The
   full-range chance-enum path (§5.1) walks the lossless combo tree at
@@ -1265,14 +1307,20 @@ The three items most likely to matter for users beyond v1.10.0:
   (PR #178), but the ad-hoc **Solve** button on the standalone tab
   still uses the PR 10a mock fixtures. Mechanical swap of
   `ui/mock_solver.py` for the real solver call pending.
-- **v1.10 perf benchmark publication.** The 12-cell wall + RSS
-  matrix (top_k ∈ {4, 15, 50, 169} × {flop, turn, river}) on the
-  J7o A♦8♥9♦ 40 BB reference fixture lands in
-  `docs/v1_10_perf_bench_results.jsonl` once PR-1 (arena allocator)
-  and PR-3 (vector-form flop forward walk) merge. Until then, treat
-  the "<120 s flop top_k=169" target as a target, not a measured
-  number. Per-PR re-runs of the canonical diff-test scaffold
-  (PR #188) HARD-FAIL on bit-identity regressions.
+- **v1.10 turn/river perf benchmark publication.** All four v1.10
+  perf PRs are merged: PR-1 (arena+LTO, `eb5b4d0`/#197), PR-2
+  (vector turn, `7fa4d73`/#190), PR-3 (vector flop, `cda3eeb`), and
+  PR-4 (rayon, `f5ec665`/#189). The turn/river half of the 12-cell
+  wall + RSS matrix (top_k ∈ {4, 15, 50} × {turn, river}) on the
+  J7o A♦8♥9♦ 40 BB reference fixture is **PENDING a bench run** and
+  will land in `docs/v1_10_perf_bench_results.jsonl`. The flop rows
+  are already measured and **honest**: the flop solve completes but
+  full-range RSS is ~6.7 GB+ (does not finish at top_k=169); the
+  "<120 s AND ≤ 1 GB" gate is NOT met and full-range memory
+  optimization is deferred to v1.11. See
+  `docs/v1_10_perf_benchmark_2026-05-28.md` for the honest narrative.
+  Per-PR re-runs of the canonical diff-test scaffold (PR #188)
+  HARD-FAIL on bit-identity regressions.
 
 Further out: 3-handed postflop (PR 12) is a post-v1 stretch goal;
 CFR has no convergence guarantee for ≥3 players, so it would ship as

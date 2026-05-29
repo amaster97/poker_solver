@@ -13,16 +13,19 @@ In-flight on feature branches; not yet merged to `main`.
 - v1.5/v2 follow-ups (Q3 exploitability slider reframe; range-based
   dealing; Rust callbacks; full-tree preflop).
 
-## [1.10.0] - 2026-MM-DD
+## [1.10.0] - 2026-05-28
 
 Combined v1.9.0 Premium-A + v1.10 postflop optimization release.
 Three user-visible capabilities ship together: (1) instant 27-cell
-precomputed preflop blueprint lookup, (2) realtime postflop subgame
-solving across **all three streets** — flop, turn, and river — with
-the live flop path unblocked by v1.10's arena + vector-form chance
-compaction, and (3) the W2.3 Sarah deep-stack turn workflow at
-strict-PASS via the vector-form best-response walk. Persona table:
-**17/0/0/0** (was 14/2/1/0 at v1.8.x).
+precomputed preflop blueprint lookup, (2) postflop subgame solving
+across all three streets — turn and river are real interactive
+wins; the live **flop** path now **completes** (was OOM/jetsam-killed
+at ~5 min) via v1.10's arena + vector-form chance compaction,
+though full-range flop memory still exceeds budget (~6.7 GB+ RSS,
+deferred to v1.11) — and (3) the W2.3 Sarah deep-stack turn
+workflow at strict-PASS via the vector-form best-response walk.
+Persona table: **17/0/0/0** (was 14/2/1/0 at v1.8.x). See the
+honest perf framing in `docs/v1_10_perf_benchmark_2026-05-28.md`.
 
 The release pulls the v1.9.0 draft (Premium-A blueprint feature
 chain; the v1.9.0 tag was never cut) plus the four v1.10 postflop
@@ -165,41 +168,113 @@ subgame OOM that was the marquee v1.9 carry-over. See
 analysis and `docs/rust_optimization_ledger.md` for the cumulative
 speedup table.
 
-- **Thread-local arena allocator** (PR-1, when it lands — branch
-  `feat-v1-10-1-arena-lto`). Replaces per-call `vec![0.0; N]`
-  allocations in `dcfr_vector.rs::traverse` (lines 635, 661,
-  689-690, 741-742, 766) with a thread-local `BumpArena` that
-  hands out reusable `&mut [f64]` slices under RAII stack
-  discipline. Reference pattern: `references/code/postflop-solver/
-  src/alloc.rs` (AGPL, no code copy). Target: 3-5× wall reduction
-  on flop, near-zero quality risk; bit-identical at 1e-12 EV.
-- **Vector-form turn forward walk** (PR [#190][v110-pr190]) — adds
-  chance-template extraction at tree-build time + specialized
-  chance-node dispatch on `VectorDCFR`. Bit-identical to main at
-  1e-12 strategy tolerance (the dispatch hook performs the same
-  arithmetic as the legacy chance arm); IEEE 754 summation order
-  preserved. Ships the structural framework PR-3 needs to broadcast
-  scratch buffers across river-card chance branches.
-- **Vector-form flop forward walk** (PR-3, when it lands — branch
-  to be cut). Extends PR-2's template framework to double chance
-  compaction (turn × river); flop's outer chance loop does
-  45 × 44 = 1980 weighted sums against the cached river template
-  instead of recursing the full subtree. Target: **flop top_k=169
-  in <120 s wall, RSS ≤ 1 GB** (vs current OOM).
-- **Opt-in rayon parallel chance branches** (PR [#189][v110-pr189],
-  merge `f5ec665`) — parallelizes iteration over 45 turn cards via
-  `rayon::par_iter`. Each thread walks one turn subtree and
-  contributes regret/strategy_sum deltas through disjoint mutable
-  access (`split_at_mut`; no `unsafe`). **Empirical: 4.79× speedup
-  on flop top_k=169 (14-core M-series)**; river single-threaded
-  overhead -5.8% (within ±10% noise). Opt-in via
-  `CFR_RAYON_CHANCE=1` env var; canonical single-threaded path is
-  bit-identical to the pre-rayon implementation at Δ=0.000e+00
-  across all 25 existing diff tests + 9 new rayon-path fixtures
-  in `tests/test_vector_rayon_diff.py`.
-- **Flop subgame top_k=169 in <120 s** (target) — unblocks the v1.9
-  carry-over. Previously OOM-killed at ~2.3 GB RSS within 5 minutes
-  wall on the J7o A♦8♥9♦ 40 BB / 169-class reference fixture.
+- **Thread-local arena allocator + LTO + skip-discount-recompute**
+  (PR-1, merge `eb5b4d0`, GitHub PR #197). New
+  `crates/cfr_core/src/arena.rs` adds `BumpArena` — a single
+  `Vec<f64>`-backed stack-disciplined allocator (`alloc_zeroed` +
+  `reset_to` + `BumpScope` RAII guard, safe Rust, no `unsafe`).
+  `dcfr_vector.rs::traverse_recursive_with_parallel` +
+  `traverse_with_infosets` thread the arena through, replacing the
+  per-call `vec![0.0; N]` strategy + action_values allocations with
+  arena slots (`next_reach` stays heap-Vec — smaller, allocator
+  reuse outpaces arena overhead). I3: skips the post-discount
+  strategy recompute when the discount was a no-op (bit-identical to
+  the unconditional recompute). `Cargo.toml` adds `lto = "fat"` +
+  `codegen-units = 1` to the workspace `[profile.release]`.
+  Reference pattern: `references/code/postflop-solver/src/alloc.rs`
+  (AGPL, no code copy). Target: 3-5× wall reduction on flop
+  (TARGET — measured numbers pending the formal bench run, see
+  `docs/v1_10_perf_bench_results.jsonl`); near-zero quality risk.
+  Bit-identical gate passed at 1e-12 strategy / 1e-9 EV (19 library
+  tests + the Python diff-test suite).
+- **Vector-form turn forward walk** (PR-2, merge `7fa4d73`,
+  GitHub PR [#190][v110-pr190]) — adds a `BettingTreeMode`
+  (`Standard` / `TemplateExtract`) and `BettingTree::build_with_mode`;
+  `TemplateExtract` populates `BettingTree::chance_templates`
+  (out-of-band metadata, the `FlatNode` list is unchanged) for
+  chance nodes whose children share structural identity. The chance
+  arm of `traverse()` dispatches to `traverse_turn_chance` when the
+  template flag is set, else falls through to the legacy per-branch
+  recursion. Bit-identical to main at 1e-12 strategy tolerance (the
+  dispatch hook performs the same DFS-order arithmetic as the legacy
+  chance arm); IEEE 754 summation order preserved. Ships the
+  structural framework PR-3 needs to broadcast scratch buffers
+  across river-card chance branches.
+- **Vector-form flop forward walk** (PR-3, merge `cda3eeb`).
+  Extends PR-2's template framework to double chance compaction
+  (turn × river); flop's outer chance loop does 45 × 44 = 1980
+  weighted sums and reuses pre-allocated scratch buffers (a
+  per-solve `RunoutCache`) instead of allocating a fresh
+  `vec![0.0; update_hands]` per call. **What this delivers:** the
+  flop subgame now **completes** where the pre-v1.10 path was
+  OOM/jetsam-killed around the 5-minute mark from allocator churn —
+  this is a genuine wall-time + reliability win, and it is
+  **bit-identical** to the v1.10-2 reference (F4_synth synthetic
+  canary `max_diff=0.0`; 4 Rust unit tests incl.
+  `flop_template_extract_bit_identical_to_standard`; two
+  independent validators returned MATH-PRESERVED).
+  `CFR_VECTOR_FLOP_TEMPLATE=0` forces the `Standard` build mode
+  (canonical baseline). Design:
+  `docs/v1_10_pr3_flop_vector_design.md`.
+  - **Known limitation — full-range flop RSS not reduced.** PR-3
+    shipped the wall-time half (scratch-buffer reuse, design §3.3
+    "Strategy B"), **not** the memory half. The board-chance-tree
+    memory collapse (design §3.3 "Strategy A") was scaffolded but
+    **deferred**: the `RunoutCache::runout_values` pool is allocated
+    but never read (carries `#[allow(dead_code)]`; independent PR-3
+    audit finding S-4 confirmed this statically). Flop-solve memory
+    is dominated by the materialized board chance tree
+    (45 turn × 44 river betting subtrees) + per-node infoset storage
+    at full combo width, which is **independent of `top_k`**.
+    Measured: full-range flop solve uses **~6.7 GB RSS at top_k=4**
+    and spikes to **~7.7 GB+ at top_k=169, where it does NOT
+    finish** (alloc-abort / jetsam). The original v1.10 headline gate
+    "flop top_k=169 in <120 s AND ≤ 1 GB RSS" is **NOT met** and is
+    **not claimed** as achieved. Full-range flop memory optimization
+    (sparse / lazy infoset storage + board-tree templating) is
+    **deferred to v1.11** — see
+    `docs/v1_11_postflop_deeper_optimization_research.md` and the
+    honest benchmark narrative in
+    `docs/v1_10_perf_benchmark_2026-05-28.md`.
+- **Opt-in rayon parallel chance branches** (PR-4, merge `f5ec665`,
+  GitHub PR [#189][v110-pr189]) — parallelizes iteration over 45
+  turn cards via `rayon::par_iter`. Each thread walks one turn
+  subtree and contributes regret/strategy_sum deltas through
+  disjoint mutable access (`split_at_mut`; no `unsafe`). Opt-in via
+  `CFR_RAYON_CHANCE=1` env var (`Cargo.toml` adds `rayon = "1.10"`;
+  new `crates/cfr_core/src/dcfr_vector_parallel.rs`). The PR's own
+  microbench reported **~4.79× on flop top_k=169 (14-core
+  M-series), river single-thread overhead -5.8%** — TARGET-grade,
+  pending confirmation by the formal 12-cell bench run (see
+  `docs/v1_10_perf_bench_results.jsonl`); do not cite as the
+  production headline until then. The canonical single-threaded
+  path is bit-identical to the pre-rayon implementation at
+  Δ=0.000e+00 across all 25 existing diff tests + 9 new rayon-path
+  fixtures in `tests/test_vector_rayon_diff.py` (the parallel path
+  also landed bit-identical, better than the spec's loose-1e-6
+  gate, because `par_iter+collect` preserves source order and the
+  per-hand reduction stays sequential).
+
+  Example — enable the opt-in parallel path:
+
+  ```bash
+  # Default: canonical single-threaded (bit-identical reference).
+  python scripts/run_v1_10_perf_bench.py --street flop --top-k 169
+
+  # Opt in to rayon parallel chance branches (multi-core):
+  CFR_RAYON_CHANCE=1 python scripts/run_v1_10_perf_bench.py --street flop --top-k 169
+  ```
+- **Flop subgame now completes (correctness + wall-time win), but
+  full-range memory is NOT yet within budget.** The pre-v1.10 flop
+  path was OOM/jetsam-killed at the ~5-minute mark on the J7o
+  A♦8♥9♦ 40 BB / 169-class reference fixture. PR-3 makes the flop
+  solve complete and is bit-identical to the reference. **However,**
+  full-range flop RSS is still ~6.7 GB at top_k=4 and spikes to
+  ~7.7 GB+ at top_k=169 (where it does **not** finish). The
+  "top_k=169 in <120 s AND ≤ 1 GB RSS" gate is **NOT achieved**;
+  full-range flop memory reduction is deferred to v1.11. See the
+  PR-3 "Known limitation" above and
+  `docs/v1_10_perf_benchmark_2026-05-28.md`.
 - **Perf benchmark harness** (PR [#187][v110-pr187], merge
   `b5aa023`) — `scripts/run_v1_10_perf_bench.py` (Python driver)
   + `crates/cfr_core/benches/flop_subgame_perf.rs` (Rust inner
@@ -250,18 +325,29 @@ speedup table.
 
 ### Caveats — disclosed honestly
 
-- **Flop subgame live-solve unblocked.** v1.10's arena + vector
-  turn + vector flop + opt-in rayon stream takes the live flop
-  path from OOM-killed (5 min / ~2.3 GB RSS) to **flop top_k=169
-  in <120 s** target on the J7o A♦8♥9♦ 40 BB reference fixture.
-  The v1.9 carry-over "flop = blueprint-only" caveat is **resolved
-  in v1.10** (live flop ✓).
+- **Flop subgame now completes — but full-range memory still
+  exceeds budget (honest framing).** v1.10's arena + vector turn +
+  vector flop + opt-in rayon stream takes the live flop path from
+  OOM/jetsam-killed at the ~5-minute mark to a solve that
+  **completes** and is bit-identical to the reference (PR-3 wall-time
+  + reliability win). This is the half that shipped. The **memory
+  half did not**: full-range flop RSS is ~6.7 GB at top_k=4 and
+  ~7.7 GB+ at top_k=169 (does not finish). The "flop top_k=169 in
+  <120 s AND ≤ 1 GB RSS" headline gate is **NOT achieved** and is
+  not claimed. Full-range flop memory optimization is deferred to
+  v1.11 (`docs/v1_11_postflop_deeper_optimization_research.md`). Net
+  user impact: the live flop path is usable for small `top_k` /
+  small-range spots that fit in memory; full 169-class flop charts
+  remain memory-bound until v1.11. See
+  `docs/v1_10_perf_benchmark_2026-05-28.md`.
 - **Rayon parallelism is opt-in via `CFR_RAYON_CHANCE=1`**.
   Default path is the canonical single-threaded path and is
   bit-identical to the pre-rayon implementation at Δ=0.000e+00
   across all 25 existing diff tests + 9 new rayon-path fixtures.
-  When opted in: empirical 4.79× speedup on flop top_k=169
-  (14-core M-series); zero quality regression.
+  When opted in, PR #189's microbench reported ~4.79× on flop
+  top_k=169 (14-core M-series) with zero quality regression —
+  TARGET-grade until the formal 12-cell bench run confirms it
+  (`docs/v1_10_perf_bench_results.jsonl`).
 - **`top_k_per_side` is a class-level filter, not combo-level.**
   The solver internally operates on the full **1326-combo
   representation** (per-combo blocker bookkeeping is required for
@@ -321,8 +407,9 @@ B10 per-combo frequency train (PR #60 epic):
 
 v1.10 postflop optimization (task #70):
 [#186][v110-pr186], [#187][v110-pr187], [#188][v110-pr188],
-[#189][v110-pr189], [#190][v110-pr190], plus PR-1 (arena+LTO)
-and PR-3 (vector flop) when they land.
+[#189][v110-pr189], [#190][v110-pr190], PR-1 (arena+LTO,
+GitHub PR #197 / commit `eb5b4d0`), PR-3 (vector flop, commit
+`cda3eeb`).
 
 Audit / status: [#184][v110-pr184], [#191][v110-pr191].
 
