@@ -11,7 +11,7 @@ locking. Goalpost: PioSolver-class HU local solving on a MacBook.
 
 ## Status
 
-- **Latest tagged release:** v1.10.0 (2026-MM-DD) — combined v1.9.0
+- **Latest tagged release:** v1.10.0 (2026-05-28) — combined v1.9.0
   Premium-A blueprint feature train + v1.10 postflop optimization
   stream. Three user-visible capabilities ship together: (1) instant
   27-cell precomputed preflop blueprint lookup, (2) postflop subgame
