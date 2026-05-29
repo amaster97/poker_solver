@@ -61,6 +61,8 @@ __all__ = [
     "RouteInfo",
     "BlueprintRouter",
     "describe_route",
+    "describe_route_badge",
+    "custom_sizes_bypass_note",
     "default_asset_dir",
 ]
 
@@ -132,6 +134,88 @@ def describe_route(info: RouteInfo) -> str:
         f"[{info.source.value}] {info.confidence} "
         f"(wall {info.wall_time_s:.3f}s)"
     )
+
+
+def describe_route_badge(info: RouteInfo | None) -> str:
+    """Render a short, user-facing route badge for the chart header.
+
+    Unlike :func:`describe_route` (a dense ``[source] confidence (wall …)``
+    debug line), this produces the polished label the preflop-chart UI shows
+    the user so they can see at a glance what is serving the chart:
+
+      * ``"Blueprint · 100BB"`` — exact precomputed shard at an anchor depth.
+      * ``"Interpolated · 67BB ← 60+80"`` — blended between two anchors.
+      * ``"Live solve · 0.5s"`` — solved on the fly (or "running…" pre-finish).
+      * ``"Live solve required (no blueprint coverage)"`` — out-of-range depth.
+      * ``"No blueprint bundle (live only)"`` — no asset bundle on disk.
+      * ``"Not solved yet"`` — chart hasn't been triggered.
+
+    Derived faithfully from :class:`RouteInfo` fields (``source``,
+    ``stack_bb``, ``anchor_depths``, ``wall_time_s``, ``confidence``), so it
+    stays in sync with the router's actual routing decision.
+    """
+    if info is None:
+        return "Not solved yet"
+    if info.source == SourceLabel.UNAVAILABLE:
+        return f"Unavailable · {info.error or 'no data'}"
+    if info.source == SourceLabel.BLUEPRINT:
+        return f"Blueprint · {info.stack_bb}BB"
+    if info.source == SourceLabel.INTERPOLATED:
+        anchors = info.anchor_depths
+        if anchors is not None:
+            lo, hi = anchors
+            if lo == hi:
+                return f"Interpolated · {info.stack_bb}BB ← clamp {lo}"
+            return f"Interpolated · {info.stack_bb}BB ← {lo}+{hi}"
+        return f"Interpolated · {info.stack_bb}BB"
+    # LIVE
+    if "no blueprint coverage" in (info.confidence or ""):
+        return "Live solve required (no blueprint coverage)"
+    if info.wall_time_s and info.wall_time_s > 0:
+        return f"Live solve · {info.wall_time_s:.1f}s"
+    return "Live solve (running…)"
+
+
+def custom_sizes_bypass_note(
+    *,
+    open_sizes: list[float] | None,
+    reraise_multipliers: list[float] | None,
+    default_open_sizes: tuple[float, ...] | list[float],
+    default_reraise_multipliers: tuple[float, ...] | list[float],
+) -> str | None:
+    """Return a note when custom action sizes will bypass the blueprint.
+
+    The blueprint asset is solved against a FIXED action menu (the engine
+    defaults). When the user edits the open sizes or reraise multipliers so
+    they diverge from those defaults, the lookup key no longer matches any
+    precomputed shard's action menu, so the router MISSES the blueprint and
+    the chart falls back to a live solve.
+
+    Returns a one-line, user-facing explanation when a divergence is present,
+    else ``None`` (defaults in use → blueprint reachable). Comparison is
+    order-sensitive and exact (matching how the engine keys the action menu);
+    a list that merely re-orders the defaults is still treated as custom.
+    """
+
+    def _norm(xs: list[float] | None, default: tuple[float, ...] | list[float]) -> list[float]:
+        return [float(x) for x in (xs if xs else list(default))]
+
+    opens = _norm(open_sizes, default_open_sizes)
+    mults = _norm(reraise_multipliers, default_reraise_multipliers)
+    default_opens = [float(x) for x in default_open_sizes]
+    default_mults = [float(x) for x in default_reraise_multipliers]
+
+    opens_custom = opens != default_opens
+    mults_custom = mults != default_mults
+    if not opens_custom and not mults_custom:
+        return None
+    if opens_custom and mults_custom:
+        what = "open sizes + reraise multipliers"
+    elif opens_custom:
+        what = "open sizes"
+    else:
+        what = "reraise multipliers"
+    return f"Custom {what} → live solve (blueprint bypassed)"
 
 
 # ---------------------------------------------------------------------------

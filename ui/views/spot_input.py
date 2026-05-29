@@ -66,10 +66,12 @@ def render(state: AppState) -> None:
         _render_stacks_section(state)
 
         ui.separator()
-        # ----- Blinds & ante (collapsed) -----
-        with ui.expansion("Blinds & ante", icon="payments", value=False).classes(
-            "w-full"
-        ):
+        # ----- Blinds & ante (expanded by default for discoverability) -----
+        # Issue 4: users didn't realize blinds/ante were editable when this
+        # was collapsed. Open by default and label it as editable.
+        with ui.expansion(
+            "Blinds & ante (editable)", icon="payments", value=True
+        ).classes("w-full").mark("blinds-expansion"):
             _render_blinds_section(state)
 
         ui.separator()
@@ -207,7 +209,15 @@ def _render_ranges_section(state: AppState) -> None:
     """
     from nicegui import ui
 
-    ui.label("Ranges").classes("font-medium")
+    with ui.row().classes("items-center gap-1"):
+        ui.label("Ranges").classes("font-medium")
+        ui.icon("help_outline").classes("text-gray-400 text-sm")
+        ui.tooltip(
+            "Set each player's hole-card range. Click cells in the 13x13 "
+            "matrix to set frequency, or switch the Input toggle to String "
+            "to paste a PIO-style range. Use the Detail toggle to choose "
+            "whole-class (Suited/Offsuit) vs exact-suit granularity."
+        )
 
     # PR 24a §3.3 — hero seat toggle.
     with ui.row().classes("gap-2 items-center"):
@@ -475,18 +485,94 @@ def _write_user_preset(state: AppState, name: str) -> None:
 
 
 def _render_one_player_range(state: AppState, player: int) -> None:
-    """Per-player matrix + string input + combo counter."""
+    """Per-player matrix + string input + combo counter.
+
+    Two orthogonal toggles drive this panel:
+
+    * **Input mode** (``Matrix`` / ``String``): click cells in the 13x13
+      grid, or paste a PIO-style range string. Matrix is the default.
+    * **Granularity** (``Suited/Offsuit`` / ``Exact suit``): in the
+      simple ``Suited/Offsuit`` mode a click sets the WHOLE hand class
+      (e.g. all four ``AKs`` combos, or all twelve ``AKo`` combos) to one
+      frequency — the user never picks individual suits. The advanced
+      ``Exact suit`` mode opens the per-combo slider dialog so power
+      users can dial in individual suit combos. Preflop (empty board)
+      defaults to the simple mode per the UX brief.
+
+    Both granularities round-trip through ``poker_solver.range``: a class
+    token like ``AKs`` parses to its 4 suited combos and ``AKo`` to its
+    12 offsuit combos (see ``range._add_single``), so a uniform class
+    survives ``from_string``/``to_string`` losslessly at weight 1.0.
+    """
     from nicegui import ui
 
     # Mode toggle (Matrix default per spec §4.2 adopted alternative).
     mode_state: dict[str, str] = {"mode": "Matrix"}
 
-    with ui.row().classes("items-center"):
-        ui.label("Mode:").classes("text-xs")
-        mode_toggle = ui.toggle(
-            ["Matrix", "String"],
-            value=mode_state["mode"],
-        ).props("dense flat")
+    # Granularity: simple "Suited/Offsuit" (class-level) vs advanced
+    # "Exact suit" (per-combo dialog). Default to the simple mode preflop
+    # (empty board) where exact suits rarely matter; postflop keeps the
+    # same default but the advanced dialog is one right-click away.
+    gran_state: dict[str, str] = {"gran": "Suited/Offsuit"}
+
+    # ----- Input-mode + granularity toggles (made obvious per UX brief) ---
+    with ui.row().classes("items-center gap-4 flex-wrap"):
+        with ui.row().classes("items-center gap-1"):
+            ui.label("Input:").classes("text-xs font-medium")
+            mode_toggle = (
+                ui.toggle(
+                    ["Matrix", "String"],
+                    value=mode_state["mode"],
+                )
+                .props("dense unelevated color=primary")
+                .mark(f"range-mode-toggle-p{player}")
+            )
+            ui.tooltip(
+                "Matrix: click cells in the 13x13 grid to set frequency. "
+                "String: paste/type a PIO-style range (e.g. 'AA, AKs, "
+                "76s+, AKo:0.5')."
+            )
+        with ui.row().classes("items-center gap-1"):
+            ui.label("Detail:").classes("text-xs font-medium")
+            gran_toggle = (
+                ui.toggle(
+                    ["Suited/Offsuit", "Exact suit"],
+                    value=gran_state["gran"],
+                )
+                .props("dense unelevated color=primary")
+                .mark(f"range-granularity-toggle-p{player}")
+            )
+            ui.tooltip(
+                "Suited/Offsuit (simple): one click sets the whole hand "
+                "class — e.g. all of AKs or all of AKo. Exact suit "
+                "(advanced): opens a per-combo editor so you can pick "
+                "individual suit combos. Right-click a cell always opens "
+                "the exact-suit editor."
+            )
+
+    # Helper text: tell users HOW to set a range (Issue 1 discoverability).
+    helper_label = ui.label("").classes("text-xs text-gray-500 italic")
+
+    def _update_helper() -> None:
+        if mode_state["mode"] == "String":
+            helper_label.set_text(
+                "Type or paste a range string, e.g. 'AA, KK-TT, AKs, "
+                "76s+'. Switch to Matrix to click cells instead."
+            )
+        elif gran_state["gran"] == "Suited/Offsuit":
+            helper_label.set_text(
+                "Click a cell to cycle its frequency "
+                "(100% → 50% → 25% → 0%); each click sets the whole "
+                "suited/offsuit class. Right-click for exact suits · or "
+                "switch to String to paste a range."
+            )
+        else:
+            helper_label.set_text(
+                "Exact-suit mode: click a cell to open its per-combo "
+                "frequency editor (pick individual suits). Switch to "
+                "Suited/Offsuit for fast whole-class clicks, or String to "
+                "paste a range."
+            )
 
     counter_label = ui.label("").classes("text-xs font-mono")
 
@@ -506,32 +592,46 @@ def _render_one_player_range(state: AppState, player: int) -> None:
         else:
             matrix_container.style("display: none")
             string_container.style("display: block")
+        _update_helper()
 
     mode_toggle.on_value_change(_switch_mode)
+
+    def _switch_gran(e: Any) -> None:
+        gran_state["gran"] = str(e.value) or "Suited/Offsuit"
+        _update_helper()
+
+    gran_toggle.on_value_change(_switch_gran)
 
     # ----- Matrix input -----
     with matrix_container, ui.grid(columns=13).classes("gap-0 max-w-lg"):
         for _row, _col, label in enumerate_hand_classes():
+
+            def _on_cell_click(_e: Any, lbl: str = label, p: int = player) -> None:
+                # Granularity routes the click: simple Suited/Offsuit mode
+                # cycles the whole hand class in one click; Exact-suit mode
+                # opens the per-combo dialog so the user picks suits.
+                if gran_state["gran"] == "Suited/Offsuit":
+                    _cycle_cell_frequency(
+                        state, p, lbl, counter_label, _refresh_string
+                    )
+                else:
+                    _open_per_hand_dialog(
+                        state, p, lbl, counter_label, _refresh_string
+                    )
+
             cell = (
-                ui.button(
-                    label,
-                    on_click=(
-                        lambda _e, lbl=label, p=player: _cycle_cell_frequency(
-                            state, p, lbl, counter_label, _refresh_string
-                        )
-                    ),
-                )
+                ui.button(label, on_click=_on_cell_click)
                 .props("flat dense")
                 .classes("font-mono text-xs p-0")
             )
             cell.mark(f"range-matrix-cell-{label}")
             _color_input_cell(cell, state.current_spot.ranges[player], label)
 
-            # PR 24b §3.1: right-click opens the per-combo frequency
-            # dialog. NiceGUI 3.x's ``Element.on("contextmenu", ...)``
-            # subscribes to the DOM contextmenu event; the dialog
-            # exposes finer-grain control than the 4-step cycle. The
-            # default cell-click cycle remains the fast-path affordance.
+            # PR 24b §3.1: right-click ALWAYS opens the per-combo frequency
+            # dialog regardless of granularity, so exact-suit control is
+            # reachable even from the simple mode. NiceGUI 3.x's
+            # ``Element.on("contextmenu", ...)`` subscribes to the DOM
+            # contextmenu event.
             def _open_freq_dialog(_e: Any, lbl: str = label, p: int = player) -> None:
                 _open_per_hand_dialog(state, p, lbl, counter_label, _refresh_string)
 
@@ -567,6 +667,14 @@ def _render_one_player_range(state: AppState, player: int) -> None:
         textarea.set_value(state.current_spot.ranges[player].to_string())
 
     string_container.style("display: none")
+    # Preflop (empty board) -> default to the simple Suited/Offsuit
+    # granularity per the UX brief; the toggle already initializes there,
+    # so this just keeps the helper text in sync. (Postflop keeps the
+    # same default; exact suits stay one right-click / toggle away.)
+    if not state.current_spot.board:
+        gran_state["gran"] = "Suited/Offsuit"
+        gran_toggle.set_value("Suited/Offsuit")
+    _update_helper()
     _update_counter()
 
 
@@ -678,7 +786,17 @@ def _render_stacks_section(state: AppState) -> None:
     """Stack inputs + position display (HUNL: SB acts first)."""
     from nicegui import ui
 
-    ui.label("Stacks").classes("font-medium")
+    with ui.row().classes("items-center gap-1"):
+        ui.label("Stack depth (BB)").classes("font-medium")
+        ui.icon("help_outline").classes("text-gray-400 text-sm")
+        ui.tooltip(
+            "Effective stack for each player in big blinds. Edit these to "
+            "change how deep the spot plays (e.g. 100 BB cash vs 20 BB "
+            "short-stack). Blinds & ante are set in the section below."
+        )
+    ui.label("How deep each player is, in big blinds — click to edit.").classes(
+        "text-xs text-gray-500 italic"
+    )
     with ui.row():
         for player in (0, 1):
 
@@ -897,9 +1015,27 @@ def _render_reset_preset_row(state: AppState) -> None:
         on_click=_on_reset,
     ).props("flat").mark("reset-spot-button")
 
+    # Example-spots section header (Issue 3: clarify these are spot
+    # CONFIGURATIONS, not pre-solved strategies — loading one sets up the
+    # board/ranges/stacks; the user must still click Solve).
+    with ui.row().classes("items-center gap-1 mt-2"):
+        ui.label("Example spots — load, then Solve").classes(
+            "text-xs font-medium"
+        )
+        ui.icon("help_outline").classes("text-gray-400 text-sm")
+        ui.tooltip(
+            "These are hand-crafted spot setups (board + ranges + stacks), "
+            "NOT pre-solved strategies. Click one to load the scenario into "
+            "the inputs above, then press Solve to compute the strategy."
+        )
+    ui.label(
+        "Loads a board/range/stack setup into the inputs above. "
+        "Press Solve afterward to compute the strategy."
+    ).classes("text-xs text-gray-500 italic")
+
     # Preset dropdown.
     preset_ids = list_fixture_preset_ids()
-    with ui.element("div"):
+    with ui.element("div").mark("example-spots-row"):
         for preset_id in preset_ids:
             # Marker convention: underscores in IDs become hyphens.
             marker_suffix = preset_id.replace("_", "-")

@@ -498,12 +498,88 @@ def _safe_state_field(state: AppState, attr: str, default: Any) -> Any:
     return value
 
 
-def _resolve_tree(state: AppState) -> SolveTree | None:
-    """Best-effort retrieval of the current ``SolveTree`` from state.
+# Terminal statuses at which a concrete solve has published a usable
+# ``SolveResult`` on ``state.runner.result``. ``"stopped"`` is included
+# because a user-halted solve still yields a (partial-iteration but
+# structurally complete) average strategy worth browsing.
+_DONE_STATUSES: frozenset[str] = frozenset({"done", "stopped"})
 
-    Agent A is expected to construct one when a solve completes and
-    park it on ``state.current_tree`` (or on the solve session). We
-    accept either location.
+
+def _build_tree_from_runner(state: AppState) -> SolveTree | None:
+    """Construct (and memoize) a :class:`SolveTree` from the finished solve.
+
+    Root cause of F02: nothing in the UI ever built a ``SolveTree`` from
+    the runner's published result, so ``_resolve_tree`` always returned
+    ``None`` and the placeholder never cleared. This helper closes that
+    gap: when the runner has reached a terminal status with a concrete
+    ``SolveResult`` on ``runner.result``, we build the game from the
+    solved ``Spot`` (``state.current_solve.spot``, falling back to
+    ``state.current_spot``) and wrap result + game in a ``SolveTree``.
+
+    The built tree is cached on the runner under ``_tree_browser_cache``
+    keyed by ``id(runner.result)`` so the 0.5 s refresh timer doesn't
+    rebuild it every tick (and so lazy-expansion state survives across
+    refreshes). A new solve publishes a fresh ``result`` object → new
+    identity → fresh tree.
+
+    Returns ``None`` for non-terminal status, missing/empty result, or
+    the RvR / preflop-chart / chained paths (which leave ``runner.result``
+    as ``None`` and surface their strategies through other views).
+    """
+
+    runner = _safe_state_field(state, "runner", None)
+    if runner is None:
+        return None
+    if getattr(runner, "status", "idle") not in _DONE_STATUSES:
+        return None
+    result = getattr(runner, "result", None)
+    if not isinstance(result, SolveResult):
+        return None
+    if not getattr(result, "average_strategy", None):
+        # Structurally empty (e.g. an RvR result accidentally on this
+        # slot) — nothing to browse.
+        return None
+
+    # Cache hit: same result object → reuse the already-built tree so
+    # expansion state persists and we don't pay the build cost per tick.
+    cache = getattr(runner, "_tree_browser_cache", None)
+    if isinstance(cache, tuple) and len(cache) == 2 and cache[0] == id(result):
+        cached_tree = cache[1]
+        if isinstance(cached_tree, SolveTree):
+            return cached_tree
+
+    # Recover the Spot that produced this result; build the game graph.
+    solve_session = _safe_state_field(state, "current_solve", None)
+    spot = getattr(solve_session, "spot", None) or _safe_state_field(
+        state, "current_spot", None
+    )
+    if spot is None:
+        return None
+    try:
+        config = spot.to_hunl_config()
+        game = HUNLPoker(config=config)
+        tree = SolveTree(game, result)
+    except Exception:  # noqa: BLE001 -- a malformed spot must not crash the UI
+        logger.exception("tree_browser: failed to build SolveTree from result")
+        return None
+
+    try:
+        runner._tree_browser_cache = (id(result), tree)  # noqa: SLF001
+    except Exception:  # noqa: BLE001 -- caching is best-effort
+        logger.debug("tree_browser: could not memoize SolveTree on runner")
+    return tree
+
+
+def _resolve_tree(state: AppState) -> SolveTree | None:
+    """Best-effort retrieval of the current ``SolveTree``.
+
+    Resolution order:
+      1. A pre-built tree parked on ``state.current_tree`` or
+         ``state.current_solve.tree`` (legacy hook — kept so an external
+         constructor still wins if one ever appears).
+      2. Built on demand from ``state.runner.result`` once the solve
+         reaches a terminal status (the F02 fix; see
+         :func:`_build_tree_from_runner`).
     """
 
     direct = _safe_state_field(state, "current_tree", None)
@@ -514,7 +590,7 @@ def _resolve_tree(state: AppState) -> SolveTree | None:
         embedded = getattr(solve, "tree", None) or getattr(solve, "current_tree", None)
         if isinstance(embedded, SolveTree):
             return embedded
-    return None
+    return _build_tree_from_runner(state)
 
 
 def on_tree_node_selected(state: AppState, node_id: str) -> None:
@@ -677,6 +753,70 @@ def render(state: AppState) -> None:
     """
 
     ui_mod = _import_nicegui()
+
+    # F02 fix: the tree must (re)populate the instant a solve finishes.
+    # Previously this body ran once at page build — when no solve had
+    # completed yet ``_resolve_tree`` returned ``None`` and the placeholder
+    # was frozen in place forever, because nothing re-ran ``render`` on
+    # completion. We now wrap the body in an ``@ui.refreshable`` and drive
+    # it from a SELF-CONTAINED ``ui.timer`` that watches the runner's
+    # result identity + status. No dependency on ``ui/app.py``'s poller.
+
+    @ui_mod.refreshable  # type: ignore[untyped-decorator]
+    def _tree_browser_body() -> None:
+        _render_tree_body(state, ui_mod)
+
+    # Expose the refresh callable on the runner (mirrors the existing
+    # ``_preflop_chart_refresh`` / ``_chained_refresh`` hooks) so the
+    # module-level ``refresh_tree(state)`` — and, optionally, app.py's
+    # poller — can trigger a redraw without owning the closure.
+    runner = _safe_state_field(state, "runner", None)
+    if runner is not None:
+        try:
+            runner._tree_browser_refresh = _tree_browser_body.refresh  # noqa: SLF001
+        except Exception:  # noqa: BLE001 -- best-effort hook registration
+            logger.debug("tree_browser: could not register refresh hook on runner")
+
+    # Watcher state: remember the (result-identity, status) we last
+    # rendered so we only refresh when something actually changed (a new
+    # solve published a result, or the status flipped to/from terminal).
+    # A plain ``list`` cell keeps the closure mutable without ``nonlocal``.
+    _last_seen: list[tuple[int, str]] = [_result_signature(state)]
+
+    def _poll_for_result() -> None:
+        sig = _result_signature(state)
+        if sig != _last_seen[0]:
+            _last_seen[0] = sig
+            _tree_browser_body.refresh()
+
+    # 0.5 s cadence mirrors app.py's poller but is fully self-contained
+    # here; cheap identity/string compare, refresh only on change.
+    ui_mod.timer(0.5, _poll_for_result)
+
+    _tree_browser_body()
+
+
+def _result_signature(state: AppState) -> tuple[int, str]:
+    """A cheap change-detection key for the runner's published result.
+
+    Combines ``id(runner.result)`` (new solve → new object → new id) with
+    ``runner.status`` (so an idle→done flip on the *same* result object,
+    or a stop, still triggers one refresh). Returns ``(0, "idle")`` when
+    there is no runner yet.
+    """
+    runner = _safe_state_field(state, "runner", None)
+    if runner is None:
+        return (0, "idle")
+    return (id(getattr(runner, "result", None)), str(getattr(runner, "status", "idle")))
+
+
+def _render_tree_body(state: AppState, ui_mod: Any) -> None:
+    """Render the tree-browser body (refreshable inner pass of :func:`render`).
+
+    Split out of :func:`render` so the ``@ui.refreshable`` wrapper can
+    re-run JUST this content (placeholder → populated tree) when a solve
+    completes, without re-registering the outer card or the watch timer.
+    """
     tree = _resolve_tree(state)
 
     with (
@@ -805,6 +945,30 @@ def render(state: AppState) -> None:
         _tree_slot()
 
 
+def refresh_tree(state: AppState) -> None:
+    """Re-render the decision-tree browser body (populate-on-done hook).
+
+    OPTIONAL external wire. The tree already self-refreshes via an internal
+    ``ui.timer`` registered in :func:`render`, so app.py does NOT need to
+    call this. It is provided so the 0.5 s poller in ``ui/app.py`` MAY call
+    ``tree_browser.refresh_tree(state)`` once per tick as a redundant
+    trigger if desired (one line, no-op when no solve has completed).
+
+    Implementation: invokes the refresh callable that :func:`render`
+    stashed on ``state.runner._tree_browser_refresh``. No-op when render
+    hasn't run yet or the hook is unavailable.
+    """
+    runner = _safe_state_field(state, "runner", None)
+    if runner is None:
+        return
+    refresher = getattr(runner, "_tree_browser_refresh", None)
+    if callable(refresher):
+        try:
+            refresher()
+        except Exception:  # noqa: BLE001 -- never let a poller tick die here
+            logger.debug("tree_browser.refresh_tree: refresh callable raised")
+
+
 __all__ = [
     "TreeNode",
     "SolveTree",
@@ -812,4 +976,5 @@ __all__ = [
     "on_tree_node_selected",
     "on_tree_node_expanded",
     "render",
+    "refresh_tree",
 ]

@@ -93,19 +93,22 @@ def build_page() -> None:
     with ui.row().classes("w-full items-center p-2 border-b").mark("app-header"):
         ui.label("poker-solver").classes("text-lg font-semibold")
         ui.separator().props("vertical")
-        spot_label = _format_spot_label(state)
-        ui.label(spot_label).classes("text-sm").mark("header-spot-label")
+        # Spot label (issue #4): make it visibly editable + clicking it
+        # scrolls to / opens the Stacks & Blinds controls in spot_input.
+        refresh_spot_label = _build_spot_label(state)
         ui.separator().props("vertical")
-        status_label = ui.label(state.runner.status).classes("text-sm font-mono")
-        status_label.mark("header-status")
+        # Running indicator (issue #3): an unambiguous spinner+badge driven
+        # by the runner state, replacing the bare status word. Returns a
+        # ``refresh()`` closure the 500 ms poller calls each tick.
+        refresh_status_indicator = _build_status_indicator(state)
         ui.space()
         ui.button(
             "Library",
             icon="folder",
-            on_click=lambda: _open_library_stub(),
+            on_click=lambda: _open_library(),
         ).props("flat").mark("library-header-button")
         _build_theme_toggle(state)
-        ui.button(icon="menu").props("flat").mark("hamburger-menu")
+        _build_overflow_menu(state)
 
     # ----- Tabs: Solver | Preflop Chart (task #55) | Chain solve (task #57) -----
     # The original two-pane layout lives inside the "Solver" tab so every
@@ -169,11 +172,18 @@ def build_page() -> None:
             run_panel.refresh_progress(state)
         except Exception:  # noqa: BLE001 -- never let the timer die
             logger.exception("run_panel.refresh_progress raised")
-        # Also update the header status (cheap; just a label update).
+        # Also update the header running indicator (cheap; toggles a
+        # spinner + recolours a status badge from the runner state).
         try:
-            status_label.set_text(state.runner.status)
+            refresh_status_indicator()
         except Exception:  # noqa: BLE001
-            logger.exception("status label update failed")
+            logger.exception("status indicator update failed")
+        # Keep the header spot label (issue #4) in sync when the user edits
+        # stacks / board in the spot-input panel (cheap text compare).
+        try:
+            refresh_spot_label()
+        except Exception:  # noqa: BLE001
+            logger.exception("spot label refresh failed")
         # Task #55: refresh the preflop chart widget when its worker
         # publishes a new result (identity change of
         # ``runner.preflop_chart_result``).
@@ -242,7 +252,7 @@ def _render_solver_tab(state: AppState) -> None:
         # Right pane: collapsible sidebar with three expansion panels.
         with ui.column().classes("p-2 w-96").style("min-width: 320px"):
             # Spot input panel — open by default.
-            with (
+            spot_expansion = (
                 ui.expansion(
                     "Spot Input",
                     icon="tune",
@@ -250,7 +260,11 @@ def _render_solver_tab(state: AppState) -> None:
                 )
                 .classes("w-full")
                 .mark("sidebar-spot-expansion")
-            ):
+            )
+            # Stash the handle so the header spot-label (issue #4) can
+            # expand + scroll to the Stacks & Blinds controls inside it.
+            _spot_input_anchor["expansion"] = spot_expansion
+            with spot_expansion:
                 spot_input.render(state)
 
             # Run panel — collapsed by default (per Q1: spot input
@@ -301,6 +315,213 @@ def _format_spot_label(state: AppState) -> str:
     return f"{stack_text} {street} ({board})"
 
 
+# Module-level holder for the Spot Input expansion element so the header's
+# spot-label click (issue #4) can expand + scroll to the Stacks & Blinds
+# controls. ``_render_solver_tab`` (this file) populates ``["expansion"]``
+# with the ``ui.expansion`` it builds; the header reads it back. A dict (not
+# a global) keeps the reference per-build and avoids a module-level cycle.
+_spot_input_anchor: dict[str, Any] = {"expansion": None}
+
+
+def _build_spot_label(state: AppState):
+    """Header spot label, made affordant (issue #4).
+
+    The label still reads e.g. ``"95BB flop (Jh8c7s)"`` but is now styled
+    like a clickable affordance (underline-on-hover + edit icon + tooltip)
+    and, on click, expands the "Spot Input" panel and scrolls the Stacks &
+    "Blinds & ante" controls into view. Those controls live in
+    ``ui/views/spot_input.py`` (owned by another agent); we only point at
+    the expansion this file builds in ``_render_solver_tab``.
+
+    Returns a ``refresh()`` closure so the 500 ms poller keeps the label
+    text in sync when the user edits stacks/board elsewhere.
+    """
+    from nicegui import ui
+
+    def _go_to_spot_input() -> None:
+        exp = _spot_input_anchor.get("expansion")
+        if exp is None:
+            return
+        # Make sure the panel is open, then scroll it into view. The
+        # ``getElement(id)`` client helper (NiceGUI >= 2.9) resolves the
+        # Vue component; ``.$el`` is its root DOM node.
+        try:
+            exp.value = True
+        except Exception:  # noqa: BLE001
+            logger.exception("could not expand spot-input panel")
+        try:
+            # ``getHtmlElement(id)`` (NiceGUI client helper) returns the
+            # element's root DOM node directly, handling the ``c<id>``
+            # prefix internally — no ``.$el`` indirection needed.
+            ui.run_javascript(
+                f"getHtmlElement({exp.id})?.scrollIntoView("
+                f"{{behavior: 'smooth', block: 'start'}});"
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("scroll-to spot-input failed")
+
+    with ui.row().classes(
+        "items-center gap-1 cursor-pointer rounded px-1 "
+        "hover:bg-primary/10 hover:underline"
+    ).mark("header-spot-label") as label_row:
+        label_widget = ui.label(_format_spot_label(state)).classes(
+            "text-sm underline decoration-dotted underline-offset-4"
+        )
+        ui.icon("edit", size="14px").classes("opacity-60")
+    label_row.tooltip("Click to edit stack depth & blinds")
+    label_row.on("click", lambda _e=None: _go_to_spot_input())
+
+    def _refresh() -> None:
+        label_widget.set_text(_format_spot_label(state))
+
+    return _refresh
+
+
+def _build_status_indicator(state: AppState):
+    """Header running indicator (issue #3).
+
+    Replaces the bare status word with an unambiguous spinner + coloured
+    badge driven by the read-only runner API (``is_running``,
+    ``progress_fraction``, ``eta_seconds``, ``current_iteration``,
+    ``total_iterations``, ``status``). NOTE: the full progress *bar* is
+    owned by ``run_panel.py`` — this is intentionally just a compact header
+    chip, no second bar.
+
+    Returns a ``refresh()`` closure the 500 ms poller calls each tick.
+    """
+    from nicegui import ui
+
+    # status -> (quasar colour, icon, human label). Idle is muted; running
+    # gets a live spinner; terminal states get a clear colour + glyph.
+    _STYLE: dict[str, tuple[str, str, str]] = {
+        "idle": ("grey-5", "circle", "Idle"),
+        "running": ("primary", "", "Running"),
+        "paused": ("orange", "pause", "Paused"),
+        "done": ("positive", "check_circle", "Done"),
+        "stopped": ("grey-6", "stop_circle", "Stopped"),
+        "error": ("negative", "error", "Error"),
+    }
+
+    with ui.row().classes("items-center gap-2").mark("header-status"):
+        spinner = ui.spinner(size="18px").props("color=primary")
+        badge = ui.badge("Idle").props("color=grey-5").classes("text-xs")
+        detail = ui.label("").classes("text-xs text-grey-7 font-mono")
+
+    def _refresh() -> None:
+        runner = state.runner
+        status = runner.status
+        color, icon, human = _STYLE.get(status, ("grey-5", "circle", status))
+        running = bool(runner.is_running)
+        # Spinner only while a solve is live (running OR paused).
+        spinner.set_visibility(running)
+        badge.set_text(human)
+        badge.props(f"color={color}")
+        # Compact detail: "1200/5000 · ETA 14s" while running; cleared
+        # otherwise. Guards every field — the API may return None.
+        parts: list[str] = []
+        if running:
+            total = runner.total_iterations
+            cur = runner.current_iteration
+            if total:
+                parts.append(f"{cur}/{total}")
+            elif cur:
+                parts.append(f"{cur} it")
+            frac = runner.progress_fraction
+            if frac is not None and not parts:
+                parts.append(f"{frac * 100:.0f}%")
+            eta = runner.eta_seconds
+            if eta is not None and eta >= 0:
+                parts.append(f"ETA {_format_eta(eta)}")
+        detail.set_text(" · ".join(parts))
+
+    _refresh()
+    return _refresh
+
+
+def _format_eta(seconds: float) -> str:
+    """Compact human ETA: ``9s`` / ``2m14s`` / ``1h03m``."""
+    s = int(round(seconds))
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m{s % 60:02d}s"
+    return f"{s // 3600}h{(s % 3600) // 60:02d}m"
+
+
+def _build_overflow_menu(state: AppState) -> None:
+    """Header overflow (hamburger) menu (issue #1).
+
+    DECISION: wired, not removed. The 3-bar button previously had no
+    ``on_click`` and did nothing. Per "less is more", it now opens a small
+    ``ui.menu`` with three genuinely useful, low-frequency actions that
+    don't deserve permanent header real estate:
+
+    - "Replay onboarding" — re-runs the 3-step ``ui/views/onboarding.py``
+      modal (resets ``onboarding_completed`` so the idempotent guard
+      doesn't no-op, then re-shows it).
+    - "About poker-solver" — version + a one-line description.
+
+    The button keeps its ``hamburger-menu`` marker so existing smoke tests
+    still find it.
+    """
+    from nicegui import ui
+
+    # A ``ui.menu`` nested inside the button opens on click (Quasar
+    # default). Combined single ``with`` keeps ruff SIM117 happy.
+    with (
+        ui.button(icon="menu").props("flat").mark("hamburger-menu"),
+        ui.menu().props("auto-close").mark("overflow-menu"),
+    ):
+        ui.menu_item(
+            "Replay onboarding",
+            on_click=lambda: _replay_onboarding(state),
+        ).mark("overflow-replay-onboarding")
+        ui.separator()
+        ui.menu_item(
+            "About poker-solver",
+            on_click=_show_about_dialog,
+        ).mark("overflow-about")
+
+
+def _replay_onboarding(state: AppState) -> None:
+    """Reset the onboarding flag and re-show the 3-step modal (issue #1).
+
+    ``onboarding.show_modal`` is idempotent (no-op when
+    ``onboarding_completed`` is True), so we clear the flag first, persist,
+    then re-invoke it.
+    """
+    state.prefs.onboarding_completed = False
+    try:
+        save_state()
+    except Exception:  # noqa: BLE001
+        logger.exception("save_state during replay onboarding failed")
+    onboarding.show_modal(state)
+
+
+def _show_about_dialog() -> None:
+    """Small About dialog with the package version (issue #1)."""
+    from nicegui import ui
+
+    try:
+        import poker_solver as _pkg
+
+        version = getattr(_pkg, "__version__", "unknown")
+    except Exception:  # noqa: BLE001
+        version = "unknown"
+
+    with ui.dialog() as dialog, ui.card().classes("min-w-[320px]"):
+        ui.label("poker-solver").classes("text-lg font-bold")
+        ui.label(f"Version {version}").classes("text-sm font-mono text-grey-7")
+        ui.separator()
+        ui.label(
+            "Heads-up no-limit hold'em GTO solver with a preflop chart, "
+            "range-vs-range solves, and a save library."
+        ).classes("text-sm")
+        with ui.row().classes("w-full justify-end pt-2"):
+            ui.button("Close", on_click=dialog.close).props("flat")
+    dialog.open()
+
+
 def _build_theme_toggle(state: AppState) -> None:
     """Build the Auto / Light / Dark toggle in the header."""
     from nicegui import ui
@@ -321,29 +542,38 @@ def _build_theme_toggle(state: AppState) -> None:
     ).props("flat dense").mark("theme-toggle")
 
 
-def _open_library_stub() -> None:
-    """Open the library dialog (stub — Agent C will fill the contents).
+def _open_library() -> None:
+    """Open the real library-browser dialog.
 
-    The library_browser.py module exposes ``render(state)``; we just need
-    to provide the modal shell here. Agent C owns the contents.
+    Root cause of the old "empty dialog" bug: ``library_browser.render``
+    *builds and returns its own* ``ui.dialog`` (it calls ``ui.dialog()``
+    internally and fills a ``ui.card`` with the filter input, rows, and
+    Load/Delete buttons). The previous ``_open_library_stub`` wrapped that
+    call inside *another* ``with ui.dialog() as dialog, ui.card():`` block
+    and then opened the OUTER dialog — so the real content rendered into a
+    second, never-opened dialog, and the dialog the user saw contained only
+    the stray ``Close`` button. The fix is to open the dialog ``render``
+    returns, not to re-wrap it.
+
+    A new dialog is built on each click (cheap) so the row list reflects the
+    current on-disk library; ``render`` also re-reads ``Library.list()`` on
+    each ``show`` event, so re-opens stay fresh.
     """
     from nicegui import ui
 
     try:
-        # Agent C may export ``show_modal`` or ``render``; try both.
         from ui.views import library_browser
 
-        if hasattr(library_browser, "show_modal"):
-            library_browser.show_modal(get_state())
-            return
-        with ui.dialog() as dialog, ui.card():
-            library_browser.render(get_state())
-            ui.button("Close", on_click=dialog.close)
+        dialog = library_browser.render(get_state())
         dialog.open()
-    except (ImportError, ModuleNotFoundError):
-        # Pre-Agent-C bootstrap: show a placeholder.
-        with ui.dialog() as dialog, ui.card():
-            ui.label("Library (stub — Agent C will wire).")
+    except Exception:  # noqa: BLE001 -- never let a header click crash the page
+        logger.exception("library_browser.render raised; showing fallback dialog")
+        with ui.dialog() as dialog, ui.card().classes("min-w-[360px]"):
+            ui.label("Solve Library").classes("text-lg font-bold")
+            ui.label(
+                "Saved solves will appear here. The library couldn't be "
+                "loaded right now — see the application logs for details."
+            ).classes("text-sm text-grey-7")
             ui.button("Close", on_click=dialog.close)
         dialog.open()
 
