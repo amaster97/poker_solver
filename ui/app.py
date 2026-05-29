@@ -64,6 +64,37 @@ logger = logging.getLogger(__name__)
 #   'sidebar-tree-expansion'.
 
 
+def _is_slot_teardown_error(exc: BaseException) -> bool:
+    """True for the tab-switch teardown ``RuntimeError``.
+
+    NiceGUI raises ``RuntimeError: The parent slot of the element has been
+    deleted`` when a refresher / element update fires after the slot it
+    targets was torn down (e.g. rapid top-tab switching while the 0.5 s
+    poller is mid-tick). We special-case this so the poller can swallow it
+    quietly instead of spamming a full traceback every tick, while letting
+    every other error surface loudly.
+    """
+    return isinstance(exc, RuntimeError) and "parent slot" in str(exc)
+
+
+def _run_tick_step(label: str, fn: Any) -> None:
+    """Run one poller sub-step, guarding the tab-switch teardown race.
+
+    The 0.5 s ``_tick`` must never die (a dead timer freezes the whole UI).
+    Real exceptions are logged with a full traceback; the expected
+    parent-slot-deleted teardown ``RuntimeError`` (see
+    :func:`_is_slot_teardown_error`) is downgraded to a single quiet debug
+    line so a burst of tab switches doesn't flood the server log.
+    """
+    try:
+        fn()
+    except Exception as exc:  # noqa: BLE001 -- never let the timer die
+        if _is_slot_teardown_error(exc):
+            logger.debug("%s skipped: target slot torn down (tab switch)", label)
+        else:
+            logger.exception("%s raised", label)
+
+
 def build_page() -> None:
     """The ``@ui.page('/')`` builder. Composes header + 2-pane layout.
 
@@ -172,44 +203,47 @@ def build_page() -> None:
     }
 
     def _tick() -> None:
-        """Pump worker progress into the UI + flush debounced state."""
-        try:
-            run_panel.refresh_progress(state)
-        except Exception:  # noqa: BLE001 -- never let the timer die
-            logger.exception("run_panel.refresh_progress raised")
-        # Also update the header running indicator (cheap; toggles a
-        # spinner + recolours a status badge from the runner state).
-        try:
-            refresh_status_indicator()
-        except Exception:  # noqa: BLE001
-            logger.exception("status indicator update failed")
+        """Pump worker progress into the UI + flush debounced state.
+
+        Tab-switch teardown race: this 0.5 s poller drives refreshers that
+        re-render content living inside the (Solver / Preflop Chart / Chain
+        solve) tab panels. When the user rapidly switches tabs, the slot a
+        refresher targets can be torn down between ticks, and NiceGUI raises
+        ``RuntimeError: The parent slot of the element has been deleted``.
+        Each sub-block is wrapped via :func:`_run_tick_step`, which swallows
+        that specific teardown ``RuntimeError`` with a quiet debug log (so it
+        doesn't spam a full traceback on every tick) while keeping any other
+        exception loud — and never lets the timer die.
+        """
+        _run_tick_step("run_panel.refresh_progress", lambda: run_panel.refresh_progress(state))
+        # Header running indicator (cheap; toggles a spinner + recolours a
+        # status badge from the runner state). Lives in the header, which
+        # survives tab switches, but guarded uniformly for safety.
+        _run_tick_step("status indicator update", refresh_status_indicator)
         # Keep the header spot label (issue #4) in sync when the user edits
         # stacks / board in the spot-input panel (cheap text compare).
-        try:
-            refresh_spot_label()
-        except Exception:  # noqa: BLE001
-            logger.exception("spot label refresh failed")
+        _run_tick_step("spot label refresh", refresh_spot_label)
+
         # Task #55: refresh the preflop chart widget when its worker
         # publishes a new result (identity change of
         # ``runner.preflop_chart_result``).
-        try:
+        def _refresh_preflop_chart() -> None:
             current_id = id(getattr(state.runner, "preflop_chart_result", None))
             if current_id != last_preflop_chart_id[0]:
                 last_preflop_chart_id[0] = current_id
                 refresher = getattr(state.runner, "_preflop_chart_refresh", None)
                 if callable(refresher):
                     refresher()
-        except Exception:  # noqa: BLE001
-            logger.exception("preflop chart refresh on tick raised")
+
+        _run_tick_step("preflop chart refresh on tick", _refresh_preflop_chart)
+
         # Task #57: re-render the chained tab when a chained result lands.
         # Task #68 Phase 6: also re-render when the postflop route info
         # identity changes (the user just paid for a flop subgame solve).
-        try:
+        def _refresh_chained() -> None:
             chained_result = getattr(state.runner, "chained_result", None)
             current_id_c = id(chained_result) if chained_result is not None else None
-            post_info = getattr(
-                state.runner, "chained_postflop_route_info", None
-            )
+            post_info = getattr(state.runner, "chained_postflop_route_info", None)
             current_post_id = id(post_info) if post_info is not None else None
             id_changed = current_id_c != chained_state["last_id"]
             post_changed = current_post_id != chained_state["last_post_route_id"]
@@ -219,13 +253,10 @@ def build_page() -> None:
                 refresh = getattr(state.runner, "_chained_refresh", None)
                 if callable(refresh):
                     refresh()
-        except Exception:  # noqa: BLE001
-            logger.exception("chained tab refresh tick raised")
+
+        _run_tick_step("chained tab refresh tick", _refresh_chained)
         # Debounced state.json flush.
-        try:
-            _maybe_flush_state()
-        except Exception:  # noqa: BLE001
-            logger.exception("_maybe_flush_state raised")
+        _run_tick_step("_maybe_flush_state", _maybe_flush_state)
 
     ui.timer(0.5, _tick)
 

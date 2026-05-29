@@ -786,16 +786,42 @@ def render(state: AppState) -> None:
     # solve published a result, or the status flipped to/from terminal).
     # A plain ``list`` cell keeps the closure mutable without ``nonlocal``.
     _last_seen: list[tuple[int, str]] = [_result_signature(state)]
+    # Holder for the poller's own timer so the callback can cancel it once
+    # the slot it refreshes into is gone (tab-switch teardown). A list cell
+    # keeps the closure mutable without ``nonlocal``.
+    _timer_cell: list[Any] = [None]
 
     def _poll_for_result() -> None:
+        # Tab-switch teardown race: this 0.5 s timer keeps firing after the
+        # user switches the top tabs, but ``_tree_browser_body.refresh()``
+        # re-runs ``_render_tree_body`` which calls ``ui.element(...)`` — if
+        # the slot this view rendered into has already been deleted, NiceGUI
+        # raises ``RuntimeError: The parent slot of the element has been
+        # deleted``. Stop the timer the moment its own element is gone, and
+        # swallow the teardown ``RuntimeError`` defensively (cancelling the
+        # timer so it doesn't thrash on every subsequent tick).
+        timer = _timer_cell[0]
+        if timer is not None and getattr(timer, "is_deleted", False):
+            return
         sig = _result_signature(state)
         if sig != _last_seen[0]:
             _last_seen[0] = sig
-            _tree_browser_body.refresh()
+            try:
+                _tree_browser_body.refresh()
+            except RuntimeError as exc:
+                # Only the parent-slot-deleted teardown race is expected
+                # here; re-raise anything else so real bugs surface.
+                if "parent slot" not in str(exc):
+                    raise
+                if timer is not None:
+                    try:
+                        timer.cancel()
+                    except Exception:  # noqa: BLE001 -- best-effort stop
+                        logger.debug("tree_browser: poller timer cancel failed")
 
     # 0.5 s cadence mirrors app.py's poller but is fully self-contained
     # here; cheap identity/string compare, refresh only on change.
-    ui_mod.timer(0.5, _poll_for_result)
+    _timer_cell[0] = ui_mod.timer(0.5, _poll_for_result)
 
     _tree_browser_body()
 
@@ -909,6 +935,18 @@ def _render_tree_body(state: AppState, ui_mod: Any) -> None:
             # NiceGUI markers via `.mark()`; the `no-selection-unset` token
             # is a Quasar prop and must stay on `.props()`.
             widget.mark("tree-widget").props("no-selection-unset")
+            # F-tree-label fix: each node's ``label`` is an inline-HTML string
+            # (R/Y/G action badges + reach/EV summary; see
+            # ``tree_node_to_dict``). Quasar's QTree renders ``label`` as
+            # PLAIN TEXT by default, so the raw ``<span ...>`` markup leaked
+            # to the screen as escaped tags. Override the per-node header
+            # slot to render the label as HTML via Vue's ``v-html``. The
+            # ``:props="props"`` binding preserves QTree's native expand /
+            # select / indentation behaviour for the row.
+            widget.add_slot(
+                "default-header",
+                r'<span :props="props" v-html="props.node.label"></span>',
+            )
 
             def _select_handler(event: Any) -> None:
                 node_id = getattr(event, "value", None) or getattr(
