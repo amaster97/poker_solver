@@ -96,6 +96,14 @@ class HUNLSolveResult(SolveResult):
 _DEFAULT_ITERATIONS: int = 50_000
 _DEFAULT_MEMORY_BUDGET_GB: float = 14.0
 
+# Upper bound on the Rust solve-loop checkpoint stride when GUI callbacks are
+# wired (``on_progress`` / ``should_stop``). Caps how many iterations can run
+# between callback fires so the live iteration counter keeps advancing (Bug 1)
+# and the Stop button stays responsive (Bug 2) even if a caller passes a very
+# large ``log_every``. 200 iters/checkpoint is well below one 0.5 s UI poll on
+# the Rust tier while keeping per-iteration GIL churn negligible. Easy to tune.
+_MAX_CHECKPOINT_STRIDE: int = 200
+
 
 def solve_hunl_postflop(
     config: HUNLConfig,
@@ -355,16 +363,23 @@ def solve_hunl_postflop_rust(
         return False
 
     # Only wire each callable when the caller supplied its GUI counterpart.
-    # ``log_every`` gates the checkpoint stride (default to a coarse stride if
-    # any callback is wired but no stride was given, so the Stop button still
-    # responds without per-iteration overhead).
+    # ``log_every`` gates the checkpoint stride: the Rust loop re-acquires the
+    # GIL to fire ``on_progress`` (live iteration counter + bar, Bug 1) and
+    # poll ``should_stop`` (the Stop button, Bug 2) once every stride
+    # iterations. We harden the stride here so the GUI stays responsive:
+    #   * default to a coarse stride if any callback is wired but none given,
+    #     so Stop responds without per-iteration overhead; and
+    #   * CAP the stride at ``_MAX_CHECKPOINT_STRIDE`` when callbacks are wired
+    #     so a caller passing a huge ``log_every`` can't make the counter
+    #     appear frozen or the Stop button feel dead between checkpoints.
     rust_on_progress = _rust_on_progress if on_progress is not None else None
     rust_should_stop = _rust_should_stop if should_stop is not None else None
+    has_callbacks = rust_on_progress is not None or rust_should_stop is not None
     effective_log_every = log_every
-    if (rust_on_progress is not None or rust_should_stop is not None) and (
-        not effective_log_every
-    ):
-        effective_log_every = 100
+    if has_callbacks:
+        if not effective_log_every:
+            effective_log_every = 100
+        effective_log_every = min(int(effective_log_every), _MAX_CHECKPOINT_STRIDE)
 
     raw = _rust_solve_hunl(
         config_json,

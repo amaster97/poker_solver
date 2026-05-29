@@ -39,7 +39,15 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from ui.state import AppState, SolveInFlightError, SolveSession, save_state
+from ui.state import (
+    AppState,
+    SolveInFlightError,
+    SolveSession,
+    SolveTooLargeError,
+    estimate_postflop_tree_cost,
+    exceeds_tree_budget,
+    save_state,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -761,12 +769,50 @@ def _wrap_solve(
     # through to existing behaviour.
     state.runner._pending_target_expl = target_expl
     state.runner._pending_tier_label = tier
+
+    # Bug 3: pre-solve tree-size guard. A wide-range FLOP solve hangs for
+    # minutes inside the engine's tree-build (before the iteration loop even
+    # starts) and is uncancellable — the UI would show "Iterations: 0 /
+    # Running" forever and Stop would do nothing. Estimate the cost here,
+    # BEFORE invoking ``on_solve`` (which spawns the worker), and refuse with
+    # a clear, actionable message if it's too large. Only the concrete
+    # postflop path is gated; the range-vs-range aggregator runs its own
+    # bounded subgames. ``SolveRunner.start`` re-checks as defense-in-depth.
+    spot = state.current_spot
+    if not bool(getattr(spot, "rvr_mode", False)):
+        try:
+            guard_config = spot.to_hunl_config()
+        except Exception:  # noqa: BLE001
+            # Config can't be built yet (e.g. empty/invalid spot) — let the
+            # normal solve path surface that error; don't block on the guard.
+            guard_config = None
+        if guard_config is not None and exceeds_tree_budget(guard_config):
+            cost = estimate_postflop_tree_cost(guard_config)
+            logger.info(
+                "Refusing oversized postflop solve (estimated cost %.3g > "
+                "budget); prompting user to narrow the spot.",
+                cost,
+            )
+            ui.notify(
+                "This flop solve is too large to finish in reasonable "
+                "time/memory. Narrow the ranges, uncheck some bet sizes, or "
+                "solve a turn/river subgame instead of the flop.",
+                type="negative",
+                position="top",
+                timeout=10000,
+                multi_line=True,
+            )
+            return
+
     # Invoke the caller's solve trigger. ``on_solve`` (ui/app.py) starts the
     # worker via ``SolveRunner.start``, which raises ``SolveInFlightError``
-    # ONLY when a solve is genuinely running. Surface its friendly message
-    # rather than any raw exception text.
+    # ONLY when a solve is genuinely running and ``SolveTooLargeError`` (Bug 3
+    # defense-in-depth) when the tree is too large. Surface their friendly
+    # messages rather than any raw exception text.
     try:
         on_solve()
+    except SolveTooLargeError as err:
+        ui.notify(err.message, type="negative", position="top", timeout=10000)
     except SolveInFlightError as err:
         ui.notify(err.message, type="warning")
 

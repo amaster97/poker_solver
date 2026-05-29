@@ -803,6 +803,136 @@ class SolveInFlightError(RuntimeError):
         super().__init__(self.message)
 
 
+# --------------------------------------------------------------------------- #
+# Bug 3 — pre-solve tree-size guard (postflop memory wall)
+# --------------------------------------------------------------------------- #
+#
+# A wide-range flop solve is uncancellable: the Rust engine builds the full
+# postflop game tree (``HUNLTree::build``) BEFORE the iteration loop starts,
+# and that build can run for many minutes on a flop (two remaining board cards
+# => ~47 * 46 runouts, each carrying a full betting subtree across three
+# streets). During the build ``iteration`` is legitimately 0 and ``should_stop``
+# is never polled, so the UI shows "Iterations: 0 / Running" indefinitely and
+# the Stop button does nothing. The memory wall here is fundamental (see the
+# postflop-memory-wall memory note): we do NOT try to make wide flop solves
+# converge. Instead we fail fast with an actionable message.
+#
+# The cost estimate below is intentionally a SIMPLE, CONSERVATIVE heuristic —
+# its only job is to cleanly separate "interactive subgame" (river/turn, or a
+# flop with very few bet sizes) from "will hang for minutes" (a flop with the
+# default bet menu). It is deliberately easy to read and tune:
+#
+#   cost ~= board_runouts * (actions_per_node ** betting_plies)
+#
+# where ``board_runouts`` is the product of remaining-card choices across the
+# remaining streets (the dominant multiplier), ``actions_per_node`` is the
+# branching factor at a decision node, and ``betting_plies`` is a coarse proxy
+# for how deep the per-runout betting subtree goes.
+#
+# TUNING: bump ``TREE_SIZE_BUDGET`` up to allow larger solves, or down to be
+# stricter. The measured separation on an M-series mac: a flop with 3 bet
+# sizes + all-in took >130 s just to BUILD the tree (loop never started),
+# while a turn/river point-pair subgame is interactive (sub-second to a few
+# seconds). The default budget is set comfortably below the flop cost and
+# comfortably above the turn cost.
+
+# Maximum estimated tree cost (unitless heuristic score) the UI will launch.
+# Above this, ``SolveRunner.start`` refuses with :class:`SolveTooLargeError`.
+TREE_SIZE_BUDGET: float = 5.0e6
+
+# Approximate count of distinct next-card choices when a street's board card
+# is dealt (52 - cards already on board/in hands). A coarse constant keeps the
+# heuristic simple; the exact value (47 vs 45) does not change the verdict.
+_CARDS_PER_BOARD_DEAL: int = 47
+
+# Remaining board-card layers to enumerate from each starting street. Flop has
+# two (turn + river), turn has one (river), river has none. This is THE
+# dominant cost driver — each extra layer multiplies the tree by ~47x.
+_REMAINING_BOARD_DEALS: dict[Street, int] = {
+    Street.FLOP: 2,
+    Street.TURN: 1,
+    Street.RIVER: 0,
+}
+
+# Coarse betting-subtree depth proxy per remaining street (fold/call + raises
+# up to the cap). Multiplied across streets-with-betting to get total plies.
+_BETTING_PLIES_PER_STREET: int = 2
+
+
+class SolveTooLargeError(RuntimeError):
+    """Raised by ``SolveRunner.start`` when the estimated tree is too large.
+
+    Subclasses :class:`RuntimeError` so the existing ``except RuntimeError``
+    handlers in ``ui/app.py`` catch it without code changes. Carries a clean,
+    user-presentable ``.message`` (Bug 3): the postflop tree-build for a wide
+    flop spot hangs for minutes before the iteration loop even starts and is
+    uncancellable, so we refuse it up front with concrete remediations.
+    """
+
+    def __init__(self, message: str | None = None, *, estimated_cost: float = 0.0):
+        self.estimated_cost = estimated_cost
+        self.message = message or (
+            "This solve is too large to finish in reasonable time/memory. "
+            "Narrow the ranges, reduce the bet sizes, or solve a turn/river "
+            "subgame instead of the flop."
+        )
+        super().__init__(self.message)
+
+
+def estimate_postflop_tree_cost(config: HUNLConfig) -> float:
+    """Return a conservative, unitless cost estimate for a postflop solve.
+
+    Heuristic (see the module comment above ``TREE_SIZE_BUDGET``):
+
+        cost = board_runouts * (actions_per_node ** betting_plies)
+
+    * ``board_runouts`` = ``_CARDS_PER_BOARD_DEAL ** remaining_board_deals`` —
+      the product of next-card choices across the remaining streets. This is
+      the dominant term: a flop (2 deals) is ~47x bigger than a turn, ~2200x
+      bigger than a river.
+    * ``actions_per_node`` = number of bet sizes + all-in + {fold, call} — the
+      branching factor at a betting decision node.
+    * ``betting_plies`` = ``_BETTING_PLIES_PER_STREET`` times the number of
+      streets that still have a betting round (remaining_board_deals + 1).
+
+    Preflop configs return ``0.0`` (the UI never routes preflop through this
+    guard; the preflop chart path is a separate, bounded engine).
+
+    The estimate is intentionally coarse and pessimistic for the flop — its
+    only job is to separate "interactive subgame" from "uncancellable hang".
+    """
+    street = config.starting_street
+    remaining_deals = _REMAINING_BOARD_DEALS.get(street)
+    if remaining_deals is None:
+        # Preflop / showdown / anything not in the postflop map: not our guard.
+        return 0.0
+
+    # Branching factor at a decision node: each checked bet size, optionally
+    # all-in, plus fold and call/check.
+    num_bet_sizes = len(getattr(config, "bet_size_fractions", ()) or ())
+    actions_per_node = num_bet_sizes + (1 if config.include_all_in else 0) + 2
+
+    # Number of streets that still have a betting round (current + each future
+    # street reached by a board deal).
+    betting_streets = remaining_deals + 1
+    betting_plies = _BETTING_PLIES_PER_STREET * betting_streets
+
+    board_runouts = float(_CARDS_PER_BOARD_DEAL) ** remaining_deals
+    betting_subtree = float(actions_per_node) ** betting_plies
+    return board_runouts * betting_subtree
+
+
+def exceeds_tree_budget(
+    config: HUNLConfig, *, budget: float = TREE_SIZE_BUDGET
+) -> bool:
+    """Return True iff the estimated postflop tree cost exceeds ``budget``.
+
+    Thin predicate over :func:`estimate_postflop_tree_cost` so callers (and
+    tests) can check the verdict without re-deriving the threshold.
+    """
+    return estimate_postflop_tree_cost(config) > budget
+
+
 class SolveRunner:
     """Owns one background worker thread + cancellation flags + progress snapshot.
 
@@ -960,6 +1090,14 @@ class SolveRunner:
         a friendly ``.message``) if a solve is *genuinely* running. A
         finished-but-not-yet-reaped worker thread is joined first and does
         NOT block a new start (see :meth:`_reap_finished_worker`).
+
+        Raises :class:`SolveTooLargeError` (Bug 3) when the estimated postflop
+        tree is too large to build in reasonable time/memory. The check runs
+        BEFORE the worker thread is spawned (and before any tree-building) so
+        an oversized flop fails fast with an actionable message instead of
+        hanging uncancellably inside ``HUNLTree::build``. Only the concrete
+        postflop path is guarded; the RvR aggregator and chained orchestrator
+        manage their own subgame budgets.
         """
         self._reap_finished_worker()
         if self.is_running:
@@ -973,6 +1111,28 @@ class SolveRunner:
             raise ValueError(
                 f"solver_mode must be 'blueprint', 'true_nash', or 'chained'; "
                 f"got {solver_mode!r}."
+            )
+        # Bug 3: refuse an oversized concrete postflop solve up front. The
+        # flop tree-build hangs for minutes before the iteration loop starts
+        # and is uncancellable; estimate the cost and bail with a clear,
+        # actionable message rather than freezing the UI. The RvR / chained
+        # paths run their own bounded subgames, and the mock path (smoke-test
+        # injection via ``mock_latency_ms`` / ``mock_failure_mode``) never
+        # builds a real tree — so we only gate the concrete, real-engine
+        # postflop dispatch here.
+        is_mock = mock_latency_ms is not None or mock_failure_mode is not None
+        is_concrete_postflop = (
+            not rvr_mode and solver_mode != "chained" and not is_mock
+        )
+        if is_concrete_postflop and exceeds_tree_budget(game.config):
+            cost = estimate_postflop_tree_cost(game.config)
+            raise SolveTooLargeError(
+                "This flop solve is too large to finish in reasonable "
+                "time/memory (the game tree would take minutes to build and "
+                "cannot be cancelled mid-build). Narrow the ranges, reduce the "
+                "checked bet sizes, or solve a turn/river subgame instead of "
+                "the flop.",
+                estimated_cost=cost,
             )
         # Reset state for the new run. Clearing the events here (not in the
         # worker) guarantees a clean slate even if a prior solve set stop/pause
