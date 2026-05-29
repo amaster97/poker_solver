@@ -34,7 +34,15 @@ def show_modal(state: AppState) -> None:
 
     with ui.dialog().props("persistent") as dialog, ui.card().classes("max-w-md"):
         title = ui.label("Welcome to poker-solver").classes("text-lg font-semibold")
-        progress = ui.label(f"Step 1 of {total_steps}").classes("text-xs text-gray-500")
+        # F04: muted caption tracks the theme via the shared --ps-* var
+        # (the bare Tailwind ``text-gray-500`` is a fixed mid-grey that does
+        # not respond to the light/dark toggle). --ps-text-muted is light-
+        # grey on light, near-white-grey on dark.
+        progress = (
+            ui.label(f"Step 1 of {total_steps}")
+            .classes("text-xs")
+            .style("color:var(--ps-text-muted)")
+        )
         ui.separator()
 
         body = ui.column().classes("gap-2")

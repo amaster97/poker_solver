@@ -66,7 +66,6 @@ from poker_solver.card import RANKS, SUITS, Card
 # "once #147 merges these will be lifted into a shared module."
 from ui.views.preflop_chart import (
     _COLOR_CALL,
-    _COLOR_EMPTY,
     _COLOR_FOLD,
     _COLOR_JAM,
     _COLOR_NEUTRAL,
@@ -296,16 +295,18 @@ def render(state: AppState, on_solve: Callable[[], None] | None = None) -> None:
     with (
         ui.element("div")
         .mark("chained-tab-display")
-        .style("background:#0f0f0f;padding:12px;border-radius:6px;width:100%")
+        .style(
+            "background:var(--ps-panel-bg);padding:12px;border-radius:6px;width:100%"
+        )
     ):
         with ui.row().style(
             "align-items:center;justify-content:space-between;margin-bottom:8px"
         ):
             ui.label("CHAIN SOLVE").style(
-                "font-weight:700;letter-spacing:0.05em;color:#f5f5f5"
+                "font-weight:700;letter-spacing:0.05em;color:var(--ps-text-strong)"
             )
             ui.label(_subtitle(state)).mark("chained-tab-status").style(
-                "color:#aaaaaa;font-size:12px"
+                "color:var(--ps-text-muted);font-size:12px"
             )
         # Task #68 Phase 6: routing-path indicator. Shows the preflop +
         # postflop route on one line under the header so the user sees
@@ -389,15 +390,18 @@ def _render_routing_indicator(state: AppState) -> None:
 
     def _color(info: object | None) -> str:
         if info is None:
-            return "#7a7a7a"
+            return "var(--ps-text-fainter)"
         label = getattr(info, "source", None)
         if label == SourceLabel.BLUEPRINT:
-            return "#9ad29a"
+            return "var(--ps-accent-ev)"
         if label == SourceLabel.INTERPOLATED:
-            return "#e0d27c"
+            # Interpolated pale-yellow (--ps-accent-interp): dark = #e0d27c
+            # verbatim (pixel-identical), light darkens to #9a7d00 so the
+            # yellow clears white.
+            return "var(--ps-accent-interp)"
         if label == SourceLabel.LIVE:
-            return "#e8e8e8"
-        return "#7a7a7a"
+            return "var(--ps-text-dim)"
+        return "var(--ps-text-fainter)"
 
     with (
         ui.element("div")
@@ -441,7 +445,10 @@ def _render_cell(state: AppState, hand_class: str, summary: CellSummary) -> None
     color = cell_color_css(summary)
     tag = _cell_tag(summary)
     selected = _selected_class(state) == hand_class
-    border = "#ffffff" if selected else "#1f1f1f"
+    # SELECTED border uses --ps-cell-border-sel (white in dark / dark in
+    # light — purpose-built for a selection border); UNSELECTED maps to
+    # --ps-cell-border.
+    border = "var(--ps-cell-border-sel)" if selected else "var(--ps-cell-border)"
     cell_marker = f"chained-tab-cell chained-tab-cell-{hand_class}"
 
     def _on_click(_event: object = None, cls: str = hand_class) -> None:
@@ -455,7 +462,7 @@ def _render_cell(state: AppState, hand_class: str, summary: CellSummary) -> None
 
     style = (
         f"width:{_CELL_PX}px;height:{_CELL_PX}px;"
-        f"background:{color};color:#f5f5f5;"
+        f"background:{color};color:var(--ps-cell-label);"
         f"border:1px solid {border};"
         f"display:flex;flex-direction:column;justify-content:space-between;"
         f"padding:2px 3px;font-size:10px;cursor:pointer;"
@@ -468,12 +475,12 @@ def _render_cell(state: AppState, hand_class: str, summary: CellSummary) -> None
         .on("click", _on_click)
     ):
         ui.label(hand_class).style(
-            "font-weight:600;line-height:1;color:#f5f5f5"
+            "font-weight:600;line-height:1;color:var(--ps-cell-label)"
         )
         if tag:
             ui.label(tag).style(
                 "font-family:Menlo,Consolas,monospace;font-size:9px;"
-                "align-self:flex-end;color:#1a1a1a"
+                "align-self:flex-end;color:var(--ps-cell-tag)"
             )
         ui.tooltip(_tooltip_text(hand_class, summary))
 
@@ -514,12 +521,12 @@ def _render_right_pane(
     with (
         ui.element("div")
         .style(
-            "background:#181818;padding:10px;border-radius:4px;"
-            "border:1px solid #2a2a2a;margin-bottom:10px"
+            "background:var(--ps-input-bg);padding:10px;border-radius:4px;"
+            "border:1px solid var(--ps-border-soft);margin-bottom:10px"
         )
     ):
         ui.label("Configure chained solve").style(
-            "font-weight:600;color:#f0f0f0;margin-bottom:8px"
+            "font-weight:600;color:var(--ps-text);margin-bottom:8px"
         )
 
         spot = state.current_spot
@@ -671,12 +678,12 @@ def _render_action_selector(
     with (
         ui.element("div")
         .style(
-            "background:#181818;padding:10px;border-radius:4px;"
-            "border:1px solid #2a2a2a;margin-bottom:10px"
+            "background:var(--ps-input-bg);padding:10px;border-radius:4px;"
+            "border:1px solid var(--ps-border-soft);margin-bottom:10px"
         )
     ):
         ui.label("Preflop terminal action").style(
-            "font-weight:600;color:#f0f0f0;margin-bottom:6px"
+            "font-weight:600;color:var(--ps-text);margin-bottom:6px"
         )
 
         def _on_select(e: Any) -> None:
@@ -710,12 +717,12 @@ def _render_board_picker(
         ui.element("div")
         .mark("chained-tab-board-picker")
         .style(
-            "background:#181818;padding:10px;border-radius:4px;"
-            "border:1px solid #2a2a2a;margin-bottom:10px"
+            "background:var(--ps-input-bg);padding:10px;border-radius:4px;"
+            "border:1px solid var(--ps-border-soft);margin-bottom:10px"
         )
     ):
         ui.label("Flop board (3 cards)").style(
-            "font-weight:600;color:#f0f0f0;margin-bottom:6px"
+            "font-weight:600;color:var(--ps-text);margin-bottom:6px"
         )
 
         # Selected-card chip row.
@@ -751,7 +758,10 @@ def _render_board_picker(
                     )
                     btn.mark(f"chained-tab-board-cell-{card_str}")
                     if in_board:
-                        btn.style("background:#3b3b50;color:#ffffff")
+                        btn.style(
+                            "background:var(--ps-selected-bg);"
+                            "color:var(--ps-cell-border-sel)"
+                        )
 
         def _clear() -> None:
             _set_selected_board(state, [])
@@ -799,32 +809,32 @@ def _render_postflop_panel(
         ui.element("div")
         .mark("chained-tab-postflop-display")
         .style(
-            "background:#1b1b1b;padding:10px;border-radius:4px;"
-            "border:1px solid #303030"
+            "background:var(--ps-strip-bg);padding:10px;border-radius:4px;"
+            "border:1px solid var(--ps-border-strong)"
         )
     ):
         ui.label("Postflop strategy").style(
-            "font-weight:600;color:#f0f0f0;margin-bottom:6px"
+            "font-weight:600;color:var(--ps-text);margin-bottom:6px"
         )
 
         result = _chained_result(state)
         if result is None:
             ui.label("Run a chained solve to populate the preflop chart.").style(
-                "color:#a8a8a8;font-style:italic"
+                "color:var(--ps-text-muted);font-style:italic"
             )
             return
 
         selected_class = _selected_class(state)
         if selected_class is None:
             ui.label("Click a preflop cell to select a hand class.").style(
-                "color:#a8a8a8;font-style:italic"
+                "color:var(--ps-text-muted);font-style:italic"
             )
             return
 
         action_seq = _selected_action_sequence(state)
         if action_seq is None or action_seq not in result.continuation_ranges:
             ui.label("Pick a preflop terminal action above.").style(
-                "color:#a8a8a8;font-style:italic"
+                "color:var(--ps-text-muted);font-style:italic"
             )
             return
 
@@ -833,7 +843,7 @@ def _render_postflop_panel(
             ui.label(
                 f"Pick 3 flop cards above (currently {len(board)}/3) to "
                 f"trigger the postflop solve."
-            ).style("color:#a8a8a8;font-style:italic")
+            ).style("color:var(--ps-text-muted);font-style:italic")
             return
 
         board_tuple = tuple(board)
@@ -854,12 +864,12 @@ def _render_postflop_panel(
                 cached = result.solve_postflop(action_seq, board_tuple)
             except (KeyError, ValueError) as exc:
                 ui.label(f"Postflop solve failed: {exc}").style(
-                    "color:#e07070"
+                    "color:var(--ps-text-error)"
                 )
                 return
             except (RuntimeError, ImportError) as exc:
                 logger.exception("chained postflop solve raised")
-                ui.label(f"Postflop solve error: {exc}").style("color:#e07070")
+                ui.label(f"Postflop solve error: {exc}").style("color:var(--ps-text-error)")
                 return
             wall_post = _time.monotonic() - t_post
             # Update the postflop route info badge so the polling timer
@@ -885,14 +895,14 @@ def _render_postflop_panel(
             ui.label(
                 f"{selected_class} not in postflop continuation range (it "
                 f"may have been blocked by the board or filtered out)."
-            ).style("color:#a8a8a8;font-style:italic")
+            ).style("color:var(--ps-text-muted);font-style:italic")
             return
 
         freqs = per_class[selected_class]
         ui.label(
             f"{selected_class} on {''.join(str(c) for c in board_tuple)} "
             f"after {format_action_sequence(action_seq)}"
-        ).style("color:#f0f0f0;font-weight:600;margin-bottom:6px")
+        ).style("color:var(--ps-text);font-weight:600;margin-bottom:6px")
 
         for label, prob in sorted(freqs.items(), key=lambda kv: -float(kv[1])):
             bucket = classify_action(str(label))
@@ -900,7 +910,8 @@ def _render_postflop_panel(
                 "align-items:center;gap:8px;padding:3px 0;"
             ).mark(f"chained-tab-postflop-row-{label}"):
                 ui.label(str(label)).style(
-                    "width:90px;color:#e8e8e8;font-family:Menlo,Consolas,monospace"
+                    "width:90px;color:var(--ps-text-dim);"
+                    "font-family:Menlo,Consolas,monospace"
                 )
                 bar_width = 160
                 fill_px = int(round(float(prob) * bar_width))
@@ -915,14 +926,15 @@ def _render_postflop_panel(
                 )
                 with ui.element("div").style(
                     f"width:{bar_width}px;height:12px;"
-                    f"background:#0a0a0a;border:1px solid #2a2a2a;"
+                    f"background:var(--ps-track-bg);"
+                    f"border:1px solid var(--ps-border-soft);"
                     f"position:relative"
                 ):
                     ui.element("div").style(
                         f"width:{fill_px}px;height:100%;background:{anchor_css}"
                     )
                 ui.label(f"{float(prob) * 100:.1f}%").style(
-                    "color:#cccccc;font-family:Menlo,Consolas,monospace;"
+                    "color:var(--ps-text-mono);font-family:Menlo,Consolas,monospace;"
                     "width:60px;text-align:right"
                 )
 

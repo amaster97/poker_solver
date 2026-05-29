@@ -617,6 +617,12 @@ body, body.body--dark {
   --ps-act-raise: rgb(40,180,60);
   --ps-act-call: rgb(220,200,40);
   --ps-act-fold: rgb(220,40,40);
+  /* Chained-tab neutrals (light-mode follow-up): selection fill, error
+     text, and the interpolated-route accent. Dark = the pre-fix literals
+     verbatim so dark stays pixel-identical. */
+  --ps-selected-bg: #3b3b50;
+  --ps-text-error: #e07070;
+  --ps-accent-interp: #e0d27c;
 }
 body.body--light {
   --ps-panel-bg: #fafafa;
@@ -647,6 +653,9 @@ body.body--light {
   --ps-act-raise: rgb(22,120,45);
   --ps-act-call: rgb(150,120,0);
   --ps-act-fold: rgb(200,30,30);
+  --ps-selected-bg: #dbe4ff;
+  --ps-text-error: #c0392b;
+  --ps-accent-interp: #9a7d00;
 }
 """
 
