@@ -47,7 +47,33 @@ def render(state: AppState) -> None:
     """Render the spot input panel into the current NiceGUI slot.
 
     Caller wraps this in a ``ui.expansion`` panel (per ``ui/app.py``).
+
+    The whole body is wrapped in an ``@ui.refreshable`` so that a
+    full-spot mutation (loading an example spot via ``_on_load_preset``)
+    can repaint the board-picker chips, both players' range inputs, and
+    the stacks / blinds fields in one shot. The refresh callable is
+    registered on ``state.runner._spot_input_refresh`` (mirroring the
+    ``_tree_browser_refresh`` hook convention) so non-render call sites
+    can trigger a redraw without owning the closure.
     """
+    from nicegui import ui
+
+    @ui.refreshable  # type: ignore[untyped-decorator]
+    def _spot_input_body() -> None:
+        _render_spot_input_body(state)
+
+    runner = getattr(state, "runner", None)
+    if runner is not None:
+        try:
+            runner._spot_input_refresh = _spot_input_body.refresh  # noqa: SLF001
+        except Exception:  # noqa: BLE001 -- best-effort hook registration
+            logger.debug("spot_input: could not register refresh hook on runner")
+
+    _spot_input_body()
+
+
+def _render_spot_input_body(state: AppState) -> None:
+    """Render the spot-input body (refreshable inner pass of :func:`render`)."""
     from nicegui import ui
 
     with ui.card().classes("w-full").mark("spot-input-panel"):
@@ -1073,22 +1099,95 @@ def _on_load_preset(state: AppState, preset_id: str) -> None:
         )
         return
 
-    # Materialize the config into the current spot. Skip range mutation;
-    # config carries board + stacks + bet sizes.
-    new_spot = _spot_from_config(config)
+    # Materialize the config into the current spot. This now syncs the
+    # WHOLE spot — board, BOTH players' ranges, stacks, and blinds — so the
+    # board-picker chips and the range matrix match the loaded scenario
+    # (previously only board/stacks/bet-sizes were copied and the UI never
+    # repainted, so chips + ranges stayed on the old values).
+    new_spot = _spot_from_config(config, previous=state.current_spot)
     state.current_spot = new_spot
     save_state()
+
+    # Repaint the dependent views. The spot-input panel (board chips +
+    # range inputs + stacks/blinds) and the range matrix each render once
+    # at page build and otherwise only redraw via their own refresh hooks,
+    # so without these calls the freshly-loaded spot would be invisible.
+    _trigger_spot_views_refresh(state)
+
     ui.notify(f"Loaded preset: {preset_id}", type="info", position="top")
 
 
-def _spot_from_config(config: Any) -> Spot:
-    """Build a ``Spot`` from a ``HUNLConfig`` (preset load helper)."""
+def _trigger_spot_views_refresh(state: AppState) -> None:
+    """Fire the spot-input + range-matrix refresh hooks (best-effort).
+
+    Each view's ``render`` parks its refresh callable on the runner
+    (``_spot_input_refresh`` / ``_range_matrix_refresh``); ``state.matrix_refresh``
+    is the matrix hook under the name ``tree_browser`` also uses. We call
+    whichever are present and never let a missing hook (or a torn-down slot
+    during a tab switch) raise.
+    """
+    runner = getattr(state, "runner", None)
+    hooks = []
+    if runner is not None:
+        hooks.append(getattr(runner, "_spot_input_refresh", None))
+        hooks.append(getattr(runner, "_range_matrix_refresh", None))
+    hooks.append(getattr(state, "matrix_refresh", None))
+    seen: set[int] = set()
+    for hook in hooks:
+        if not callable(hook) or id(hook) in seen:
+            continue
+        seen.add(id(hook))
+        try:
+            hook()
+        except Exception:  # noqa: BLE001 -- best-effort; slot may be gone
+            logger.debug("spot-load refresh hook raised", exc_info=True)
+
+
+def _ranges_from_config(
+    config: Any, previous: Spot | None
+) -> tuple[RangeWithFreqs, RangeWithFreqs]:
+    """Derive both players' ranges for a freshly-loaded preset.
+
+    ``HUNLConfig`` carries concrete ``initial_hole_cards`` (the point-pair
+    a subgame fixture is anchored on) but NOT full per-player ranges. When
+    those hole cards are present we set each player's range to exactly that
+    combo so the loaded spot is a coherent concrete subgame and the matrix
+    visibly tracks the load. When they're absent (full-range fixtures) we
+    preserve the user's existing ranges if any, else default to full.
+    """
+    hole = getattr(config, "initial_hole_cards", ()) or ()
+    if isinstance(hole, (tuple, list)) and len(hole) == 2:
+        ranges: list[RangeWithFreqs] = []
+        for pair in hole:
+            rw = RangeWithFreqs.empty()
+            try:
+                rw.set_frequency((pair[0], pair[1]), 1.0)
+            except Exception:  # noqa: BLE001 -- malformed pair; fall back
+                rw = RangeWithFreqs.full()
+            ranges.append(rw)
+        return (ranges[0], ranges[1])
+    # No concrete hole cards: keep whatever the user had, else full ranges.
+    if previous is not None and getattr(previous, "ranges", None):
+        prev = previous.ranges
+        if isinstance(prev, (tuple, list)) and len(prev) == 2:
+            return (prev[0], prev[1])
+    return (RangeWithFreqs.full(), RangeWithFreqs.full())
+
+
+def _spot_from_config(config: Any, previous: Spot | None = None) -> Spot:
+    """Build a ``Spot`` from a ``HUNLConfig`` (preset load helper).
+
+    Syncs board, both players' ranges (derived via :func:`_ranges_from_config`),
+    stacks, blinds, ante, and bet sizes from the preset config so the whole
+    spot — not just the board — reflects the loaded scenario.
+    """
     board = list(config.initial_board)
     starting_stack = config.starting_stack
     big_blind = config.big_blind
     stacks_bb = (int(starting_stack / big_blind), int(starting_stack / big_blind))
     return Spot(
         board=board,
+        ranges=_ranges_from_config(config, previous),
         stacks_bb=stacks_bb,
         sb_blind=config.small_blind / big_blind,
         bb_blind=1.0,

@@ -29,6 +29,7 @@ the ``@ui.refreshable`` pattern follows the v2.x docs.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable
@@ -185,6 +186,14 @@ def _snapshot_state(snapshot: object) -> HUNLState | None:
     state = getattr(snapshot, "state", None)
     if isinstance(state, HUNLState):
         return state
+    # ``tree_browser.TreeNode`` carries the per-node game state under
+    # ``state_snapshot`` (not ``state``). Selecting a decision-tree node
+    # hands one of those nodes through ``_current_tree_snapshot`` so the
+    # matrix can project that node's infoset — without this branch the
+    # off-/on-path projection would silently fall back to the root state.
+    node_snapshot = getattr(snapshot, "state_snapshot", None)
+    if isinstance(node_snapshot, HUNLState):
+        return node_snapshot
     return None
 
 
@@ -576,37 +585,99 @@ def _current_board(state: AppState) -> Sequence[Card]:
 
 
 def _current_strategy(state: AppState) -> dict[str, np.ndarray]:
+    # Resolve the finished solve's strategy. A ``SolveSession`` carries no
+    # ``result`` of its own (the result lives on the runner it references),
+    # so we look on the session first (future-proof) then fall back to the
+    # runner directly — including when ``current_solve`` is None, so the
+    # matrix still projects whenever the runner holds a finished result
+    # (mirrors how ``_resolve_tree`` builds the tree straight off the
+    # runner). Without the unconditional runner fallback the node->matrix
+    # projection went blank whenever ``current_solve`` wasn't set.
     solve = _safe_state_field(state, "current_solve", None)
-    if solve is None:
-        return {}
-    result = getattr(solve, "result", None) or getattr(
-        _safe_state_field(state, "runner", None), "result", None
-    )
+    runner = _safe_state_field(state, "runner", None)
+    result = getattr(solve, "result", None) if solve is not None else None
+    if result is None:
+        result = getattr(runner, "result", None)
     if result is None:
         return {}
     raw = getattr(result, "average_strategy", {})
     return {str(k): np.asarray(v, dtype=float) for k, v in raw.items()}
 
 
-def _current_tree_snapshot(state: AppState) -> object:
-    """Return the game-state snapshot at the currently selected tree
-    node. Falls back to the spot's starting state when no tree is
-    materialized yet (PR 10a renders the matrix at the root by default)."""
+def _resolve_tree(state: AppState) -> object | None:
+    """Best-effort retrieval of the live ``SolveTree`` for the current solve.
 
-    tree = _safe_state_field(state, "current_tree", None)
+    Resolution order mirrors ``tree_browser._resolve_tree`` (the canonical
+    builder): a pre-built tree parked on ``state.current_tree`` /
+    ``state.current_solve.tree`` wins, otherwise we build (and reuse the
+    runner-cached) tree from the finished solve result. We import the
+    tree_browser resolver lazily so the matrix module stays importable in
+    isolation (and to avoid a hard import cycle).
+    """
+
+    direct = _safe_state_field(state, "current_tree", None)
+    if direct is not None:
+        return direct
+    solve = _safe_state_field(state, "current_solve", None)
+    if solve is not None:
+        embedded = getattr(solve, "tree", None) or getattr(
+            solve, "current_tree", None
+        )
+        if embedded is not None:
+            return embedded
+    try:
+        from ui.views.tree_browser import _build_tree_from_runner
+    except Exception:  # noqa: BLE001 -- tree_browser optional in isolation
+        return None
+    try:
+        return _build_tree_from_runner(state)
+    except Exception:  # noqa: BLE001 -- never let resolution crash the matrix
+        return None
+
+
+def _current_tree_snapshot(state: AppState) -> object:
+    """Return the game-state snapshot at the currently selected tree node.
+
+    Selecting a decision-tree node sets ``state.current_tree_node_id``; this
+    resolves that id against the live ``SolveTree`` and returns the matching
+    :class:`tree_browser.TreeNode` (which carries ``state_snapshot`` /
+    ``player_to_act`` / ``legal_actions`` — exactly the fields the snapshot
+    helpers read). On-path and off-path (counterfactual) nodes resolve the
+    same way: the tree materializes any node on its slash-path on demand.
+
+    Falls back to the spot's starting state when no tree is materialized yet
+    (PR 10a renders the matrix at the root by default)."""
+
+    tree = _resolve_tree(state)
     node_id = _safe_state_field(state, "current_tree_node_id", "root")
     if tree is not None:
         try:
-            node = tree.get_node(str(node_id))
-            return node
+            return tree.get_node(str(node_id))
         except (KeyError, AttributeError, ValueError):
-            pass
+            # Stale node id (e.g. selected node from a previous solve) —
+            # fall back to the root node so the matrix still projects
+            # something coherent rather than going blank.
+            try:
+                return tree.get_node("root")
+            except (KeyError, AttributeError, ValueError):
+                pass
     spot = _safe_state_field(state, "current_spot", None)
     if spot is None:
         return None
     from poker_solver.hunl import HUNLPoker
 
     config = getattr(spot, "config", None) or getattr(spot, "hunl_config", None)
+    if config is None:
+        # ``Spot`` exposes the canonical builder as ``to_hunl_config()``;
+        # the bare ``config`` / ``hunl_config`` attribute names never
+        # existed, so without this the no-tree fallback always returned
+        # ``None`` and the matrix rendered combo-count-only cells.
+        to_config = getattr(spot, "to_hunl_config", None)
+        if callable(to_config):
+            try:
+                config = to_config()
+            except Exception:  # noqa: BLE001 -- malformed spot; bail out
+                return None
     if config is None:
         return None
     return HUNLPoker(config).initial_state()
@@ -660,7 +731,6 @@ class _CellRender:
 def _build_grid_summaries(
     state: AppState,
 ) -> list[_CellRender]:
-    range_ = _current_range(state, _selected_player(state))
     board = _current_board(state)
 
     # PR 24a §3.2: range-vs-range overlay. When the active solve produced
@@ -670,11 +740,26 @@ def _build_grid_summaries(
     # hero's slot so the front-tab view stays "hero's strategy."
     rvr_result = _current_rvr_result(state)
     if rvr_result is not None:
+        range_ = _current_range(state, _selected_player(state))
         return _build_grid_summaries_rvr(state, rvr_result, range_, board)
 
     strategy = _current_strategy(state)
     snapshot = _current_tree_snapshot(state)
     tree_node_id = str(_safe_state_field(state, "current_tree_node_id", "root"))
+
+    # Project the strategy of the player who acts AT THE SELECTED NODE.
+    # ``cell_strategy_summary`` already builds infoset keys for the
+    # snapshot's ``player_to_act``; the displayed range must match that
+    # same player or the per-combo strategy lookup queries one player's
+    # range with the other player's infoset (incoherent cells when the
+    # navigated node belongs to the opponent). Fall back to the input-tab
+    # selection when no node snapshot resolves (pre-solve / chance node).
+    node_player = _snapshot_player(snapshot) if snapshot is not None else None
+    if node_player is not None and node_player in (0, 1):
+        grid_player = node_player
+    else:
+        grid_player = _selected_player(state)
+    range_ = _current_range(state, grid_player)
 
     rendered: list[_CellRender] = []
     for row in range(13):
@@ -1049,6 +1134,42 @@ def render(state: AppState) -> None:
 
     ui_mod = _import_nicegui()
 
+    # Whole-matrix refreshable wrapper. Selecting a decision-tree node
+    # (``tree_browser.on_tree_node_selected``) or loading an example spot
+    # (``spot_input._on_load_preset``) mutates ``state`` then calls the
+    # refresh hook registered below; re-running this body repaints the
+    # grid + header against the new ``current_tree_node_id`` /
+    # ``current_spot``. Without this the matrix only ever drew once at
+    # page build (the on/off-path navigation + spot-load desync bugs).
+    @ui_mod.refreshable  # type: ignore[untyped-decorator]
+    def _matrix_body() -> None:
+        _render_matrix_body(state, ui_mod)
+
+    # Register the refresh callable on BOTH the runner (mirrors the
+    # ``_tree_browser_refresh`` / ``_preflop_chart_refresh`` hook
+    # convention) and ``state.matrix_refresh`` (the exact attribute name
+    # ``tree_browser.on_tree_node_selected`` already looks up to drive the
+    # matrix after a node click). Best-effort: never let hook registration
+    # break the first render.
+    refresh_callable = _matrix_body.refresh
+    runner = _safe_state_field(state, "runner", None)
+    if runner is not None:
+        with contextlib.suppress(Exception):
+            runner._range_matrix_refresh = refresh_callable  # noqa: SLF001
+    with contextlib.suppress(Exception):
+        state.matrix_refresh = refresh_callable  # type: ignore[attr-defined]
+
+    _matrix_body()
+
+
+def _render_matrix_body(state: AppState, ui_mod: Any) -> None:
+    """Render the matrix body (refreshable inner pass of :func:`render`).
+
+    Split out of :func:`render` so the ``@ui.refreshable`` wrapper re-runs
+    JUST the grid + header + inspector when a node is selected or a spot is
+    loaded, without re-registering the refresh hooks.
+    """
+
     # Inner refreshable for the combo inspector so cell clicks can
     # re-render the strip without touching the matrix. Pattern from
     # the in-repo NiceGUI guide (mental model 8 — refreshable elements).
@@ -1175,9 +1296,15 @@ def _matrix_subtitle(state: AppState) -> str:
     """
 
     node_id = _safe_state_field(state, "current_tree_node_id", "root")
-    player = _selected_player(state)
     spot = _safe_state_field(state, "current_spot", None)
     hero_player = int(getattr(spot, "hero_player", 0)) if spot is not None else 0
+    # When a decision-tree node is selected, the "to act" player is the
+    # node's ``player_to_act`` (so the header tracks the navigated node,
+    # not just the input-tab selection). Fall back to the rendered slot
+    # when there's no resolvable node (pre-solve root view).
+    snapshot = _current_tree_snapshot(state)
+    node_player = _snapshot_player(snapshot) if snapshot is not None else None
+    player = node_player if node_player is not None else _selected_player(state)
     if spot is not None and getattr(spot, "rvr_mode", False):
         position = "aggressor" if hero_player == 0 else "defender"
         return (

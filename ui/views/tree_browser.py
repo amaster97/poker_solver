@@ -612,9 +612,26 @@ def on_tree_node_selected(state: AppState, node_id: str) -> None:
         prefs = _safe_state_field(state, "prefs", None)
         if prefs is not None:
             prefs.current_tree_node_id = str(node_id)
-    refresher = _safe_state_field(state, "matrix_refresh", None)
-    if callable(refresher):
-        refresher()
+    # Drive the range-matrix repaint. ``range_matrix.render`` registers its
+    # refresh callable under BOTH ``state.matrix_refresh`` and
+    # ``runner._range_matrix_refresh``; either drives the same closure. Call
+    # whichever resolves (de-duped) so a node click projects that node's
+    # per-combo strategy into the 13x13 grid. Best-effort: a torn-down slot
+    # (tab switch) must not bubble out of an on-select handler.
+    runner = _safe_state_field(state, "runner", None)
+    candidates = [
+        _safe_state_field(state, "matrix_refresh", None),
+        getattr(runner, "_range_matrix_refresh", None) if runner else None,
+    ]
+    seen: set[int] = set()
+    for refresher in candidates:
+        if not callable(refresher) or id(refresher) in seen:
+            continue
+        seen.add(id(refresher))
+        try:
+            refresher()
+        except Exception:  # noqa: BLE001 -- best-effort; slot may be gone
+            logger.debug("on_tree_node_selected: matrix refresh raised")
 
 
 def on_tree_node_expanded(state: AppState, node_id: str) -> None:
