@@ -222,7 +222,14 @@ def solve(
         backend: ``"python"`` (the reference tier) or ``"rust"`` (PR 6
             production tier for HUNL postflop; PR 1/2 Rust for Kuhn/Leduc).
             HUNL preflop on the Rust backend raises ``NotImplementedError``
-            pointing at PR 9.
+            pointing at PR 9 when no hole cards are set.
+            NOTE (v1.11): the UI always drives postflop on the Rust tier
+            and never exposes a Python choice (see
+            ``ui/state.py:SolveRunner._dispatch_solve``); this function
+            still honors an explicit ``backend="python"`` for tests / CLI /
+            cross-tier validation. ``backend="rust"`` postflop falls back to
+            the Python reference engine (with a logged warning) only when
+            the Rust extension is unavailable.
         log_every: if set, record exploitability every `log_every` iterations.
         force_tree_solve: if True, skip the push/fold chart short-circuit and
             always run the tree-builder solver. Power-user escape hatch per
@@ -283,14 +290,24 @@ def solve(
             eff_bb,
         )
         return solve_pushfold(game.config)
-    # PR 6: HUNL postflop Rust branch. Routes to `_solve_rust` (which calls
-    # the PyO3 binding `_rust.solve_hunl_postflop`) when the user opts in
-    # via `backend="rust"`. The default Python path (next branch) is
-    # unchanged from PR 5.
+    # HUNL postflop dispatch. v1.11 UI decision: the engine is no longer a
+    # user-visible choice and the word "Python" is never surfaced as an
+    # engine option (the toggle was removed; ``SolveRunner.start`` defaults
+    # to "rust"). This canonical entry point still HONORS an explicit
+    # ``backend="python"`` so the reference tier stays available to tests,
+    # the CLI, and cross-tier validation runs. The UI's postflop path
+    # (``ui/state.py:SolveRunner._dispatch_solve``) currently routes through
+    # ``solve_hunl_postflop`` directly — NOT this function — because that is
+    # the only engine that supports the UI's live progress streaming and
+    # mid-solve cancellation (the Rust ``solve_hunl_postflop`` binding
+    # exposes neither hook yet). When ``backend == "rust"`` here we route to
+    # ``_solve_rust`` if the binding is importable; otherwise we log a
+    # warning and fall through to the Python reference solver below.
     if (
         backend == "rust"
         and isinstance(game, HUNLPoker)
         and Street.FLOP <= game.config.starting_street < Street.SHOWDOWN
+        and _rust_postflop_available()
     ):
         return _solve_rust(
             game,
@@ -298,10 +315,17 @@ def solve(
             locked_strategies=locked_strategies,
             **dcfr_kwargs,
         )
-    # PR 5: HUNL postflop Python dispatch. See PR 9 spec §6 for the
-    # canonical full dispatch composition; PR 5 adds the postflop branch
-    # only; the push/fold short-circuit above takes precedence; the Rust
-    # branch above pre-empts when `backend == "rust"`.
+    if (
+        backend == "rust"
+        and isinstance(game, HUNLPoker)
+        and Street.FLOP <= game.config.starting_street < Street.SHOWDOWN
+    ):
+        logger.warning(
+            "Rust postflop binding unavailable; falling back to the "
+            "reference engine for this postflop solve."
+        )
+    # PR 5: HUNL postflop Python reference dispatch. Reached when
+    # ``backend != "rust"`` or the Rust binding is unavailable.
     if (
         isinstance(game, HUNLPoker)
         and Street.FLOP <= game.config.starting_street < Street.SHOWDOWN
@@ -779,6 +803,21 @@ def _compute_exploitability_rust(
     if -1e-9 < expl < 0.0:
         expl = 0.0
     return expl, float(out["game_value"])
+
+
+def _rust_postflop_available() -> bool:
+    """True iff the Rust ``solve_hunl_postflop`` binding is importable.
+
+    Postflop dispatch in :func:`solve` forces the Rust production tier; this
+    guard lets it fall back to the Python reference engine when the
+    extension is genuinely unavailable (not built / wrong arch) instead of
+    raising. Failure returns ``False`` so the fallback engages silently.
+    """
+    try:
+        from poker_solver import _rust as _rust_module  # type: ignore[import-untyped]
+    except (ImportError, ModuleNotFoundError):
+        return False
+    return getattr(_rust_module, "solve_hunl_postflop", None) is not None
 
 
 def _solve_rust(

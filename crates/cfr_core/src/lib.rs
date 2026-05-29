@@ -217,6 +217,9 @@ fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
     locked_strategies=None,
     regret_init_noise=0.0,
     rng_seed=0,
+    log_every=None,
+    on_progress=None,
+    should_stop=None,
 ))]
 #[allow(clippy::too_many_arguments)]
 fn solve_hunl_postflop(
@@ -232,6 +235,9 @@ fn solve_hunl_postflop(
     locked_strategies: Option<HashMap<String, Vec<f64>>>,
     regret_init_noise: f64,
     rng_seed: u64,
+    log_every: Option<u32>,
+    on_progress: Option<PyObject>,
+    should_stop: Option<PyObject>,
 ) -> PyResult<PyObject> {
     // GIL-bound prep (cheap): deserialize config + load abstraction. We can't
     // hold `Option<&AbstractionTables>` across `allow_threads` because the
@@ -247,8 +253,54 @@ fn solve_hunl_postflop(
         None => None,
     };
 
+    // v1.11 GUI hooks. The bulk of the solve runs GIL-free (see
+    // `allow_threads` below); we re-acquire the GIL ONLY at checkpoint
+    // boundaries (every `log_every` iters) to (a) fire `on_progress(iter,
+    // exploitability_or_None)` for the progress bar and (b) poll
+    // `should_stop() -> bool` for the Stop button. Because checkpoints are
+    // `log_every`-spaced (not per-iteration), the GIL churn is negligible.
+    //
+    // `progress_closure` is the single `FnMut(u32) -> bool` the pure-Rust
+    // solver calls; it returns `true` to request a cooperative early stop.
+    // Any Python-side error (a raised exception in either callable) is
+    // captured into `callback_err` and surfaced after the solve unwinds, so
+    // a misbehaving GUI callback can't corrupt the partial result.
+    let has_callbacks = on_progress.is_some() || should_stop.is_some();
+    let mut callback_err: Option<PyErr> = None;
+    let effective_log_every = if has_callbacks { log_every } else { None };
+
+    let mut progress_closure = |completed: u32| -> bool {
+        // Re-acquire the GIL only here (checkpoint boundary).
+        Python::with_gil(|py| {
+            if let Some(cb) = on_progress.as_ref() {
+                // Postflop exploitability is recomputed Python-side (D5), so
+                // we pass `None` here; the GUI uses the iteration count for
+                // the bar and recomputes exploitability after the solve.
+                if let Err(e) = cb.call1(py, (completed, py.None())) {
+                    callback_err = Some(e);
+                    return true; // abort cleanly; error surfaced below.
+                }
+            }
+            if let Some(cb) = should_stop.as_ref() {
+                match cb.call1(py, (completed,)).and_then(|r| r.extract::<bool>(py)) {
+                    Ok(stop) => return stop,
+                    Err(e) => {
+                        callback_err = Some(e);
+                        return true;
+                    }
+                }
+            }
+            false
+        })
+    };
+
     // Release the GIL for the duration of the pure-Rust DCFR loop. Critical
     // to avoid GIL contention with the calling Python thread (spec §9 #11).
+    // The checkpoint callback re-acquires the GIL internally via
+    // `Python::with_gil`, so we hand the solver a `&mut dyn FnMut` whose body
+    // is GIL-free until a checkpoint fires.
+    let progress_arg: Option<&mut (dyn FnMut(u32) -> bool + Send)> =
+        if has_callbacks { Some(&mut progress_closure) } else { None };
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         py.allow_threads(|| {
             hunl_solver::solve_hunl_postflop(
@@ -263,9 +315,16 @@ fn solve_hunl_postflop(
                 locked_strategies,
                 regret_init_noise,
                 rng_seed,
+                effective_log_every,
+                progress_arg,
             )
         })
     }));
+    // Surface any error raised inside a Python callback before unwrapping the
+    // solve result, so the GUI sees the real cause (not a generic stop).
+    if let Some(e) = callback_err {
+        return Err(e);
+    }
     let result = result.map_err(|payload| PyValueError::new_err(panic_message(&payload)))?;
     let out = result.map_err(|e| PyValueError::new_err(format!("{e}")))?;
 
