@@ -419,8 +419,8 @@ async def test_solve_button_uses_blueprint_when_available(
     assert len(badges) >= 1
     badge_texts = [str(getattr(b, "text", "")) for b in badges]
     assert any(
-        "[blueprint]" in t for t in badge_texts
-    ), f"no [blueprint] badge among {badge_texts!r}"
+        "Blueprint" in t for t in badge_texts
+    ), f"no Blueprint badge among {badge_texts!r}"
 
 
 def test_chained_route_info_populated_after_solve() -> None:
@@ -520,5 +520,5 @@ async def test_solve_button_uses_interp_when_between_anchors(
     assert len(badges) >= 1
     badge_texts = [str(getattr(b, "text", "")) for b in badges]
     assert any(
-        "[interpolated]" in t for t in badge_texts
-    ), f"no [interpolated] badge among {badge_texts!r}"
+        "Interpolated" in t for t in badge_texts
+    ), f"no Interpolated badge among {badge_texts!r}"
