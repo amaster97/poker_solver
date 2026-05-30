@@ -184,20 +184,32 @@ def _run_solve(
         chance node.
 
     Restores the original env state on exit.
+
+    Both legs additionally force ``CFR_SUIT_ISO=0`` and ``CFR_TERMINAL_IE=0``.
+    Those two opts are now DEFAULT-ON in production, but this gate isolates a
+    SINGLE axis — the flop-template walker vs the legacy chance-arm loop — and
+    must compare the two at 1e-12. Pinning the other two opts off in BOTH legs
+    keeps suit-iso/IE from confounding the flop-template diff (the suit-iso /
+    IE paths have their own dedicated parity gates).
     """
     env_was = os.environ.get("CFR_VECTOR_FLOP_TEMPLATE")
+    suit_iso_was = os.environ.get("CFR_SUIT_ISO")
+    terminal_ie_was = os.environ.get("CFR_TERMINAL_IE")
     if template_mode == "canonical":
         os.environ["CFR_VECTOR_FLOP_TEMPLATE"] = "0"
     elif template_mode == "vector":
         os.environ.pop("CFR_VECTOR_FLOP_TEMPLATE", None)
     else:
         raise ValueError(f"unknown template_mode: {template_mode!r}")
-    # Force the SERIAL chance path in BOTH legs. Rayon chance-parallelism is
-    # now default-on, so without this both the canonical and vector legs would
-    # run rayon — which (a) makes the 1e-12 bit-identical diff fragile and
-    # (b) bypasses the PR-3 flop-template walker this test exists to exercise.
+    # Force the SERIAL chance path AND the legacy (non-iso, non-IE) eval in BOTH
+    # legs. Rayon, suit-iso, and IE are all now default-on, so without this both
+    # the canonical and vector legs would run them — which (a) makes the 1e-12
+    # bit-identical diff fragile and (b) bypasses the PR-3 flop-template walker
+    # this test exists to exercise.
     rayon_was = os.environ.get("CFR_RAYON_CHANCE")
     os.environ["CFR_RAYON_CHANCE"] = "0"
+    os.environ["CFR_SUIT_ISO"] = "0"
+    os.environ["CFR_TERMINAL_IE"] = "0"
     try:
         result = solve_range_vs_range_nash(
             cfg,
@@ -220,6 +232,14 @@ def _run_solve(
             os.environ.pop("CFR_RAYON_CHANCE", None)
         else:
             os.environ["CFR_RAYON_CHANCE"] = rayon_was
+        if suit_iso_was is None:
+            os.environ.pop("CFR_SUIT_ISO", None)
+        else:
+            os.environ["CFR_SUIT_ISO"] = suit_iso_was
+        if terminal_ie_was is None:
+            os.environ.pop("CFR_TERMINAL_IE", None)
+        else:
+            os.environ["CFR_TERMINAL_IE"] = terminal_ie_was
 
 
 def _assert_strategy_bit_identical(

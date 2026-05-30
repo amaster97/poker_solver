@@ -476,6 +476,16 @@ def run_fixture(spec: FixtureSpec) -> FixtureCapture:
         cap.error = spec.skip_on_main
         return cap
 
+    # The committed baseline JSON was captured against the LEGACY engine
+    # (suit-iso + inclusion-exclusion both OFF), and this harness gates at
+    # 1e-12. Those two opts are now DEFAULT-ON in production, so force them
+    # OFF here to keep gating the canonical legacy reference path bit-exactly.
+    # Their own parity vs the legacy path is covered by the dedicated suit-iso
+    # / IE diff tests. Saved + restored so no env state leaks across fixtures.
+    suit_iso_was = os.environ.get("CFR_SUIT_ISO")
+    terminal_ie_was = os.environ.get("CFR_TERMINAL_IE")
+    os.environ["CFR_SUIT_ISO"] = "0"
+    os.environ["CFR_TERMINAL_IE"] = "0"
     t0 = time.perf_counter()
     try:
         if spec.builder_kind == "kuhn":
@@ -572,6 +582,14 @@ def run_fixture(spec: FixtureSpec) -> FixtureCapture:
         cap.error = repr(exc)
     finally:
         cap.wall_seconds = time.perf_counter() - t0
+        if suit_iso_was is None:
+            os.environ.pop("CFR_SUIT_ISO", None)
+        else:
+            os.environ["CFR_SUIT_ISO"] = suit_iso_was
+        if terminal_ie_was is None:
+            os.environ.pop("CFR_TERMINAL_IE", None)
+        else:
+            os.environ["CFR_TERMINAL_IE"] = terminal_ie_was
     return cap
 
 

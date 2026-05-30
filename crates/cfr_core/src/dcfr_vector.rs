@@ -1009,18 +1009,19 @@ impl VectorDCFR {
             ),
         };
         // Read `CFR_TERMINAL_IE` ONCE per solve (mirroring `rayon_enabled`).
-        // When set, the inclusion-exclusion terminal evaluator is used and
-        // its precompute is built into the cache; when unset, no IE data is
-        // built and the legacy cached path runs unchanged. An explicit
-        // override (test path) bypasses the env read entirely; `None` reads
-        // the env (production), keeping that path byte-identical.
+        // Default-ON: unless force-off (`CFR_TERMINAL_IE=0`/`false`/`off`), the
+        // inclusion-exclusion terminal evaluator is used and its precompute is
+        // built into the cache; when force-off, no IE data is built and the
+        // legacy cached path runs unchanged. An explicit override (test path)
+        // bypasses the env read entirely; `None` reads the env (production).
         let terminal_ie = terminal_ie_override.unwrap_or_else(terminal_ie_enabled);
-        // `perf/suit-iso` Stage 2b — read `CFR_SUIT_ISO` ONCE per solve. When
-        // set, build the value-collapse cache (per-chance-node iso classes +
-        // per-member hand-index permutations) from the INITIAL reach vectors
-        // and thread a `suit_iso` bool through the chance walk. When unset, the
-        // cache is empty/inactive and the chance loop is byte-identical to the
-        // legacy path.
+        // `perf/suit-iso` Stage 2b — read `CFR_SUIT_ISO` ONCE per solve.
+        // Default-ON: unless force-off (`CFR_SUIT_ISO=0`/`false`/`off`), build
+        // the value-collapse cache (per-chance-node iso classes + per-member
+        // hand-index permutations) from the INITIAL reach vectors and thread a
+        // `suit_iso` bool through the chance walk. When force-off, the cache is
+        // empty/inactive and the chance loop is byte-identical to the legacy
+        // path.
         // Stage 3a — prefer the caller-supplied cache (single source of truth
         // for the sparse-allocation skip mask). A caller that hands in a cache
         // has already opted into the collapse (the production path only builds
@@ -2493,7 +2494,8 @@ fn terminal_value_vector_cached(
     out
 }
 
-/// **Inclusion-exclusion terminal-leaf value vector (opt-in, `CFR_TERMINAL_IE`).**
+/// **Inclusion-exclusion terminal-leaf value vector (default-on; opt out with
+/// `CFR_TERMINAL_IE=0`).**
 ///
 /// Same math as [`terminal_value_vector_cached`] (the parity reference)
 /// but evaluated in O(N + N·B) instead of O(N²): a prefix sum over opp
@@ -2598,21 +2600,32 @@ fn terminal_value_vector_ie(
     out
 }
 
-/// Read `CFR_TERMINAL_IE` from the environment. Returns `true` iff the
-/// variable is set to any non-empty value. Called ONCE per
+/// Read `CFR_TERMINAL_IE` from the environment. **Default-ON**: returns `true`
+/// UNLESS the variable is explicitly set to `0`/`false`/`off` (case-insensitive,
+/// trimmed). Unset, empty, or any other value yields `true`. Called ONCE per
 /// `VectorDCFR::solve` and threaded through the traversal (mirroring
-/// `parallel_chance_enabled`), so flag-off solves never touch the IE path.
+/// `parallel_chance_enabled`), so a force-off solve never touches the IE path.
+/// Set `CFR_TERMINAL_IE=0` (or `false`/`off`) to force the legacy terminal
+/// evaluator; bit-exact tests force-off explicitly via that env or an override.
 pub(crate) fn terminal_ie_enabled() -> bool {
-    matches!(std::env::var("CFR_TERMINAL_IE"), Ok(v) if !v.is_empty())
+    match std::env::var("CFR_TERMINAL_IE") {
+        Ok(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off"),
+        Err(_) => true,
+    }
 }
 
-/// Read `CFR_SUIT_ISO` from the environment. Returns `true` iff the variable
-/// is set to any non-empty value. Called ONCE per `VectorDCFR::solve` and
-/// threaded through the chance traversal (mirroring `terminal_ie_enabled`), so
-/// flag-off solves never build or consult the suit-iso value-collapse cache
-/// and stay byte-identical to the legacy path.
+/// Read `CFR_SUIT_ISO` from the environment. **Default-ON**: returns `true`
+/// UNLESS the variable is explicitly set to `0`/`false`/`off` (case-insensitive,
+/// trimmed). Unset, empty, or any other value yields `true`. Called ONCE per
+/// `VectorDCFR::solve` and threaded through the chance traversal (mirroring
+/// `terminal_ie_enabled`). Set `CFR_SUIT_ISO=0` (or `false`/`off`) to force the
+/// legacy path, which never builds or consults the suit-iso value-collapse cache
+/// and stays byte-identical; bit-exact tests force-off explicitly.
 pub(crate) fn suit_iso_enabled() -> bool {
-    matches!(std::env::var("CFR_SUIT_ISO"), Ok(v) if !v.is_empty())
+    match std::env::var("CFR_SUIT_ISO") {
+        Ok(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off"),
+        Err(_) => true,
+    }
 }
 
 /// Build an output `HashMap<String, Vec<f64>>` matching Python's
@@ -5318,21 +5331,24 @@ mod tests {
         // Drive the collapse via an EXPLICIT cache (not the `CFR_SUIT_ISO` env
         // var) so this helper is deterministic under parallel scheduling. When
         // `suit_iso` is requested we build the same value-collapse cache the
-        // env path would and hand it to the solve; otherwise we pass `None`
-        // (an inactive/empty cache => byte-identical to the flag-off path).
+        // env path would and hand it to the solve; otherwise iso is forced OFF
+        // via an inactive cache (`default()`): `cache_was_supplied=true` +
+        // `is_active()==false` => `suit_iso=false` and an empty skip mask, so
+        // the baseline is byte-identical to the flag-off path with NO env
+        // dependence (production now defaults `CFR_SUIT_ISO` ON).
         // IE and rayon are forced OFF explicitly for the same reason.
         let reach0 = vec![1.0_f64; ctx.hand_count[0]];
         let reach1 = vec![1.0_f64; ctx.hand_count[1]];
         let solve_cache = if suit_iso {
-            Some(crate::suit_iso::build_suit_iso_cache(
+            crate::suit_iso::build_suit_iso_cache(
                 &tree.nodes,
                 &tree.dealt_cards,
                 &tree.initial_board(),
                 &ctx.hole,
                 &[&reach0, &reach1],
-            ))
+            )
         } else {
-            None
+            crate::suit_iso::SuitIsoCache::default()
         };
         let mut solver =
             VectorDCFR::with_init_noise(&tree, ctx.hand_count, 1.5, 0.0, 2.0, 0.0, 0);
@@ -5341,7 +5357,7 @@ mod tests {
             &ctx,
             iters,
             None,
-            solve_cache,
+            Some(solve_cache),
             Some(false),
             Some(false),
         );
@@ -5820,7 +5836,20 @@ mod tests {
         let tree = BettingTree::build_with_mode(&placeholder, BettingTreeMode::TemplateExtract);
 
         let mut solver = VectorDCFR::with_init_noise(&tree, ctx.hand_count, 1.5, 0.0, 2.0, 0.0, 0);
-        solver.solve_with_opts(&tree, &ctx, iters, None, None, Some(false), Some(false));
+        // iso forced OFF via inactive cache (no env dependence): supplying a
+        // `default()` cache makes `cache_was_supplied=true` while
+        // `is_active()==false`, so `solve_with_opts` sets `suit_iso=false` and
+        // `member_skip_mask` yields no skips — a genuinely dense baseline
+        // regardless of the now-default-ON `CFR_SUIT_ISO`. IE/rayon forced off too.
+        solver.solve_with_opts(
+            &tree,
+            &ctx,
+            iters,
+            None,
+            Some(crate::suit_iso::SuitIsoCache::default()),
+            Some(false),
+            Some(false),
+        );
         let final_iter = solver.iteration;
         let (a, b, g) = (solver.alpha, solver.beta, solver.gamma);
         for info in solver.infosets.iter_mut().flatten() {
@@ -6364,10 +6393,22 @@ mod tests {
         let tree = BettingTree::build_with_mode(&placeholder, BettingTreeMode::TemplateExtract);
 
         let mut solver = VectorDCFR::with_init_noise(&tree, ctx.hand_count, 1.5, 0.0, 2.0, 0.0, 0);
-        // Dense reference solve: no cache (all members converged), IE and rayon
-        // forced OFF explicitly so the gate is deterministic regardless of any
-        // env state leaked by a concurrently-running test.
-        solver.solve_with_opts(&tree, &ctx, iters, None, None, Some(false), Some(false));
+        // Dense reference solve: iso forced OFF via inactive cache (no env
+        // dependence) — a `default()` cache gives `cache_was_supplied=true` +
+        // `is_active()==false` => `suit_iso=false` and an empty skip mask, so
+        // every member-board node keeps its own infoset (the full key set the
+        // iso-ON expansion must reproduce). IE and rayon forced OFF explicitly
+        // so the gate is deterministic regardless of any env state leaked by a
+        // concurrently-running test (production now defaults `CFR_SUIT_ISO` ON).
+        solver.solve_with_opts(
+            &tree,
+            &ctx,
+            iters,
+            None,
+            Some(crate::suit_iso::SuitIsoCache::default()),
+            Some(false),
+            Some(false),
+        );
         let final_iter = solver.iteration;
         let (a, b, g) = (solver.alpha, solver.beta, solver.gamma);
         for info in solver.infosets.iter_mut().flatten() {
