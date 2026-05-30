@@ -419,6 +419,71 @@ pub(crate) fn build_suit_iso_cache(
     SuitIsoCache { nodes: out }
 }
 
+/// Stage 3a — the set of betting-tree node indices that are SKIPPED from
+/// infoset / terminal-cache allocation when the suit-iso value collapse is
+/// active.
+///
+/// Returns a `Vec<bool>` parallel to `nodes`: `mask[idx]` is `true` iff `idx`
+/// lies strictly under a NON-REPRESENTATIVE member of a present-AND-`symmetric`
+/// chance collapse. Such nodes are never visited by the value walk (the
+/// stage-2b collapse arm recurses only into representative children and permutes
+/// the representative's value vector onto the members), so their per-node
+/// regret / strategy_sum tables and terminal-cache entries can be dropped.
+///
+/// Mirrors the `mark_representative_nodes` DFS in `dcfr_vector.rs` but inverts
+/// the bookkeeping: a node is "skipped" once the path from the root has crossed
+/// into a non-representative member of a usable collapse. The mask is built from
+/// the SAME cache and SAME `symmetric` predicate the chance-walk dispatches on,
+/// so "skipped" is exactly "never traversed" — a None slot the walk reaches
+/// would be a bug.
+///
+/// Returns an all-false mask when `!cache.is_active()` (flag-off, or no node
+/// collapsed), which keeps allocation byte-identical to the legacy path.
+pub(crate) fn member_skip_mask(
+    nodes: &[crate::exploit::FlatNode],
+    cache: &SuitIsoCache,
+) -> Vec<bool> {
+    use crate::exploit::FlatNode;
+
+    let mut skip = vec![false; nodes.len()];
+    if !cache.is_active() {
+        return skip;
+    }
+    // DFS threading a `kept` bool: `kept == true` means every chance node above
+    // this node was either non-collapsing or we descended its representative
+    // child. The first time we descend a non-representative member of a usable
+    // (present + symmetric) collapse, `kept` flips to false and stays false for
+    // the whole subtree — those nodes are the ones to skip. The chance node
+    // itself and the representative-side subtree stay kept.
+    let mut stack: Vec<(usize, bool)> = vec![(0, true)];
+    while let Some((idx, kept)) = stack.pop() {
+        skip[idx] = !kept;
+        match &nodes[idx] {
+            FlatNode::Chance { children, .. } => {
+                let reps: std::collections::HashSet<usize> = match cache.get(idx) {
+                    Some(c) if c.symmetric => c
+                        .classes
+                        .iter()
+                        .map(|cl| cl.representative_child_idx)
+                        .collect(),
+                    // No usable collapse here -> every child stays kept.
+                    _ => children.iter().copied().collect(),
+                };
+                for &c in children {
+                    stack.push((c, kept && reps.contains(&c)));
+                }
+            }
+            FlatNode::Decision { children, .. } => {
+                for &c in children {
+                    stack.push((c, kept));
+                }
+            }
+            FlatNode::Fold { .. } | FlatNode::Showdown { .. } => {}
+        }
+    }
+    skip
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

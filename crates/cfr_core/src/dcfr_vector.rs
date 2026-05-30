@@ -202,9 +202,32 @@ impl TerminalCache {
     /// [`terminal_value_vector_ie`]. When `false` (default), no IE data is
     /// built — `ie` fields stay `None` and `fold_blockers` stays `None`,
     /// so the flag-off path carries zero added memory/compute cost.
-    pub(crate) fn build(tree: &BettingTree, ctx: &EvalContext, terminal_ie: bool) -> Self {
+    ///
+    /// `perf/suit-iso` Stage 3a — `skip_mask[node_idx]` (when non-empty)
+    /// marks Fold / Showdown leaves that lie strictly under a
+    /// non-representative member of a usable chance collapse. Such leaves are
+    /// never reached by the value walk under suit-iso ON, so they are stored
+    /// as [`LeafCacheEntry::NonTerminal`] — the per-hand `Strength` vectors
+    /// and any [`ShowdownIE`] are NOT built, dropping the secondary memory
+    /// term. The board-independent `fold_blockers` union is unchanged (it is
+    /// per-player, not per-leaf). An EMPTY mask (`&[]`) skips nothing and is
+    /// byte-identical to the dense cache.
+    pub(crate) fn build(
+        tree: &BettingTree,
+        ctx: &EvalContext,
+        terminal_ie: bool,
+        skip_mask: &[bool],
+    ) -> Self {
+        debug_assert!(
+            skip_mask.is_empty() || skip_mask.len() == tree.nodes.len(),
+            "skip_mask must be empty or node-aligned"
+        );
         let mut leaves: Vec<LeafCacheEntry> = Vec::with_capacity(tree.nodes.len());
-        for node in &tree.nodes {
+        for (node_idx, node) in tree.nodes.iter().enumerate() {
+            if skip_mask.get(node_idx).copied().unwrap_or(false) {
+                leaves.push(LeafCacheEntry::NonTerminal);
+                continue;
+            }
             match node {
                 FlatNode::Fold {
                     contributions,
@@ -673,6 +696,32 @@ impl VectorDCFR {
         Self::with_init_noise(tree, hand_count_per_player, alpha, beta, gamma, 0.0, 0)
     }
 
+    /// Thin wrapper preserving the legacy 7-arg `with_init_noise` signature
+    /// (no sparse skip mask). Delegates to [`Self::with_init_noise_masked`]
+    /// with an empty mask, which is byte-identical to the pre-Stage-3a
+    /// dense allocation. All existing callers route through here unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn with_init_noise(
+        tree: &BettingTree,
+        hand_count_per_player: [usize; 2],
+        alpha: f64,
+        beta: f64,
+        gamma: f64,
+        regret_init_noise: f64,
+        rng_seed: u64,
+    ) -> Self {
+        Self::with_init_noise_masked(
+            tree,
+            hand_count_per_player,
+            alpha,
+            beta,
+            gamma,
+            regret_init_noise,
+            rng_seed,
+            &[],
+        )
+    }
+
     /// PR 90 (A83 Track A) — construct with optional initial regret
     /// perturbation for empirical Nash-multiplicity testing.
     ///
@@ -688,7 +737,18 @@ impl VectorDCFR {
     /// `or_insert_with` like the scalar `hunl_solver.rs` path) — so the
     /// perturbation is applied here in the constructor, NOT in the
     /// per-iteration traverse.
-    pub(crate) fn with_init_noise(
+    ///
+    /// `perf/suit-iso` Stage 3a — `skip_mask[node_idx]` (when non-empty)
+    /// marks Decision nodes whose infoset is intentionally NOT allocated
+    /// because the node lies strictly under a non-representative member of a
+    /// usable chance collapse (see [`crate::suit_iso::member_skip_mask`]).
+    /// Such nodes are never reached by the value walk under suit-iso ON, so
+    /// their slot stays `None` and the dominant regret / strategy_sum tables
+    /// are dropped — that is the memory win. An EMPTY mask (`&[]`) skips
+    /// nothing and is byte-identical to the dense allocation, so the
+    /// flag-off path keeps the exact prior behaviour.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn with_init_noise_masked(
         tree: &BettingTree,
         hand_count_per_player: [usize; 2],
         alpha: f64,
@@ -696,14 +756,21 @@ impl VectorDCFR {
         gamma: f64,
         regret_init_noise: f64,
         rng_seed: u64,
+        skip_mask: &[bool],
     ) -> Self {
         // v1.8.1 (HIGH-1): HARD-FAIL on α ≤ 0, WARN on α < 0.5.
         crate::dcfr::validate_alpha(alpha);
+        debug_assert!(
+            skip_mask.is_empty() || skip_mask.len() == tree.nodes.len(),
+            "skip_mask must be empty or node-aligned"
+        );
         let mut init_rng = crate::pcs::PcsRng::new(rng_seed);
         let mut infosets: Vec<Option<VectorInfosetData>> = Vec::with_capacity(tree.nodes.len());
-        for node in &tree.nodes {
+        for (node_idx, node) in tree.nodes.iter().enumerate() {
             match node {
-                FlatNode::Decision { player, actions, .. } => {
+                FlatNode::Decision { player, actions, .. }
+                    if !skip_mask.get(node_idx).copied().unwrap_or(false) =>
+                {
                     let action_count = actions.len();
                     let hand_count = hand_count_per_player[*player as usize];
                     let mut info = VectorInfosetData::new(action_count, hand_count);
@@ -836,12 +903,37 @@ impl VectorDCFR {
     /// Each `w[i]` aligns positionally with `eval_ctx.hole[p][i]` (and
     /// hence with the `p{p}_holes` list that built the `EvalContext`).
     /// All-ones weights are bit-identical to the legacy `None` path.
+    #[allow(dead_code)]
     pub(crate) fn solve(
         &mut self,
         tree: &BettingTree,
         eval_ctx: &EvalContext,
         iterations: u32,
         hand_weights: Option<[Vec<f64>; 2]>,
+    ) {
+        self.solve_with_cache(tree, eval_ctx, iterations, hand_weights, None);
+    }
+
+    /// `perf/suit-iso` Stage 3a — `solve` with an optionally pre-built
+    /// suit-iso value-collapse cache.
+    ///
+    /// When `prebuilt_suit_iso_cache` is `Some`, that cache is used verbatim
+    /// for the chance-walk dispatch instead of rebuilding it inside the solve.
+    /// This is the single-source-of-truth path: the caller
+    /// (`solve_range_vs_range_postflop_with_hands`) builds the cache ONCE,
+    /// derives the [`crate::suit_iso::member_skip_mask`] from it for the
+    /// sparse infoset / terminal-cache allocation, and then hands the SAME
+    /// cache here so "skipped == never traversed" holds exactly. When `None`
+    /// (the legacy test path), the cache is rebuilt from the reach vectors as
+    /// before. Flag-off (`!suit_iso_enabled()`) yields an empty cache either
+    /// way, byte-identical to the legacy behaviour.
+    pub(crate) fn solve_with_cache(
+        &mut self,
+        tree: &BettingTree,
+        eval_ctx: &EvalContext,
+        iterations: u32,
+        hand_weights: Option<[Vec<f64>; 2]>,
+        prebuilt_suit_iso_cache: Option<crate::suit_iso::SuitIsoCache>,
     ) {
         // Initial reach vectors per player. Brown's reference initializes
         // from `hand_weights_ptr_` (the per-hand range weights from the
@@ -885,23 +977,41 @@ impl VectorDCFR {
         // and thread a `suit_iso` bool through the chance walk. When unset, the
         // cache is empty/inactive and the chance loop is byte-identical to the
         // legacy path.
-        let suit_iso = suit_iso_enabled();
-        let suit_iso_cache = if suit_iso {
-            crate::suit_iso::build_suit_iso_cache(
+        // Stage 3a — prefer the caller-supplied cache (single source of truth
+        // for the sparse-allocation skip mask). A caller that hands in a cache
+        // has already opted into the collapse (the production path only builds
+        // one when `suit_iso_enabled()`), AND it allocated infosets sparsely
+        // from this cache's skip mask — so the collapse MUST drive the walk
+        // (otherwise the legacy loop would reach a dropped member slot). Hence
+        // when a cache is supplied we gate `suit_iso` on `cache.is_active()`
+        // alone, NOT on re-reading the env var. Only the rebuild (`None`)
+        // branch consults the env flag.
+        let cache_was_supplied = prebuilt_suit_iso_cache.is_some();
+        let suit_iso_cache = match prebuilt_suit_iso_cache {
+            Some(cache) => cache,
+            None if suit_iso_enabled() => crate::suit_iso::build_suit_iso_cache(
                 &tree.nodes,
                 &tree.dealt_cards,
                 &tree.initial_board(),
                 &eval_ctx.hole,
                 &[&reach_p0, &reach_p1],
-            )
-        } else {
-            crate::suit_iso::SuitIsoCache::default()
+            ),
+            None => crate::suit_iso::SuitIsoCache::default(),
         };
         // Only thread the collapse on when the cache actually collapsed
         // something (every class symmetric somewhere). A built-but-empty cache
-        // keeps the legacy loop, identical to flag-off.
-        let suit_iso = suit_iso && suit_iso_cache.is_active();
-        let terminal_cache = TerminalCache::build(tree, eval_ctx, terminal_ie);
+        // keeps the legacy loop, identical to flag-off. For a rebuilt cache the
+        // env flag must also be set; for a supplied cache the env flag is
+        // irrelevant (the caller already committed to it via the cache + mask).
+        let suit_iso =
+            suit_iso_cache.is_active() && (cache_was_supplied || suit_iso_enabled());
+        // Stage 3a — the terminal cache must use the SAME skip mask the infoset
+        // allocation used, derived from the SAME cache the walk dispatches on,
+        // so skipped leaves are exactly the never-visited ones. When suit-iso
+        // is inactive the mask is empty (`member_skip_mask` returns all-false),
+        // making this byte-identical to the dense cache.
+        let skip_mask = crate::suit_iso::member_skip_mask(&tree.nodes, &suit_iso_cache);
+        let terminal_cache = TerminalCache::build(tree, eval_ctx, terminal_ie, &skip_mask);
         // v1.10 PR-3 — build the RunoutCache once at solve-start so the
         // flop-level walker can reuse its scratch buffers across all
         // iterations. When the tree has no depth==2 chance template
@@ -2629,11 +2739,44 @@ pub fn solve_range_vs_range_postflop_with_hands(
     };
     let tree = BettingTree::build_with_mode(&placeholder, build_mode);
 
+    // `perf/suit-iso` Stage 3a — build the value-collapse cache ONCE here, from
+    // the SAME initial reach vectors the solve will use, so it is the single
+    // source of truth for BOTH the sparse-allocation skip mask (below) and the
+    // chance-walk dispatch (handed to `solve_with_cache`). Flag-off yields an
+    // empty/inactive cache => an all-false skip mask => byte-identical to the
+    // dense path. The reach derivation here mirrors `solve`'s (per-combo
+    // `hand_weights`, else all-ones).
+    let suit_iso_cache = if suit_iso_enabled() {
+        let reach: [Vec<f64>; 2] = match &hand_weights {
+            Some([w0, w1]) => [w0.clone(), w1.clone()],
+            None => [
+                vec![1.0; eval_ctx.hand_count[0]],
+                vec![1.0; eval_ctx.hand_count[1]],
+            ],
+        };
+        crate::suit_iso::build_suit_iso_cache(
+            &tree.nodes,
+            &tree.dealt_cards,
+            &tree.initial_board(),
+            &eval_ctx.hole,
+            &[&reach[0], &reach[1]],
+        )
+    } else {
+        crate::suit_iso::SuitIsoCache::default()
+    };
+    // Skip mask: nodes strictly under a non-representative member of a usable
+    // collapse. Empty-effect (all-false) when the cache is inactive.
+    let skip_mask = crate::suit_iso::member_skip_mask(&tree.nodes, &suit_iso_cache);
+
     // PR 90 (A83 Track A) — `regret_init_noise = 0.0` keeps the prior
     // all-zero initialization (bit-identical to pre-PR 90). Non-zero
     // values seed each per-(hand, action) regret cell with `noise * U(-1, 1)`
     // via a deterministic `PcsRng` stream seeded by `rng_seed`.
-    let mut solver = VectorDCFR::with_init_noise(
+    //
+    // Stage 3a — `skip_mask` drops the infoset tables for never-visited
+    // member-subtree decision nodes (the memory win). All-false mask =>
+    // dense allocation, byte-identical to the flag-off path.
+    let mut solver = VectorDCFR::with_init_noise_masked(
         &tree,
         eval_ctx.hand_count,
         alpha,
@@ -2641,8 +2784,15 @@ pub fn solve_range_vs_range_postflop_with_hands(
         gamma,
         regret_init_noise,
         rng_seed,
+        &skip_mask,
     );
-    solver.solve(&tree, &eval_ctx, iterations, hand_weights);
+    solver.solve_with_cache(
+        &tree,
+        &eval_ctx,
+        iterations,
+        hand_weights,
+        Some(suit_iso_cache),
+    );
 
     // Final discount catch-up to mirror `dcfr.rs::DCFRSolver::solve`
     // tail-discount semantics + Python's `_discount` final pass.
@@ -3099,7 +3249,7 @@ mod tests {
             ctx.hole[1][0],
         ]);
         let tree = BettingTree::build_from(&placeholder);
-        let cache = TerminalCache::build(&tree, &ctx, false);
+        let cache = TerminalCache::build(&tree, &ctx, false, &[]);
 
         // Random-ish reach vectors for both players (deterministic so the
         // test is reproducible; we want non-uniform reach to stress the
@@ -3190,8 +3340,8 @@ mod tests {
         let tree = BettingTree::build_from(&placeholder);
         // IE data built ONLY here (flag-on equivalent); the cached cache
         // (flag-off) is the parity reference.
-        let cache_ie = TerminalCache::build(&tree, &ctx, true);
-        let cache_ref = TerminalCache::build(&tree, &ctx, false);
+        let cache_ie = TerminalCache::build(&tree, &ctx, true, &[]);
+        let cache_ref = TerminalCache::build(&tree, &ctx, false, &[]);
 
         let mk_reach = |n: usize, seed: u64| -> Vec<f64> {
             let mut r = vec![0.0_f64; n];
@@ -4025,7 +4175,7 @@ mod tests {
             let tree =
                 BettingTree::build_with_mode(&placeholder, BettingTreeMode::TemplateExtract);
             let showdowns = count_showdown_leaves(&tree);
-            let cache = TerminalCache::build(&tree, &ctx, true);
+            let cache = TerminalCache::build(&tree, &ctx, true, &[]);
             let mut ie_total = 0usize;
             let mut sample_per_leaf = 0usize;
             for leaf in &cache.leaves {
@@ -4713,7 +4863,7 @@ mod tests {
             crate::suit_iso::SuitIsoCache::default()
         };
         let iso_on = suit_iso && cache.is_active();
-        let terminal_cache = TerminalCache::build(&tree, &ctx, false);
+        let terminal_cache = TerminalCache::build(&tree, &ctx, false, &[]);
         let mut runout_cache = RunoutCache::build(&tree, &ctx);
         let mut arena = BumpArena::new();
         let root_values = traverse_recursive_with_parallel(
@@ -4737,6 +4887,121 @@ mod tests {
             &mut runout_cache,
             iso_on,
             &cache,
+        );
+        let game_value =
+            root_values.iter().sum::<f64>() / (root_values.len().max(1) as f64);
+        (avg, node_player, root_values, game_value)
+    }
+
+    /// `perf/suit-iso` Stage 3a — like [`solve_collapse_capture`] but drives the
+    /// SPARSE-allocation path (the production wiring): build the value-collapse
+    /// cache once, derive the [`crate::suit_iso::member_skip_mask`], allocate
+    /// infosets via `with_init_noise_masked` (member-subtree decision nodes get
+    /// `None` slots), build the terminal cache with the same mask, and solve via
+    /// `solve_with_cache` with the SAME cache. Member-board infosets are
+    /// intentionally absent (that is the 3a memory win); only representative /
+    /// turn-line nodes carry a strategy. Returns the same
+    /// `(avg, node_player, root_values, game_value)` capture shape.
+    ///
+    /// This bypasses the env flag (passes the cache directly) so it composes
+    /// without `CFR_SUIT_ISO` toggling — safe to run in parallel.
+    #[allow(clippy::type_complexity)]
+    fn solve_collapse_capture_sparse(
+        cfg: &HUNLConfig,
+        holes: &[[u8; 2]],
+        iters: u32,
+    ) -> CollapseCapture {
+        let initial = HUNLState::initial(std::sync::Arc::new(cfg.clone()));
+        let ctx = EvalContext::from_hand_lists(holes.to_vec(), holes.to_vec(), cfg.big_blind);
+        let placeholder = initial.clone_with_hole_cards([ctx.hole[0][0], ctx.hole[1][0]]);
+        let tree = BettingTree::build_with_mode(&placeholder, BettingTreeMode::TemplateExtract);
+
+        let reach = vec![1.0_f64; ctx.hand_count[0]];
+        let cache = crate::suit_iso::build_suit_iso_cache(
+            &tree.nodes,
+            &tree.dealt_cards,
+            &tree.initial_board(),
+            &ctx.hole,
+            &[&reach, &reach],
+        );
+        let skip_mask = crate::suit_iso::member_skip_mask(&tree.nodes, &cache);
+
+        let mut solver = VectorDCFR::with_init_noise_masked(
+            &tree,
+            ctx.hand_count,
+            1.5,
+            0.0,
+            2.0,
+            0.0,
+            0,
+            &skip_mask,
+        );
+        // Solve with the SAME cache so "skipped == never traversed" holds; no
+        // env toggling needed.
+        solver.solve_with_cache(&tree, &ctx, iters, None, Some(cache));
+
+        let final_iter = solver.iteration;
+        let (a, b, g) = (solver.alpha, solver.beta, solver.gamma);
+        for info in solver.infosets.iter_mut().flatten() {
+            VectorDCFR::discount(info, final_iter, a, b, g);
+        }
+
+        let mut avg: Vec<Option<Vec<f64>>> = Vec::with_capacity(solver.infosets.len());
+        let mut node_player: Vec<usize> = Vec::with_capacity(solver.infosets.len());
+        for (node_idx, slot) in solver.infosets.iter().enumerate() {
+            match slot {
+                Some(info) => {
+                    let mut rows = vec![0.0_f64; info.hand_count * info.action_count];
+                    VectorDCFR::compute_avg_strategy(info, &mut rows);
+                    avg.push(Some(rows));
+                    let player = match &tree.nodes[node_idx] {
+                        FlatNode::Decision { player, .. } => *player as usize,
+                        _ => unreachable!(),
+                    };
+                    node_player.push(player);
+                }
+                None => {
+                    avg.push(None);
+                    node_player.push(usize::MAX);
+                }
+            }
+        }
+
+        // Root per-hand value vector + game value: rebuild the cache (cheap) for
+        // one root traversal with iso ON. The skip mask matches the infosets'
+        // None slots, so the collapse arm never reaches a None decision slot.
+        let cache2 = crate::suit_iso::build_suit_iso_cache(
+            &tree.nodes,
+            &tree.dealt_cards,
+            &tree.initial_board(),
+            &ctx.hole,
+            &[&reach, &reach],
+        );
+        let iso_on = cache2.is_active();
+        let terminal_cache = TerminalCache::build(&tree, &ctx, false, &skip_mask);
+        let mut runout_cache = RunoutCache::build(&tree, &ctx);
+        let mut arena = BumpArena::new();
+        let root_values = traverse_recursive_with_parallel(
+            &tree,
+            &ctx,
+            &terminal_cache,
+            &mut arena,
+            0,
+            0,
+            final_iter + 1,
+            a,
+            b,
+            g,
+            &reach,
+            &reach,
+            &mut solver.infosets,
+            0,
+            false,
+            false,
+            &solver.has_chance_template,
+            &mut runout_cache,
+            iso_on,
+            &cache2,
         );
         let game_value =
             root_values.iter().sum::<f64>() / (root_values.len().max(1) as f64);
@@ -4978,6 +5243,235 @@ mod tests {
             skipped("RAINBOW"),
             0,
             "RAINBOW (|S|=1) must skip zero members (all singletons)"
+        );
+    }
+
+    // ========================================================================
+    // perf/suit-iso Stage 3a — sparse allocation tests.
+    // ========================================================================
+
+    /// Stage 3a step 0 — `member_skip_mask` on the four turn textures.
+    ///
+    /// Verifies: (1) RAINBOW (|S|=1) skips nothing (all river children are
+    /// singletons, so every member IS a representative); (2) MONOTONE (|S|=6)
+    /// skips the MOST nodes of the four (largest river-deal collapse); (3) the
+    /// mask is exactly the complement of `mark_representative_nodes` on every
+    /// node reachable in the tree (skip[idx] == !rep[idx]); (4) every skipped
+    /// node's infoset slot is None under the sparse allocation (no slot the
+    /// walk would reach is ever dropped).
+    #[test]
+    fn member_skip_mask_four_textures() {
+        let card = card_to_int;
+        let textures: [(&str, Vec<u8>); 4] = [
+            ("RAINBOW", vec![card(14, 0), card(13, 1), card(10, 2), card(7, 3)]),
+            ("TWO-TONE", vec![card(14, 0), card(13, 0), card(10, 1), card(7, 1)]),
+            ("MONOTONE", vec![card(14, 0), card(13, 0), card(10, 0), card(7, 0)]),
+            ("PAIRED", vec![card(13, 0), card(13, 2), card(9, 1), card(4, 3)]),
+        ];
+        let range_ranks: [u8; 4] = [12, 11, 6, 5];
+
+        let mut skip_counts: Vec<(String, usize)> = Vec::new();
+        for (name, board) in &textures {
+            let cfg = collapse_turn_config(board);
+            let holes = collapse_symmetric_range(board, &range_ranks);
+            let initial = HUNLState::initial(std::sync::Arc::new(cfg.clone()));
+            let ctx = EvalContext::from_hand_lists(holes.clone(), holes.clone(), cfg.big_blind);
+            let placeholder = initial.clone_with_hole_cards([ctx.hole[0][0], ctx.hole[1][0]]);
+            let tree =
+                BettingTree::build_with_mode(&placeholder, BettingTreeMode::TemplateExtract);
+            let reach = vec![1.0_f64; ctx.hand_count[0]];
+            let cache = crate::suit_iso::build_suit_iso_cache(
+                &tree.nodes,
+                &tree.dealt_cards,
+                &tree.initial_board(),
+                &ctx.hole,
+                &[&reach, &reach],
+            );
+
+            let skip = crate::suit_iso::member_skip_mask(&tree.nodes, &cache);
+            let rep = mark_representative_nodes(&tree, &cache);
+            assert_eq!(skip.len(), tree.nodes.len(), "[{name}] mask len");
+
+            // Complement law: skip == !rep on every node.
+            for idx in 0..tree.nodes.len() {
+                assert_eq!(
+                    skip[idx], !rep[idx],
+                    "[{name}] node {idx}: skip {} != !rep {}",
+                    skip[idx], rep[idx]
+                );
+            }
+
+            // Sparse allocation drops exactly the skipped decision slots, and
+            // every kept decision slot is present.
+            let mask_for_alloc =
+                crate::suit_iso::member_skip_mask(&tree.nodes, &cache);
+            let solver = VectorDCFR::with_init_noise_masked(
+                &tree,
+                ctx.hand_count,
+                1.5,
+                0.0,
+                2.0,
+                0.0,
+                0,
+                &mask_for_alloc,
+            );
+            for (idx, node) in tree.nodes.iter().enumerate() {
+                if let FlatNode::Decision { .. } = node {
+                    if skip[idx] {
+                        assert!(
+                            solver.infosets[idx].is_none(),
+                            "[{name}] skipped decision {idx} must have a None slot"
+                        );
+                    } else {
+                        assert!(
+                            solver.infosets[idx].is_some(),
+                            "[{name}] kept decision {idx} must have an allocated slot"
+                        );
+                    }
+                }
+            }
+
+            let n_skip = skip.iter().filter(|&&b| b).count();
+            println!("[{name}] member_skip_mask skipped nodes = {n_skip}");
+            skip_counts.push(((*name).to_string(), n_skip));
+        }
+
+        let count = |n: &str| {
+            skip_counts.iter().find(|r| r.0 == n).map(|r| r.1).unwrap_or(0)
+        };
+        assert_eq!(count("RAINBOW"), 0, "RAINBOW (|S|=1) must skip zero nodes");
+        assert!(
+            count("MONOTONE") > count("TWO-TONE"),
+            "MONOTONE (|S|=6) must skip more than TWO-TONE: {} vs {}",
+            count("MONOTONE"),
+            count("TWO-TONE"),
+        );
+        assert!(
+            count("MONOTONE") > count("PAIRED"),
+            "MONOTONE (|S|=6) must skip more than PAIRED: {} vs {}",
+            count("MONOTONE"),
+            count("PAIRED"),
+        );
+        assert!(
+            count("MONOTONE") > count("RAINBOW"),
+            "MONOTONE (|S|=6) must skip more than RAINBOW",
+        );
+    }
+
+    /// Stage 3a Gate B — sparse allocation cuts infoset + terminal bytes on a
+    /// high-symmetry turn board, while representative-board strategies and the
+    /// P0 game value still match the dense (iso-OFF) solve.
+    ///
+    /// Board: monotone As Ks 7s 2s (stabilizer |S| = 6 over {h,d,c}) => the
+    /// river deal collapses ~6-fold on offsuit cards, so the bulk of the
+    /// river-subtree infosets / terminals are dropped. We assert
+    /// `bytes_on < bytes_off` by a meaningful margin and report the ratio. Both
+    /// the dense and sparse captures run on the SAME small symmetric range, so
+    /// the only difference is the dropped member-subtree allocation.
+    #[test]
+    fn stage3a_sparse_memory_reduction_monotone_turn() {
+        let card = card_to_int;
+        // Monotone (all spades) high-symmetry turn board.
+        let board = vec![card(14, 0), card(13, 0), card(7, 0), card(2, 0)];
+        // Symmetric, board-disjoint range (closed under suit perms => guard
+        // accepts it). Q J 6 5 over four suits, board-disjoint.
+        let range_ranks: [u8; 4] = [12, 11, 9, 5];
+        let cfg = collapse_turn_config(&board);
+        let holes = collapse_symmetric_range(&board, &range_ranks);
+        assert!(holes.len() >= 12, "range too small ({})", holes.len());
+        let iters: u32 = 32;
+
+        // --- byte accounting straight from the two allocations. ---
+        let initial = HUNLState::initial(std::sync::Arc::new(cfg.clone()));
+        let ctx = EvalContext::from_hand_lists(holes.clone(), holes.clone(), cfg.big_blind);
+        let placeholder = initial.clone_with_hole_cards([ctx.hole[0][0], ctx.hole[1][0]]);
+        let tree = BettingTree::build_with_mode(&placeholder, BettingTreeMode::TemplateExtract);
+        let reach = vec![1.0_f64; ctx.hand_count[0]];
+        let cache = crate::suit_iso::build_suit_iso_cache(
+            &tree.nodes,
+            &tree.dealt_cards,
+            &tree.initial_board(),
+            &ctx.hole,
+            &[&reach, &reach],
+        );
+        let skip_mask = crate::suit_iso::member_skip_mask(&tree.nodes, &cache);
+
+        let solver_off = VectorDCFR::with_init_noise(&tree, ctx.hand_count, 1.5, 0.0, 2.0, 0.0, 0);
+        let solver_on = VectorDCFR::with_init_noise_masked(
+            &tree, ctx.hand_count, 1.5, 0.0, 2.0, 0.0, 0, &skip_mask,
+        );
+        let prof_off = build_memory_profile(&solver_off, &tree, &ctx);
+        let prof_on = build_memory_profile(&solver_on, &tree, &ctx);
+
+        let ratio = prof_on.total_bytes as f64 / prof_off.total_bytes.max(1) as f64;
+        let reduction_pct = (1.0 - ratio) * 100.0;
+        println!(
+            "[Gate B / monotone As Ks 7s 2s] hands/player={}, infosets off={} on={}\n  \
+             infoset bytes: OFF={} ON={}  reduction={reduction_pct:.1}% (ratio={ratio:.4})",
+            holes.len(),
+            prof_off.infoset_count,
+            prof_on.infoset_count,
+            prof_off.total_bytes,
+            prof_on.total_bytes,
+        );
+
+        assert!(
+            prof_on.total_bytes < prof_off.total_bytes,
+            "sparse infoset bytes ({}) must be < dense ({})",
+            prof_on.total_bytes,
+            prof_off.total_bytes,
+        );
+        // High-symmetry monotone turn => expect a large (tens of %) cut.
+        assert!(
+            reduction_pct >= 30.0,
+            "expected >=30% infoset-byte reduction on monotone turn, got {reduction_pct:.1}%",
+        );
+
+        // --- rep-board strategy + game value parity (dense vs sparse). ---
+        let action_counts: Vec<usize> = tree
+            .nodes
+            .iter()
+            .map(|n| match n {
+                FlatNode::Decision { actions, .. } => actions.len(),
+                _ => 0,
+            })
+            .collect();
+        let rep_node = mark_representative_nodes(&tree, &cache);
+
+        let (avg_off, np_off, _rv_off, gv_off) =
+            solve_collapse_capture(&cfg, &holes, iters, false);
+        let (avg_on, np_on, _rv_on, gv_on) =
+            solve_collapse_capture_sparse(&cfg, &holes, iters);
+
+        // Topology must match on the kept (representative / turn-line) nodes;
+        // member nodes are np = usize::MAX (None) in the sparse capture.
+        for idx in 0..np_off.len() {
+            if rep_node[idx] && np_off[idx] != usize::MAX {
+                assert_eq!(
+                    np_off[idx], np_on[idx],
+                    "node {idx}: kept-node player mismatch dense vs sparse"
+                );
+            }
+        }
+
+        let (strat_delta, compared) = collapse_rep_strategy_delta(
+            &avg_off, &avg_on, &np_off, &action_counts, &rep_node,
+        );
+        let gv_delta = (gv_off - gv_on).abs();
+        println!(
+            "[Gate B parity] rep infosets compared={compared}  \
+             max|rep strat Δ|={strat_delta:.3e}  |game_value Δ|={gv_delta:.3e}",
+        );
+
+        const TOL: f64 = 1e-12;
+        assert!(compared > 0, "no representative infosets compared — gate vacuous");
+        assert!(
+            strat_delta <= TOL,
+            "rep strategy delta {strat_delta:.3e} exceeds {TOL:.0e}",
+        );
+        assert!(
+            gv_delta <= TOL,
+            "game-value delta {gv_delta:.3e} exceeds {TOL:.0e}",
         );
     }
 }
