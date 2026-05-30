@@ -1342,6 +1342,12 @@ pub(crate) fn traverse_recursive_with_parallel(
                             }
                         }
                         arena.reset_to(entry_mark);
+                        // TODO(iso x rayon): this suit-iso collapse arm returns
+                        // here, BEFORE the rayon chance dispatch below, so a
+                        // suit-iso solve runs the chance level single-threaded
+                        // even with the production rayon default ON. Composing
+                        // the iso class-collapse with per-branch rayon
+                        // parallelism is deferred (iso is opt-in).
                         return values;
                     }
                 }
@@ -4147,8 +4153,10 @@ mod tests {
             0,
         );
 
-        solver_std.solve(&tree_std, &ctx_std, 5, None);
-        solver_tmpl.solve(&tree_tmpl, &ctx_tmpl, 5, None);
+        // Force rayon OFF: this is a bit-exact `assert_eq!` parity gate, and
+        // the production default is now rayon-ON (reorders FP summation).
+        solver_std.solve_with_opts(&tree_std, &ctx_std, 5, None, None, None, Some(false));
+        solver_tmpl.solve_with_opts(&tree_tmpl, &ctx_tmpl, 5, None, None, None, Some(false));
 
         // Final discount catch-up — match the public solve's tail.
         let final_iter_std = solver_std.iteration;
@@ -4388,8 +4396,10 @@ mod tests {
             0,
         );
 
-        solver_std.solve(&tree_std, &ctx_std, 3, None);
-        solver_tmpl.solve(&tree_tmpl, &ctx_tmpl, 3, None);
+        // Force rayon OFF: this is a bit-exact `assert_eq!` parity gate, and
+        // the production default is now rayon-ON (reorders FP summation).
+        solver_std.solve_with_opts(&tree_std, &ctx_std, 3, None, None, None, Some(false));
+        solver_tmpl.solve_with_opts(&tree_tmpl, &ctx_tmpl, 3, None, None, None, Some(false));
 
         // Final discount catch-up to mirror the public solve's tail.
         let final_iter_std = solver_std.iteration;
@@ -4947,7 +4957,10 @@ mod tests {
             noise,
             seed,
         );
-        solver.solve(&tree, &ctx, iters, None);
+        // Force rayon OFF: the board-isomorphism node-alignment tests built on
+        // this helper compare per-(node, hand) strategies bit-for-bit, and the
+        // production default is now rayon-ON (reorders FP summation).
+        solver.solve_with_opts(&tree, &ctx, iters, None, None, None, Some(false));
         let final_iter = solver.iteration;
         let (a, b, g) = (solver.alpha, solver.beta, solver.gamma);
         for info in solver.infosets.iter_mut().flatten() {

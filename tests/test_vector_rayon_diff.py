@@ -1,9 +1,17 @@
-"""v1.10 PR-4 differential test: opt-in Rayon DCFR vs canonical single-threaded.
+"""Rayon DCFR differential test: chance-parallel vs serial single-threaded.
+
+v1.11: rayon chance-parallelism is the PRODUCTION DEFAULT. A postflop solve
+runs the parallel chance walk unless `CFR_RAYON_CHANCE` is explicitly set to a
+falsey value (`0`/`false`/`off`). This file pins the env explicitly per test
+(forced-ON via `setenv("CFR_RAYON_CHANCE", "1")`, forced-OFF/serial via
+`delenv`+`setenv("0")`) so the comparisons stay deterministic regardless of the
+production default. The serial path remains bit-identical to pre-PR-4 output;
+`test_default_is_rayon_on` separately asserts that the no-env default IS the
+parallel path.
 
 Drives `_rust.solve_range_vs_range_rust` twice on the same fixture — once
-with the default single-threaded path (canonical) and once with the
-`CFR_RAYON_CHANCE=1` opt-in parallel path — and compares the two output
-strategies via:
+on the serial (canonical) path and once on the `CFR_RAYON_CHANCE=1` parallel
+path — and compares the two output strategies via:
   - `_rust.compute_exploitability` for the BR-walk exploitability +
     game-value pair (the load-bearing CFR convergence metric).
   - A direct floating-point comparison of per-(infoset, hand) action
@@ -482,3 +490,65 @@ def test_parallel_path_does_not_panic_on_min_fixture(monkeypatch):
     assert "average_strategy" in out
     assert len(out["average_strategy"]) > 0, "parallel path produced empty strategy"
     assert elapsed < 30.0, f"parallel smoke test took {elapsed:.2f}s — perf regression suspected"
+
+
+# ---------------------------------------------------------------------------
+# v1.11 default-on contract: no env var => the rayon parallel path.
+# ---------------------------------------------------------------------------
+
+
+def test_default_is_rayon_on(monkeypatch):
+    """The production default (no `CFR_RAYON_CHANCE`) is the rayon parallel path.
+
+    v1.11 flipped rayon chance-parallelism to default-on for production solves.
+    This test's load-bearing proof is that the no-env default solve is
+    BIT-IDENTICAL (`== 0.0`) to a forced-ON (`CFR_RAYON_CHANCE=1`) solve: both
+    take the source-order-deterministic parallel path, so the FP result is
+    reproducible to the bit. That is what establishes "default IS parallel".
+
+    The default-vs-serial (forced-OFF) check uses the SAME 1e-4 per-action TVD
+    bound as `_assert_parallel_matches_canonical` above — NOT 1e-9. The
+    chance-node sub-expression grouping differs between serial and parallel, and
+    near an indifference point regret-matching can flip mixed-strategy mass by
+    more than 1e-9 from that tiny reorder (the regret sign pattern amplifies a
+    sub-ULP value delta into a visible probability shift). 1e-9 only passed by
+    fixture luck; 1e-4 is the principled bound.
+
+    Uses a turn fixture (45-card river chance subtree) so the parallel dispatch
+    actually fires; on a river fixture the dispatch falls through to serial and
+    all three solves would be trivially identical.
+    """
+    cfg = _turn_mini_cfg((1.0,), 1, 1000)
+    board = list(cfg.initial_board)
+    holes = _pick_n_disjoint_hands(board, 4)
+    config_json = _serialize_hunl_config(cfg)
+
+    def _solve(env_value: str | None) -> dict[str, list[float]]:
+        if env_value is None:
+            monkeypatch.delenv("CFR_RAYON_CHANCE", raising=False)
+        else:
+            monkeypatch.setenv("CFR_RAYON_CHANCE", env_value)
+        out = _rust_solve_rvr(config_json, 30, 1.5, 0.0, 2.0, holes, holes)
+        return _strategy_for_diff(out)
+
+    default_strat = _solve(None)  # production default
+    on_strat = _solve("1")  # forced parallel
+    off_strat = _solve("0")  # forced serial
+
+    # Default must take the SAME (parallel) path as forced-ON => bit-identical.
+    default_vs_on = _max_prob_diff(default_strat, on_strat)
+    assert default_vs_on == 0.0, (
+        "default (no env) must be bit-identical to forced rayon-ON "
+        f"(default IS parallel); got max prob diff {default_vs_on:.3e}"
+    )
+
+    # Default (parallel) diverges from serial only by the near-indifference TVD
+    # bound: the chance-node sub-expression grouping differs, and regret-matching
+    # can amplify a sub-ULP value delta into a mixed-strategy mass shift near
+    # indifference. Same 1e-4 per-action bound the rest of this file uses.
+    default_vs_off = _max_prob_diff(default_strat, off_strat)
+    print(f"\n[default-on] default-vs-serial max prob diff = {default_vs_off:.3e}")
+    assert default_vs_off < 1e-4, (
+        f"default vs serial drift {default_vs_off:.3e} exceeds the 1e-4 "
+        f"near-indifference TVD bound — suggests a bug, not just chance-sum reorder"
+    )

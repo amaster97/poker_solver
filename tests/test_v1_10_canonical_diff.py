@@ -72,6 +72,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import os
 import sys
 import time
 from dataclasses import dataclass, field
@@ -515,17 +516,29 @@ def run_fixture(spec: FixtureSpec) -> FixtureCapture:
             cfg = spec.hunl_config_builder()
             assert spec.hero_classes is not None
             assert spec.villain_classes is not None
-            res = solve_range_vs_range_nash(
-                cfg,
-                list(spec.hero_classes),
-                list(spec.villain_classes),
-                iterations=spec.iters,
-                alpha=1.5,
-                beta=0.0,
-                gamma=2.0,
-                hero_player=0,
-                compute_exploitability_at_end=spec.compute_exploitability,
-            )
+            # Force the SERIAL chance path: the frozen baseline was captured
+            # single-threaded, but rayon chance-parallelism is now default-on,
+            # so turn-rooted fixtures (e.g. F3.1) would otherwise fire the
+            # parallel walker and drift past the 1e-12 bit-exact diff.
+            rayon_was = os.environ.get("CFR_RAYON_CHANCE")
+            os.environ["CFR_RAYON_CHANCE"] = "0"
+            try:
+                res = solve_range_vs_range_nash(
+                    cfg,
+                    list(spec.hero_classes),
+                    list(spec.villain_classes),
+                    iterations=spec.iters,
+                    alpha=1.5,
+                    beta=0.0,
+                    gamma=2.0,
+                    hero_player=0,
+                    compute_exploitability_at_end=spec.compute_exploitability,
+                )
+            finally:
+                if rayon_was is None:
+                    os.environ.pop("CFR_RAYON_CHANCE", None)
+                else:
+                    os.environ["CFR_RAYON_CHANCE"] = rayon_was
             # The RvR result wraps per_history_strategy (HashMap)
             # AND res.exploitability is a Mapping or float depending
             # on backend; coerce defensively. When the exploit walk

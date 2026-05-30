@@ -39,30 +39,41 @@
 //! range — steps (1), (3), (4) only touch nodes in its own range, and
 //! step (2) only recurses INTO that range. There is no cross-thread
 //! dependency, so the parallel walk produces the SAME regret table as
-//! the sequential walk would, up to **floating-point sum-reordering at
-//! the chance node** where per-thread per-hand value vectors are
-//! combined with `prob * v_child`.
+//! the sequential walk up to **floating-point sub-expression grouping**
+//! at the chance reduction.
 //!
-//! Sum reordering is the ONLY source of non-bit-identical drift; this is
-//! why the opt-in path runs against a looser tolerance (1e-6
-//! exploitability, 1e-9 game value) in
-//! `tests/test_vector_rayon_diff.py`. The canonical single-threaded
-//! path remains bit-identical to pre-PR-4.
+//! The parallel reduction PRESERVES child order: `into_par_iter().collect()`
+//! yields the per-child value vectors in source (child-index) order, and the
+//! subsequent `Σ_c prob * v_child` loop sums them in that same order — i.e.
+//! the reduction ORDER matches serial. The FP result is therefore typically
+//! bit-identical or sub-ULP, but is NOT *guaranteed* bit-identical (workers
+//! may group sub-expressions differently). Near an indifference point,
+//! regret-matching can amplify a sub-ULP value delta into a visible
+//! mixed-strategy mass shift — so the divergence can exceed 1e-9. The opt-in
+//! diff runs against a looser tolerance (1e-6 exploitability, 1e-4 per-action
+//! probability TVD) in `tests/test_vector_rayon_diff.py`; bit-exact tests
+//! instead FORCE the serial path via `solve_with_opts(.., Some(false))`. The
+//! canonical single-threaded path remains bit-identical to pre-PR-4.
 //!
 //! ## Activation
 //!
-//! Set `CFR_RAYON_CHANCE=1` at the entry to `VectorDCFR::solve`. The
-//! check happens once per solve (not per iteration) and stays cached in
-//! the dispatch in `solve`. Default (env var unset) keeps the canonical
-//! single-threaded code path.
+//! Rayon is ON by DEFAULT for production solves (the env-default path of
+//! [`parallel_chance_enabled`]). Set `CFR_RAYON_CHANCE=0`/`false`/`off`
+//! to force the single-threaded path process-wide. The check happens once
+//! per solve (not per iteration) and stays cached in the dispatch in
+//! `solve`. Bit-exact / determinism tests force the serial path via the
+//! `rayon_override` argument on `solve_with_opts`, not the env var.
 //!
 //! ## Safety
 //!
 //! No `unsafe` is used in this module. Disjoint mutable access is
 //! achieved via `split_at_mut` over the original `&mut [...]` slice.
-//! The `parallel_traverse_chance_root` function asserts that the root
-//! chance node's children form a contiguous, non-overlapping coverage
-//! of `tree.nodes` (the DFS-build invariant in `exploit.rs`).
+//! The entry point [`parallel_traverse_chance`] asserts (release-build)
+//! that each chance child's subtree carves a non-overlapping, in-order
+//! sub-slice of the chance node's slice (the DFS-build invariant in
+//! `exploit.rs`). It is dispatched inline from
+//! `dcfr_vector::traverse_recursive_with_parallel` at the
+//! `FlatNode::Chance` arm (guard: `allow_parallel && children.len() >= 2`).
 
 use rayon::prelude::*;
 
@@ -96,8 +107,34 @@ struct ChildRange {
 /// **Invariant relied on**: the DFS pre-order build in
 /// `exploit.rs::BettingTree::add` assigns each child's subtree a
 /// contiguous range that starts at the child's `root_idx` and ends just
-/// before the next sibling's `root_idx` (or `tree.nodes.len()` for the
-/// last child). We assert that invariant here as a defensive check.
+/// before the next sibling's `root_idx`. For children `0..last` that
+/// bound is exact (`end == children[i + 1]`).
+///
+/// **Over-claim on the last child (intentional, currently safe).** We set
+/// the last child's `end = tree.nodes.len()` unconditionally. When the
+/// chance node is NOT the literal tree root and has a later sibling line
+/// (e.g. a turn-rooted RvR whose root is a Decision and whose river-deal
+/// chance sits mid-tree with the raise line built AFTER it), the chance
+/// subtree's true end is `< tree.nodes.len()`, so this `end` over-extends
+/// into trailing sibling slots. The tight bound — the chance node's own
+/// subtree end — is NOT available at the call site without either a
+/// tree-build change (storing it on `FlatNode::Chance`) or an extra
+/// per-iteration subtree DFS, both of which the v1.11 hardening pass
+/// declined as risk for a currently-harmless over-claim. It is safe
+/// because:
+///   - Each Rayon worker only indexes nodes WITHIN its own DFS-contiguous
+///     subtree (via `node_idx - range.start`); a child's recursion never
+///     reaches an index outside `[child.start, child_true_end)` because
+///     that subtree is itself DFS-contiguous and self-bounded by the
+///     children indices it walks. The over-extended tail of the LAST
+///     shard is never actually dereferenced.
+///   - The trailing sibling betting lines are walked SERIALLY after the
+///     rayon join returns (the `split_at_mut` borrow on `infosets` is
+///     released on return), so the over-extended last shard never aliases
+///     a slot that is concurrently touched.
+/// The bounds `assert!`s in [`parallel_traverse_chance`]'s shard-carving
+/// loop are release-build guards: if a future tree-build reordering broke
+/// the DFS-contiguity property, they fail loudly instead of corrupting.
 fn derive_child_ranges(tree: &BettingTree, children: &[usize]) -> Vec<ChildRange> {
     debug_assert!(!children.is_empty(), "chance node with no children");
     let total = tree.nodes.len();
@@ -210,12 +247,17 @@ pub(crate) fn parallel_traverse_chance(
     for &range in &ranges {
         let local_start = range.start - offset;
         let local_end = range.end - offset;
-        debug_assert!(
+        // Release-build guards (not `debug_assert!`): these bound every
+        // `split_at_mut` below. The last child's `end` is intentionally
+        // over-extended (see `derive_child_ranges`), so if a future
+        // tree-build reordering ever broke DFS-contiguity these would fail
+        // loudly in release instead of carving aliasing/out-of-range shards.
+        assert!(
             local_start >= prefix_consumed_local,
             "child ranges must be in ascending order; got local_start={local_start} \
              after prefix_consumed_local={prefix_consumed_local}",
         );
-        debug_assert!(
+        assert!(
             local_end <= prefix_consumed_local + remaining.len(),
             "child range exceeds available slice: local_end={local_end} > end of remaining",
         );
@@ -276,12 +318,35 @@ pub(crate) fn parallel_traverse_chance(
     values
 }
 
-/// Read `CFR_RAYON_CHANCE` from the environment. Returns `true` iff
-/// the variable is set to any non-empty value. Called once per
-/// `VectorDCFR::solve` invocation; the cached boolean is then threaded
-/// through the iteration loop. The dispatch in `solve_one_traverse`
-/// also requires the root node to be a multi-child `FlatNode::Chance`
-/// — see that function for the structural check.
+/// Production default for rayon chance-parallelism: **ON**.
+///
+/// Reads `CFR_RAYON_CHANCE` from the environment and returns `true`
+/// UNLESS it is explicitly set to a recognized off-switch
+/// (`"0"`, `"false"`, `"off"`, case-insensitive, surrounding
+/// whitespace trimmed). Any other value — including unset, empty, or
+/// `"1"`/`"true"`/`"on"` — yields `true`.
+///
+/// Called once per `VectorDCFR::solve` invocation (when the caller does
+/// not pass an explicit `rayon_override`); the cached boolean is then
+/// threaded through the iteration loop as `allow_parallel`. The actual
+/// dispatch is INLINE in
+/// `dcfr_vector::traverse_recursive_with_parallel` at the
+/// `FlatNode::Chance` arm, which additionally requires the node to have
+/// `children.len() >= 2` (the structural guard) before routing to
+/// [`parallel_traverse_chance`].
+///
+/// INVARIANT: rayon may regroup the chance reduction's sub-expressions.
+/// The reduction ORDER matches serial (source-order `collect` + in-order
+/// sum), so the result is typically bit-identical or sub-ULP — but it is
+/// NOT guaranteed bit-identical, and near indifference the strategy can
+/// diverge by more than 1e-9 (regret-matching amplifies the sub-ULP
+/// delta). Every bit-exact / determinism test MUST therefore force this
+/// OFF via the explicit `rayon_override` argument on `solve_with_opts`
+/// (not the env var, whose process-global mutation races under the test
+/// harness).
 pub(crate) fn parallel_chance_enabled() -> bool {
-    matches!(std::env::var("CFR_RAYON_CHANCE"), Ok(v) if !v.is_empty())
+    match std::env::var("CFR_RAYON_CHANCE") {
+        Ok(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off"),
+        Err(_) => true,
+    }
 }

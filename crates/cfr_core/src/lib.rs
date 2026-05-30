@@ -57,10 +57,11 @@ pub mod exploit;
 // (Kuhn, Leduc, fixed-combo HUNL postflop/preflop) are unchanged.
 pub mod dcfr_vector;
 
-// v1.10 PR-4 — Opt-in Rayon multi-threading for the postflop chance
-// subtree. Activated by `CFR_RAYON_CHANCE=1` at solve entry. Default
-// (env var unset) is bit-identical to pre-PR-4. See module docstring
-// for the safety / concurrency model.
+// v1.10 PR-4 — Rayon multi-threading for the postflop chance subtree,
+// ON by DEFAULT for production solves (the env-default path). Set
+// `CFR_RAYON_CHANCE=0`/`false`/`off` to force the single-threaded path.
+// Bit-exact tests force serial via `solve_with_opts(.., Some(false))`,
+// never the env var. See module docstring for safety / concurrency.
 pub mod dcfr_vector_parallel;
 
 // v1.10 PR-1 — thread-local bump arena for `dcfr_vector::traverse_*`

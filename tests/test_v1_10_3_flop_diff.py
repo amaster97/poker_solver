@@ -192,6 +192,12 @@ def _run_solve(
         os.environ.pop("CFR_VECTOR_FLOP_TEMPLATE", None)
     else:
         raise ValueError(f"unknown template_mode: {template_mode!r}")
+    # Force the SERIAL chance path in BOTH legs. Rayon chance-parallelism is
+    # now default-on, so without this both the canonical and vector legs would
+    # run rayon — which (a) makes the 1e-12 bit-identical diff fragile and
+    # (b) bypasses the PR-3 flop-template walker this test exists to exercise.
+    rayon_was = os.environ.get("CFR_RAYON_CHANCE")
+    os.environ["CFR_RAYON_CHANCE"] = "0"
     try:
         result = solve_range_vs_range_nash(
             cfg,
@@ -210,6 +216,10 @@ def _run_solve(
             os.environ.pop("CFR_VECTOR_FLOP_TEMPLATE", None)
         else:
             os.environ["CFR_VECTOR_FLOP_TEMPLATE"] = env_was
+        if rayon_was is None:
+            os.environ.pop("CFR_RAYON_CHANCE", None)
+        else:
+            os.environ["CFR_RAYON_CHANCE"] = rayon_was
 
 
 def _assert_strategy_bit_identical(
