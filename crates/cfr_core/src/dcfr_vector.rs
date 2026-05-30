@@ -3805,4 +3805,265 @@ mod tests {
             "max diff must be finite (got {max_abs_diff})"
         );
     }
+
+    /// Diagnostic (not a gate — always passes): quantify the IE precompute
+    /// memory footprint by counting `FlatNode::Showdown` leaves in a turn
+    /// vs flop tree and measuring the actual bytes of `ShowdownIE` data
+    /// attached per leaf. Run with `--nocapture` to print the table.
+    ///
+    /// Established facts this confirms:
+    ///   - `TerminalCache` has exactly one `LeafCacheEntry` per tree node
+    ///     (built ONCE per solve, not per runout) — distinct runouts are
+    ///     already distinct `FlatNode::Showdown` nodes in the materialized
+    ///     tree, so IE memory is O(Showdown_leaves × N), NOT
+    ///     O(runouts × betting_leaves × N) on top of a compacted tree.
+    ///   - Per-Showdown-leaf IE bytes scale ~linearly in N (sorted_idx +
+    ///     range_start + range_end are 3·N u32s; the blocker lists add a
+    ///     small board-dependent constant), so the flop blow-up is driven
+    ///     by the much larger Showdown-leaf COUNT of a flop tree.
+    fn count_showdown_leaves(tree: &BettingTree) -> usize {
+        tree.nodes
+            .iter()
+            .filter(|n| matches!(n, FlatNode::Showdown { .. }))
+            .count()
+    }
+
+    /// Exact heap bytes of one `ShowdownIE` (both update-player perspectives
+    /// summed): the three N-length `Vec<u32>` plus every blocker sub-vec.
+    fn showdown_ie_bytes(ie: &[ShowdownIE; 2]) -> usize {
+        let mut total = 0usize;
+        for p in ie.iter() {
+            total += p.sorted_idx.len() * 4;
+            total += p.range_start.len() * 4;
+            total += p.range_end.len() * 4;
+            for v in p.blk_less.iter() {
+                total += v.len() * 4;
+            }
+            for v in p.blk_equal.iter() {
+                total += v.len() * 4;
+            }
+            for v in p.blk_greater.iter() {
+                total += v.len() * 4;
+            }
+        }
+        total
+    }
+
+    #[test]
+    fn ie_memory_footprint_turn_vs_flop_diagnostic() {
+        // Small hand list keeps the flop tree build memory-safe in-test.
+        // The per-leaf IE bytes scale linearly in N, so the SHAPE measured
+        // here extrapolates to production N (e.g. ~1081 at full deck).
+        let n = 24usize;
+        let mut p0: Vec<[u8; 2]> = Vec::new();
+        let mut p1: Vec<[u8; 2]> = Vec::new();
+        // Build N disjoint-from-board pairs from high cards.
+        let mut pairs: Vec<[u8; 2]> = Vec::new();
+        for r0 in (2u8..=14).rev() {
+            for s0 in 0u8..4 {
+                for r1 in (2u8..=14).rev() {
+                    for s1 in 0u8..4 {
+                        let c0 = r0 * 4 + s0;
+                        let c1 = r1 * 4 + s1;
+                        if c0 < c1 {
+                            pairs.push([c0, c1]);
+                        }
+                    }
+                }
+            }
+        }
+        for &pr in pairs.iter() {
+            if p0.len() >= n {
+                break;
+            }
+            // Use cards >= 6*4 so they avoid the low flop board below.
+            if pr[0] >= 6 * 4 && pr[1] >= 6 * 4 {
+                p0.push(pr);
+                p1.push(pr);
+            }
+        }
+        let ctx = EvalContext::from_hand_lists(p0.clone(), p1.clone(), 100);
+
+        let measure = |cfg: &HUNLConfig, label: &str| {
+            let initial = HUNLState::initial(std::sync::Arc::new(cfg.clone()));
+            let placeholder = initial.clone_with_hole_cards([ctx.hole[0][0], ctx.hole[1][0]]);
+            let tree =
+                BettingTree::build_with_mode(&placeholder, BettingTreeMode::TemplateExtract);
+            let showdowns = count_showdown_leaves(&tree);
+            let cache = TerminalCache::build(&tree, &ctx, true);
+            let mut ie_total = 0usize;
+            let mut sample_per_leaf = 0usize;
+            for leaf in &cache.leaves {
+                if let LeafCacheEntry::Showdown { ie: Some(ie_arr), .. } = leaf {
+                    let b = showdown_ie_bytes(ie_arr);
+                    ie_total += b;
+                    if sample_per_leaf == 0 {
+                        sample_per_leaf = b;
+                    }
+                }
+            }
+            // fold_blockers (board-independent, one per up perspective).
+            let mut fold_bytes = 0usize;
+            if let Some(fb) = &cache.fold_blockers {
+                for up in fb.iter() {
+                    for v in up.iter() {
+                        fold_bytes += v.len() * 4;
+                    }
+                }
+            }
+            println!(
+                "[IE-mem {label}] nodes={} showdown_leaves={} N={} \
+                 ie_bytes/leaf={} ie_total={:.2}MB fold_blockers={:.3}MB",
+                tree.nodes.len(),
+                showdowns,
+                n,
+                sample_per_leaf,
+                ie_total as f64 / 1_048_576.0,
+                fold_bytes as f64 / 1_048_576.0,
+            );
+            (showdowns, ie_total, sample_per_leaf)
+        };
+
+        let (turn_sd, _turn_ie, per_leaf) = measure(&tiny_turn_rvr(), "turn");
+        let (flop_sd, _flop_ie, _) = measure(&tiny_flop_rvr(), "flop");
+
+        // Per-Showdown-leaf IE bytes (summed over both perspectives) are
+        // dominated by 3 * N u32s per perspective = 6 * N * 4 bytes, plus
+        // blockers. Sanity-check the linear-in-N lower bound.
+        assert!(
+            per_leaf >= 6 * n * 4,
+            "per-leaf IE bytes ({per_leaf}) below 6*N*4 lower bound ({})",
+            6 * n * 4
+        );
+        // The flop tree has dramatically more Showdown leaves than the turn
+        // tree (one per river runout per betting line, summed over ~47 turn
+        // deals). This is the root of the flop memory blow-up.
+        assert!(
+            flop_sd > turn_sd,
+            "flop tree must have more Showdown leaves than turn \
+             (turn={turn_sd} flop={flop_sd})"
+        );
+        println!(
+            "[IE-mem ratio] flop/turn showdown_leaves = {:.1}x  \
+             (IE memory scales with this ratio at fixed N)",
+            flop_sd as f64 / turn_sd as f64
+        );
+    }
+
+    /// End-to-end parity gate for the inclusion-exclusion terminal
+    /// evaluator (`CFR_TERMINAL_IE`), ONE STREET DEEPER than
+    /// `ie_full_solve_matches_cached`: a FULL multi-iteration **turn**
+    /// subgame solve must produce the same average-strategy map with the
+    /// flag OFF (legacy `terminal_value_vector_cached`) and ON (the
+    /// O(N + N·B) `terminal_value_vector_ie` path).
+    ///
+    /// Why a turn fixture matters: a turn-rooted subgame (4-card board)
+    /// has ONE MORE chance deal than the river fixture — the river-card
+    /// deal expands into ~46 distinct `FlatNode::Showdown` runouts, each
+    /// carrying its own `ShowdownIE` precompute. This proves the IE path
+    /// stays in lockstep with the cached path across the inner chance
+    /// recursion (`traverse_turn_chance_recursive`), not just at the
+    /// flat river-betting layer. It is the correctness evidence for
+    /// considering an IE default flip on the turn street.
+    ///
+    /// **Isolation contract** (identical to `ie_full_solve_matches_cached`):
+    /// `CFR_TERMINAL_IE` is process-global, so run with
+    /// `--test-threads=1 --exact`. The baseline (flag UNSET) solve runs
+    /// FIRST, then the var is set, then removed — leaving a clean env.
+    ///
+    /// We boost `postflop_raise_cap`/`include_all_in` so the tree has
+    /// genuine multi-action infosets (the default `tiny_turn_rvr` tree
+    /// collapses to single-action `[1.0]` rows that are invariant to the
+    /// terminal-value math, making the comparison vacuous).
+    ///
+    /// Tolerance `|a-b| <= 1e-6 + 1e-6 * max(|a|,|b|)` matches the river
+    /// gate: looser than the per-leaf 1e-9 because FP error accumulates
+    /// across iterations AND across the extra chance level, but still
+    /// tight enough that any real IE-path divergence fails rather than
+    /// being masked.
+    #[test]
+    fn ie_full_solve_matches_cached_turn() {
+        let mut cfg = tiny_turn_rvr();
+        // Multi-action tree so the terminal-value path actually shapes a
+        // non-degenerate strategy (mirrors `ie_full_solve_matches_cached`).
+        cfg.postflop_raise_cap = 2;
+        cfg.include_all_in = true;
+        let iters: u32 = 24;
+
+        // Step 1 — baseline with the flag UNSET (legacy cached path).
+        std::env::remove_var("CFR_TERMINAL_IE");
+        let out_off = solve_range_vs_range_postflop(&cfg, iters, 1.5, 0.0, 2.0)
+            .expect("turn flag-off solve must complete");
+
+        // Step 2 — same solve with the flag SET (inclusion-exclusion path).
+        std::env::set_var("CFR_TERMINAL_IE", "1");
+        let out_on = solve_range_vs_range_postflop(&cfg, iters, 1.5, 0.0, 2.0)
+            .expect("turn flag-on solve must complete");
+        // Restore clean environment regardless of the assertions below.
+        std::env::remove_var("CFR_TERMINAL_IE");
+
+        assert_eq!(
+            out_off.iterations, out_on.iterations,
+            "iteration counts must match"
+        );
+        assert_eq!(
+            out_off.average_strategy.len(),
+            out_on.average_strategy.len(),
+            "IE flag must not change the infoset key-set size \
+             ({} off vs {} on)",
+            out_off.average_strategy.len(),
+            out_on.average_strategy.len(),
+        );
+        // Guard against a vacuous comparison: a multi-action turn tree
+        // must have at least one infoset with >1 action.
+        assert!(
+            out_off
+                .average_strategy
+                .values()
+                .any(|p| p.len() > 1),
+            "turn fixture collapsed to single-action rows — comparison \
+             would be vacuous; boost postflop_raise_cap/include_all_in"
+        );
+
+        let mut max_abs_diff = 0.0_f64;
+        let mut worst_key = String::new();
+        for (key, probs_off) in &out_off.average_strategy {
+            let probs_on = out_on
+                .average_strategy
+                .get(key)
+                .unwrap_or_else(|| panic!("IE flag dropped infoset key: {key:?}"));
+            assert_eq!(
+                probs_off.len(),
+                probs_on.len(),
+                "key {key:?}: action_count mismatch ({} off vs {} on)",
+                probs_off.len(),
+                probs_on.len(),
+            );
+            for (a, (po, pn)) in probs_off.iter().zip(probs_on.iter()).enumerate() {
+                let diff = (po - pn).abs();
+                if diff > max_abs_diff {
+                    max_abs_diff = diff;
+                    worst_key = format!("{key:?}#{a}");
+                }
+                let tol = 1e-6 + 1e-6 * po.abs().max(pn.abs());
+                assert!(
+                    diff <= tol,
+                    "IE-vs-cached TURN strategy divergence at {key:?} action {a}: \
+                     off={po} on={pn} diff={diff} tol={tol}"
+                );
+            }
+        }
+        // Surface the max observed value-difference (visible with
+        // `cargo test -- --nocapture`).
+        println!(
+            "ie_full_solve_matches_cached_turn: compared {} infosets over {} iters; \
+             max |off - on| = {max_abs_diff:e} at {worst_key}",
+            out_off.average_strategy.len(),
+            iters,
+        );
+        assert!(
+            max_abs_diff.is_finite(),
+            "max diff must be finite (got {max_abs_diff})"
+        );
+    }
 }
