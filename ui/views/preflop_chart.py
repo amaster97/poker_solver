@@ -561,6 +561,20 @@ def render(state: AppState, on_solve: Callable[[], None] | None = None) -> None:
     def _detail_slot() -> None:
         _render_detail_panel(state)
 
+    # N5: the header subtitle ("12 iters · 1.3s · done" / "Blueprint route" /
+    # "no chart computed yet") must re-render on every solve, exactly like the
+    # grid + source badge. It was previously a plain ``ui.label`` built once at
+    # page-build time and never refreshed, so after a blueprint/interpolated
+    # solve populated the grid and flipped the badge to "Blueprint · 100BB",
+    # the subtitle stayed frozen on the stale empty-state text. Making it a
+    # refreshable slot (driven by the same ``_refresh_all`` the grid/badge use)
+    # ties it to the same source of truth.
+    @ui.refreshable  # type: ignore[untyped-decorator]
+    def _subtitle_slot() -> None:
+        ui.label(_chart_subtitle(state)).mark("preflop-chart-subtitle").style(
+            "color:var(--ps-text-muted);font-size:12px"
+        )
+
     # Task #68 Phase 6: source-indicator badge slot. The badge text is
     # rebuilt from ``state.runner.preflop_route_info`` on each refresh
     # tick; we expose it as a separate refreshable so the polling timer
@@ -588,6 +602,10 @@ def render(state: AppState, on_solve: Callable[[], None] | None = None) -> None:
         _render_line_selector(state, _on_line_change)
 
     def _refresh_all() -> None:
+        try:
+            _subtitle_slot.refresh()
+        except Exception:  # noqa: BLE001
+            logger.exception("preflop chart subtitle refresh failed")
         try:
             _line_selector_slot.refresh()
         except Exception:  # noqa: BLE001
@@ -619,9 +637,7 @@ def render(state: AppState, on_solve: Callable[[], None] | None = None) -> None:
             ui.label("PREFLOP CHART").style(
                 "font-weight:700;letter-spacing:0.05em;color:var(--ps-text-strong)"
             )
-            ui.label(_chart_subtitle(state)).mark("preflop-chart-subtitle").style(
-                "color:var(--ps-text-muted);font-size:12px"
-            )
+            _subtitle_slot()
         with ui.row().style("align-items:flex-start;gap:14px;flex-wrap:nowrap"):
             with ui.element("div").style(
                 f"min-width:{_CELL_PX * 13 + 30}px;flex:0 0 auto"
@@ -646,15 +662,41 @@ def render(state: AppState, on_solve: Callable[[], None] | None = None) -> None:
 
 
 def _chart_subtitle(state: AppState) -> str:
-    """Compose the small caption to the right of the chart heading."""
+    """Compose the small caption to the right of the chart heading.
+
+    N5: the empty-state ("no chart computed yet") MUST agree with what the grid
+    and source badge show. The grid paints from
+    ``project_chart(_line_chart_result(state))`` and the badge from
+    ``runner.preflop_route_info``; so we treat a chart as "present" exactly when
+    that same projection is non-empty (covers blueprint, interpolated, AND live
+    routes — every path that populates the grid sets ``preflop_chart_result``).
+    Only when nothing has been computed do we show the genuine empty-state text.
+
+    For a blueprint / interpolated route the engine reports ``iterations == 0``
+    and ``wallclock_seconds == 0.0`` (no CFR was run), so the bare
+    "0 iters · 0.0s" caption is misleading; surface the route source instead.
+    The live path keeps the iters/wallclock summary.
+    """
     chart_result = _current_chart_result(state)
     status = _chart_status(state)
-    if chart_result is None:
+    # Source of truth: does the grid actually have cells to paint?
+    has_chart = bool(project_chart(_line_chart_result(state)))
+    if not has_chart:
         if status == "running":
             return "solving... (chart will appear on completion)"
         return "no chart computed yet"
-    iters = int(chart_result.get("iterations", 0))
-    wall = float(chart_result.get("wallclock_seconds", 0.0))
+    iters = int((chart_result or {}).get("iterations", 0))
+    wall = float((chart_result or {}).get("wallclock_seconds", 0.0))
+    if iters <= 0:
+        # Blueprint / interpolated route (no live CFR iterations) — describe the
+        # route rather than report a misleading "0 iters · 0.0s".
+        runner = getattr(state, "runner", None)
+        info = getattr(runner, "preflop_route_info", None)
+        source = getattr(info, "source", None)
+        label = getattr(source, "value", None)
+        if label:
+            return f"{str(label).capitalize()} route"
+        return "precomputed route"
     return f"{iters} iters · {wall:.1f}s · {status}"
 
 

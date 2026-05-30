@@ -307,3 +307,83 @@ def test_parse_size_list_rejects_garbage() -> None:
     assert preflop_chart.parse_size_list("2.0, 2.5, 3") == [2.0, 2.5, 3.0]
     with pytest.raises(ValueError):
         preflop_chart.parse_size_list("2, garbage, 4")
+
+
+# ---------------------------------------------------------------------------
+# N5: header subtitle must agree with the grid + source badge
+# ---------------------------------------------------------------------------
+
+
+def _fake_chart_state(
+    chart_result: dict[str, Any] | None,
+    *,
+    route_source: str | None = None,
+    status: str = "idle",
+    mode: str = "preflop_chart",
+) -> Any:
+    """Build a minimal AppState-shaped fake for ``_chart_subtitle``.
+
+    ``available_preflop_lines() -> []`` keeps ``_line_chart_result`` on its
+    root early-return so it hands back ``chart_result`` unchanged (which is what
+    a single-node blueprint root looks like to the grid).
+    """
+    from types import SimpleNamespace
+
+    route_info = None
+    if route_source is not None:
+        route_info = SimpleNamespace(source=SimpleNamespace(value=route_source))
+    runner = SimpleNamespace(
+        preflop_chart_result=chart_result,
+        preflop_route_info=route_info,
+        status=status,
+        _mode=mode,
+        available_preflop_lines=lambda: [],
+    )
+    return SimpleNamespace(runner=runner)
+
+
+def test_chart_subtitle_empty_state_only_when_no_chart() -> None:
+    """N5: "no chart computed yet" appears ONLY when the grid is empty.
+
+    The subtitle's empty-state must be keyed on the SAME source of truth the
+    grid paints from (``project_chart(_line_chart_result(state))``). Before the
+    fix the subtitle was a one-shot label that never re-rendered, so it stayed
+    on the empty-state text even after a blueprint solve populated the grid.
+    """
+    from ui.views import preflop_chart
+
+    # No result at all -> genuine empty state.
+    empty_state = _fake_chart_state(None, route_source=None, status="idle")
+    assert preflop_chart._chart_subtitle(empty_state) == "no chart computed yet"
+
+    # Running, still no result -> the "solving..." caption (not empty state).
+    running_state = _fake_chart_state(None, route_source="live", status="running")
+    sub = preflop_chart._chart_subtitle(running_state)
+    assert "solving" in sub and "no chart computed yet" not in sub
+
+    # Blueprint route: grid IS populated, iters/wall == 0 -> describe the route,
+    # NEVER the empty-state text.
+    blueprint_result = {
+        "per_class": {"AA": {"all_in": 1.0}, "AKs": {"open_3": 1.0}},
+        "iterations": 0,
+        "wallclock_seconds": 0.0,
+    }
+    bp_state = _fake_chart_state(
+        blueprint_result, route_source="blueprint", status="done"
+    )
+    bp_sub = preflop_chart._chart_subtitle(bp_state)
+    assert "no chart computed yet" not in bp_sub, (
+        f"N5 regression: blueprint chart still shows empty-state subtitle: {bp_sub!r}"
+    )
+    assert "Blueprint" in bp_sub, bp_sub
+
+    # Live route with real iterations -> the iters/wallclock summary survives.
+    live_result = {
+        "per_class": {"AA": {"all_in": 1.0}},
+        "iterations": 500,
+        "wallclock_seconds": 12.3,
+    }
+    live_state = _fake_chart_state(live_result, route_source="live", status="done")
+    live_sub = preflop_chart._chart_subtitle(live_state)
+    assert "500 iters" in live_sub and "12.3s" in live_sub, live_sub
+    assert "no chart computed yet" not in live_sub

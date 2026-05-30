@@ -31,6 +31,7 @@ NiceGUI mental model 7: do not block the asyncio loop).
 from __future__ import annotations
 
 import logging
+import os
 from typing import TYPE_CHECKING, Any
 
 from poker_solver.hunl import HUNLConfig, HUNLPoker, Street
@@ -64,6 +65,36 @@ logger = logging.getLogger(__name__)
 #   'sidebar-tree-expansion'.
 
 
+# Dev-gate (W1/W4): the Concrete/RvR method toggle is hidden in production
+# (postflop is Range-vs-range only). Each of app.py / spot_input.py /
+# run_panel.py reads the ``POKER_SOLVER_DEV_CONCRETE`` env var DIRECTLY through
+# a tiny local helper rather than importing one another's helper — this keeps
+# the dev-gate logic identical across the three modules with zero new
+# cross-module imports (no import-cycle risk). Read at call time (not import
+# time) so tests can flip it per-case with ``monkeypatch``.
+_CONCRETE_DEV_ENV_VAR: str = "POKER_SOLVER_DEV_CONCRETE"
+
+
+def _concrete_dev_enabled() -> bool:
+    """True when the dev-only Concrete/RvR method toggle is enabled."""
+    return bool(os.environ.get(_CONCRETE_DEV_ENV_VAR, "").strip())
+
+
+def _is_postflop(spot: Any) -> bool:
+    """True when ``spot`` is a postflop spot (flop / turn / river).
+
+    Regression 1: ``rvr_mode`` (range-vs-range) is a POSTFLOP-only concept —
+    ``poker_solver.range_aggregator.solve_range_vs_range_nash`` raises a
+    ``ValueError`` for a preflop spot. A postflop spot has a dealt board of
+    3 (flop), 4 (turn) or 5 (river) cards; a preflop spot has an empty board.
+    Read ``len(spot.board) >= 3`` directly (mirrors ``Spot.starting_street``,
+    which derives PREFLOP/FLOP/TURN/RIVER from the same board length) so the
+    test fixtures that pass a duck-typed spot with a ``board`` list also work.
+    """
+    board = getattr(spot, "board", None) or ()
+    return len(board) >= 3
+
+
 def _is_slot_teardown_error(exc: BaseException) -> bool:
     """True for the tab-switch teardown ``RuntimeError``.
 
@@ -75,6 +106,24 @@ def _is_slot_teardown_error(exc: BaseException) -> bool:
     every other error surface loudly.
     """
     return isinstance(exc, RuntimeError) and "parent slot" in str(exc)
+
+
+def _has_result(runner) -> bool:
+    """True when the runner holds any solve-result payload.
+
+    The matrix / tree panels render placeholders until one of these result
+    snapshots is populated. The header status chip uses this to avoid showing
+    a stale terminal status (``done`` / ``stopped`` left over from a previous
+    session) after a page reload or RESET SPOT, when no solve has actually
+    produced output this session.
+    """
+    return bool(
+        getattr(runner, "result", None)
+        or getattr(runner, "rvr_result", None)
+        or getattr(runner, "nash_result", None)
+        or getattr(runner, "chained_result", None)
+        or getattr(runner, "preflop_chart_result", None)
+    )
 
 
 def _run_tick_step(label: str, fn: Any) -> None:
@@ -215,50 +264,83 @@ def build_page() -> None:
         doesn't spam a full traceback on every tick) while keeping any other
         exception loud — and never lets the timer die.
         """
-        _run_tick_step("run_panel.refresh_progress", lambda: run_panel.refresh_progress(state))
-        # Header running indicator (cheap; toggles a spinner + recolours a
-        # status badge from the runner state). Lives in the header, which
-        # survives tab switches, but guarded uniformly for safety.
-        _run_tick_step("status indicator update", refresh_status_indicator)
-        # Keep the header spot label (issue #4) in sync when the user edits
-        # stacks / board in the spot-input panel (cheap text compare).
-        _run_tick_step("spot label refresh", refresh_spot_label)
+        # Self-terminate once the page client is gone: the timer can keep
+        # firing after its page's slot tree was torn down (startup race /
+        # tab switch / disconnect), which otherwise raises ``RuntimeError:
+        # The parent slot of the element has been deleted``. Cancel and bail
+        # before touching any element.
+        try:
+            from nicegui import context
 
-        # Task #55: refresh the preflop chart widget when its worker
-        # publishes a new result (identity change of
-        # ``runner.preflop_chart_result``).
-        def _refresh_preflop_chart() -> None:
-            current_id = id(getattr(state.runner, "preflop_chart_result", None))
-            if current_id != last_preflop_chart_id[0]:
-                last_preflop_chart_id[0] = current_id
-                refresher = getattr(state.runner, "_preflop_chart_refresh", None)
-                if callable(refresher):
-                    refresher()
+            client = context.client
+            if client is not None and not getattr(client, "has_socket_connection", True):
+                timer.cancel()
+                return
+        except Exception:  # noqa: BLE001 -- context may be unavailable mid-teardown
+            pass
 
-        _run_tick_step("preflop chart refresh on tick", _refresh_preflop_chart)
+        try:
+            _run_tick_step("run_panel.refresh_progress", lambda: run_panel.refresh_progress(state))
+            # Header running indicator (cheap; toggles a spinner + recolours a
+            # status badge from the runner state). Lives in the header, which
+            # survives tab switches, but guarded uniformly for safety.
+            _run_tick_step("status indicator update", refresh_status_indicator)
+            # Keep the header spot label (issue #4) in sync when the user edits
+            # stacks / board in the spot-input panel (cheap text compare).
+            _run_tick_step("spot label refresh", refresh_spot_label)
 
-        # Task #57: re-render the chained tab when a chained result lands.
-        # Task #68 Phase 6: also re-render when the postflop route info
-        # identity changes (the user just paid for a flop subgame solve).
-        def _refresh_chained() -> None:
-            chained_result = getattr(state.runner, "chained_result", None)
-            current_id_c = id(chained_result) if chained_result is not None else None
-            post_info = getattr(state.runner, "chained_postflop_route_info", None)
-            current_post_id = id(post_info) if post_info is not None else None
-            id_changed = current_id_c != chained_state["last_id"]
-            post_changed = current_post_id != chained_state["last_post_route_id"]
-            if id_changed or post_changed:
-                chained_state["last_id"] = current_id_c
-                chained_state["last_post_route_id"] = current_post_id
-                refresh = getattr(state.runner, "_chained_refresh", None)
-                if callable(refresh):
-                    refresh()
+            # Task #55: refresh the preflop chart widget when its worker
+            # publishes a new result (identity change of
+            # ``runner.preflop_chart_result``).
+            def _refresh_preflop_chart() -> None:
+                current_id = id(getattr(state.runner, "preflop_chart_result", None))
+                if current_id != last_preflop_chart_id[0]:
+                    last_preflop_chart_id[0] = current_id
+                    refresher = getattr(state.runner, "_preflop_chart_refresh", None)
+                    if callable(refresher):
+                        refresher()
 
-        _run_tick_step("chained tab refresh tick", _refresh_chained)
-        # Debounced state.json flush.
-        _run_tick_step("_maybe_flush_state", _maybe_flush_state)
+            _run_tick_step("preflop chart refresh on tick", _refresh_preflop_chart)
 
-    ui.timer(0.5, _tick)
+            # Task #57: re-render the chained tab when a chained result lands.
+            # Task #68 Phase 6: also re-render when the postflop route info
+            # identity changes (the user just paid for a flop subgame solve).
+            def _refresh_chained() -> None:
+                chained_result = getattr(state.runner, "chained_result", None)
+                current_id_c = id(chained_result) if chained_result is not None else None
+                post_info = getattr(state.runner, "chained_postflop_route_info", None)
+                current_post_id = id(post_info) if post_info is not None else None
+                id_changed = current_id_c != chained_state["last_id"]
+                post_changed = current_post_id != chained_state["last_post_route_id"]
+                if id_changed or post_changed:
+                    chained_state["last_id"] = current_id_c
+                    chained_state["last_post_route_id"] = current_post_id
+                    refresh = getattr(state.runner, "_chained_refresh", None)
+                    if callable(refresh):
+                        refresh()
+
+            _run_tick_step("chained tab refresh tick", _refresh_chained)
+            # Debounced state.json flush.
+            _run_tick_step("_maybe_flush_state", _maybe_flush_state)
+        except RuntimeError as exc:
+            # Final backstop: a slot teardown that escaped the per-substep
+            # guards (e.g. the timer fired mid-teardown) must not surface a
+            # full traceback. Cancel the now-orphaned timer and swallow.
+            if _is_slot_teardown_error(exc):
+                logger.debug("_tick skipped: target slot torn down; cancelling timer")
+                timer.cancel()
+                return
+            raise
+
+    timer = ui.timer(0.5, _tick)
+    # Cancel the poller as soon as the page client disconnects so it can't
+    # keep firing against a torn-down slot tree.
+    try:
+        from nicegui import context
+
+        context.client.on_disconnect(lambda: timer.cancel())
+    except Exception:  # noqa: BLE001 -- no client / disconnect hook in some contexts
+        pass
 
     # ----- Onboarding (3 steps; ``ui_mockups_and_debates.md`` §4) -----
     if not state.prefs.onboarding_completed:
@@ -446,6 +528,11 @@ def _build_status_indicator(state: AppState):
     def _refresh() -> None:
         runner = state.runner
         status = runner.status
+        # Self-heal a stale terminal status after a reload / RESET SPOT: if the
+        # runner reports a terminal state but holds no result payload, the
+        # matrix / tree show placeholders, so the chip should read "Idle" too.
+        if status in ("done", "stopped") and not _has_result(runner):
+            status = "idle"
         color, icon, human = _STYLE.get(status, ("grey-5", "circle", status))
         running = bool(runner.is_running)
         # Spinner only while a solve is live (running OR paused).
@@ -837,7 +924,7 @@ def _on_preflop_chart_solve(state: AppState) -> None:
             open_sizes_bb=list(open_sizes) if open_sizes else None,
             reraise_multipliers=list(reraise_mults) if reraise_mults else None,
         )
-    except RuntimeError as exc:
+    except RuntimeError:
         ui.notify(
             "A solve is already running — stop it first, then start a new one.",
             type="warning",
@@ -881,6 +968,26 @@ def _on_solve(state: AppState) -> None:
     from nicegui import ui
 
     spot = state.current_spot
+    # W1/W4: authoritative dev-gate at the decision point. In production
+    # (dev-gate OFF) POSTFLOP is Range-vs-range ONLY, so force ``rvr_mode``
+    # True here — BEFORE the ``if spot.rvr_mode:`` branch below — regardless
+    # of how the spot was (re)built. ``_on_load_preset`` / ``_on_reset``
+    # replace ``state.current_spot`` with a fresh ``Spot()`` whose
+    # ``rvr_mode`` defaults False, and ``run_panel.render()`` (which used to be
+    # the only place that forced it) never re-runs after such a rebuild; so
+    # without this guard a preset load silently reverted prod to the Concrete
+    # point-pair path. Forcing it at the dispatch point closes that gap.
+    #
+    # Regression 1: ``rvr_mode`` is a POSTFLOP concept. The range-vs-range
+    # aggregator (``poker_solver.range_aggregator.solve_range_vs_range_nash``)
+    # RAISES ``ValueError("...does not support preflop range-vs-range...")``
+    # for a PREFLOP spot, so forcing RvR on the default 100BB preflop spot
+    # made the Solve button error in production. Only force RvR for postflop
+    # spots (3/4/5 board cards = flop/turn/river); preflop spots keep
+    # ``rvr_mode=False`` and route through their existing non-RvR path (the
+    # preflop chart / concrete preflop solve).
+    if not _concrete_dev_enabled() and _is_postflop(spot):
+        spot.rvr_mode = True
     # PR 24b §3.6: validate the facing-bet input before building the
     # config so the user sees an actionable error instead of an engine
     # ValueError. The bettor's effective stack is stack_bb minus the
@@ -919,9 +1026,8 @@ def _on_solve(state: AppState) -> None:
     # ``poker_solver.solve()`` route in PR 10b.
     if min(spot.stacks_bb) <= 15:
         ui.notify(
-            f"{min(spot.stacks_bb)} BB stack: push/fold view recommended. "
-            "Solving anyway. (PR 11 will offer a 'Switch to push/fold view' "
-            "button here.)",
+            f"Short stack ({min(spot.stacks_bb)} BB): a push/fold strategy is "
+            "usually optimal here. Solving the full tree anyway.",
             type="warning",
             position="top",
             timeout=5000,
@@ -976,7 +1082,7 @@ def _on_solve(state: AppState) -> None:
                 # ``"true_nash"`` dispatches to vector-form CFR.
                 solver_mode=getattr(spot, "solver_mode", "blueprint"),
             )
-        except RuntimeError as exc:
+        except RuntimeError:
             ui.notify("A solve is already running — stop it first, then start a new one.", type="warning", position="top")
             return
         state.current_solve = SolveSession(
@@ -1001,7 +1107,7 @@ def _on_solve(state: AppState) -> None:
             locked_strategies=locked_strategies,
             force_tree_solve=force_tree_solve,
         )
-    except RuntimeError as exc:
+    except RuntimeError:
         ui.notify("A solve is already running — stop it first, then start a new one.", type="warning", position="top")
         return
 
@@ -1091,7 +1197,7 @@ def _on_chained_solve(state: AppState) -> None:
             rvr_villain_range=villain_range,
             rvr_hero_player=spot.hero_player,
         )
-    except RuntimeError as exc:
+    except RuntimeError:
         ui.notify("A solve is already running — stop it first, then start a new one.", type="warning", position="top")
         return
 

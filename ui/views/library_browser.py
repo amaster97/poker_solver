@@ -165,6 +165,12 @@ def render(state: AppState) -> Any:
                 load_btn.props("disable")
                 delete_btn = ui.button("Delete").mark("library-delete-button")
                 delete_btn.props("disable flat color=negative")
+                # Standalone dismiss so the dialog can always be closed
+                # without relying on the backdrop / Esc.
+                close_btn = ui.button("Close", on_click=dialog.close).mark(
+                    "library-close-button"
+                )
+                close_btn.props("flat")
             footer_label = (
                 ui.label("")
                 .classes("text-xs italic")
@@ -181,7 +187,7 @@ def render(state: AppState) -> Any:
                 _render_stub_rows(rows_container)
                 entry_count_label.set_text(f"({len(_STUB_ROWS)} entries)")
                 footer_label.set_text(
-                    "PR 11: persistence not yet wired (library module missing)"
+                    "Saving solves to the library isn't available yet."
                 )
                 return
 
@@ -317,7 +323,7 @@ def _render_stub_rows(container: Any) -> None:
             row.on(
                 "click",
                 lambda _e=None: ui.notify(
-                    "PR 11 — load from disk is not yet wired",
+                    "Loading saved spots isn't available yet.",
                     type="info",
                 ),
             )

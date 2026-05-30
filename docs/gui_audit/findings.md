@@ -258,3 +258,135 @@ OPEN / HANDOFF:
 
 NON-DESTRUCTIVE STATE: main untouched/pristine; all work on the branch; the
 _rust.so in the worktree is a gitignored symlink (not tracked).
+
+---
+
+# ⭐ AUTHORITATIVE GROUND TRUTH — Session 2026-05-30 (Opus, fresh chat post-migration)
+
+This section supersedes the confused/retracted blocks above. It is verified against the
+**live running server** (launched FROM this GUI worktree → loads the hook-enabled `_rust.so`,
+so postflop solves run) and against on-disk code. Driver: Claude Preview MCP browser on :8080.
+
+## Environment resolution (the prior "postflop crashes" was an artifact)
+- This worktree's `poker_solver/_rust.so` is the GUI-branch build whose `solve_hunl_postflop`
+  HAS `log_every`/`on_progress`/`should_stop` hooks → the UI's live progress + cancel work.
+- `main` has the FASTER engine (IE/vector/suit-iso) but NO hooks → UI crashes against it.
+- Prior CORRECTION/CORRECTION 2 crashes = venv transiently loaded main's hook-less `.so`.
+- **Shippable state = main's perf + these hooks in one build = an engine-owned merge** (not UI).
+  Running the server from THIS worktree is a fully working env for UI verification.
+
+## VERIFIED PASS (live, engine-independent)
+| id | item | evidence |
+|----|------|----------|
+| F04/U01 | light mode legible (#1 complaint) | LIGHT → `body--light`, panel `rgb(250,250,250)`, text `rgb(0,0,0)`, cells near-white w/ blue text; toggles both ways + AUTO follows OS |
+| F08/U11 | no Python/Mock/backend visible | DOM/label/aria scan = 0 hits |
+| F06/U12 | hamburger works | menu: Replay onboarding + About (Version 1.10.0) |
+| F05/U07 | LIBRARY opens real dialog | "SOLVE LIBRARY" w/ filter, entries list, LOAD/DELETE (empty = 0 saved) |
+| U08/U09 | MATRIX/STRING + SUITED-OFFSUIT/EXACT-SUIT toggles | present + functional; STRING reveals paste textarea; excellent affordance help text |
+| U02/F09 | header + blinds editable | spot label has `edit` pencil; Stack depth (BB) editable; "Blinds & ante (editable)" expansion reveals SB/BB/ante |
+| U13 | no false "already running" | re-solve after Done works; rapid 3× → clean "A solve is already running — stop it first…" (zero traceback/method-name leak) |
+| — | Stop | no crash; console clean |
+| F07 | progress affordance | real `ui.linear_progress` (run_panel.py:397) determinate+indeterminate + iteration counter + ETA + expl chart (audit-confirmed) |
+| — | console | zero JS errors/warnings across solves + reload |
+
+## VERIFIED PASS (live, engine — using the hook-enabled build)
+| id | item | evidence |
+|----|------|----------|
+| F01 | postflop → fast native solve | RIVER TINY SUBGAME solved <1s |
+| F02 | decision tree populates | placeholder gone; real nodes after solve |
+| F03 | real non-uniform strategy | a node shows mixed `bet33% 21% · bet75% 6% · bet200% 73%` (not uniform R0/C100/F0) |
+
+## FIXED THIS SESSION (code on disk; live re-verify after server restart)
+| id | issue | fix | status |
+|----|-------|-----|--------|
+| G1 | example flop/turn spots inherited prev range (1-combo OR full-1326 wall) → non-deterministic | added `default_ranges` to hole-card-less fixtures + `fixture_default_ranges` gateway + branch in `_ranges_from_config`; flop/turn now load ~55-226 combos/player, deterministic across priors | FIXED (combo counts measured), live re-verify pending |
+| N2 | status chip "Done" sticks across reload/RESET while matrix empty | recompute chip from result-presence (terminal status + no result → idle) | fix-wave in flight |
+| G2 | `ui.timer` "parent slot deleted" RuntimeError at startup/tab-switch | self-terminating timer (cancel on client gone/disconnect) + top-level teardown-RuntimeError guard | fix-wave in flight |
+| N3 | Library dialog had no Close button (backdrop/Esc only) | add explicit Close button | fix-wave in flight |
+| N4/U14 | toasts leak internal refs ("PR 11"/"PR 10a"/push-fold roadmap) | sanitize to user-facing copy | fix-wave in flight |
+
+## CORRECTED PRIOR FINDINGS
+- **N1 is NOT an issue** — the 13×13 preflop grid IS fully implemented (`preflop_chart.py:831`); the
+  "coming online"/"not solved yet" text is a correct empty-state, not a stub. Close N1.
+- **F07 already satisfied** (real progress bar) — close.
+
+## OPEN / PENDING
+- **U04 route badge / U06 deeper lines:** badge IS implemented (`_route_info_badge` →
+  `describe_route_badge(runner.preflop_route_info)`, rendered under the grid; handles
+  blueprint/interpolated/live + U05 custom-size→live). Populates only AFTER a preflop-chart
+  solve. LIVE-CONFIRM pending: run a blueprint-backed solve (100bb→"blueprint", 67bb→
+  "interpolated 67bb ← 60/80"), confirm deeper-line chips unlock.
+- **Marquee range-vs-range FLOP:** confirm matrix fully populates with non-uniform strategy on a
+  flop node using G1's tractable ranges (light; full-range 100bb flop = memory wall, engine track).
+- **Method default = Concrete (point-pair)** contradicts locked "postflop = range-vs-range" —
+  DECISION FOR USER (flip to RvR couples to memory wall + the existing `SolveTooLargeError` guard).
+- Pre-existing ruff errors in untouched files (`poker_solver/cli.py`, etc.) — report, not fix here.
+- Part B persona walkthroughs + timings; full pytest/ruff battery; PR.
+- **Engine merge** (main perf + hooks) — backend-owned; gates the shippable wide-flop demo.
+
+## UPDATE — post-fix-wave live re-verify (server restarted w/ G1 + fix wave)
+- **N3 Library Close button** — VERIFIED live: dialog now shows LOAD SELECTED / DELETE / **CLOSE**.
+- **G1 data layer WORKS but display is STALE → new bug G3.** Debug log proved `_on_load_preset('flop_t87s_100bb')`
+  sets `current_spot.ranges` = P0 226 / P1 184 (correct, deterministic). BUT the LEFT range matrix stays
+  all-"MIX" and the RIGHT range-editor fraction stays "1326/1326" — the display does NOT repaint on preset
+  load. (Prior "ranges sync on load" only looked right when combo counts coincidentally matched the
+  page-build spot.) **G3 = range matrix + spot-input range editor don't refresh on preset load** despite
+  `_trigger_spot_views_refresh` calling the hooks. Fix agent in flight (root-cause + regression test).
+- **N2 PARTIAL.** solve→"Done" ✓; reload-with-no-result→idle (fix-wave recompute) ✓; but **RESET SPOT after a
+  solve still shows stale "Done"** because `_on_reset` (spot_input.py:1034) only sets `current_spot = Spot()`
+  and never clears `runner.result`/status → `_has_result` stays true. **N2-RESET fix pending:** add
+  `SolveRunner.clear_results()` (result/rvr/nash/chained/preflop_chart = None, status="idle") and call it from
+  `_on_reset` AND `_on_load_preset` (loading a new spot invalidates the prior solve). Batched after G3 (shared files).
+- **U04/U06** still code-confirmed only; live-confirm (blueprint solve → badge) deferred to final re-verify.
+- **Marquee RvR flop** + method-default tractability test deferred (memory contention w/ G3 agent's test; do post-restart).
+
+---
+
+# ⭐⭐ FINAL STATUS LEDGER — Session 2026-05-30 (Opus close-out) — supersedes all above
+
+All work is **UNCOMMITTED on branch `fix/gui-audit-message-leaks`** (worktree `musing-bartik-6e495b`); `main` untouched by the UI track.
+
+## Verified working — live, engine-independent (driven via Claude Preview on :8080)
+F04 light mode legible (the #1 complaint) · F08 no Python/Mock/engine-toggle visible · F06 hamburger (Replay/About) · F05 LIBRARY dialog (+ Close button) · U08/U09 MATRIX/STRING + suited/offsuit toggles + affordance text · U02/F09 header pencil + stack/blinds editing · U13 clean "already running" (no traceback leak) · F07 real progress bar · zero console errors · U04 preflop route badge ("Blueprint · 100BB", "Interpolated · 67BB ← 60+80") · U06 deeper preflop lines (78-line dropdown; selecting changes the 13×13 grid, AA R88→R68) · 13×13 preflop grid populated (N1 = non-issue).
+
+## Verified working — live, with the hook-enabled engine (Concrete path)
+F01 fast postflop solve (river subgame <1s) · F02 decision tree populates · F03 real mixed strategy (bet33 21% / bet75 6% / bet200 73%).
+
+## Fixed this session (code on disk; UI test suites green)
+| id | fix |
+|----|-----|
+| G1 | example flop/turn spots load deterministic ~55-226-combo ranges (was inherit 1 or full-1326) |
+| G2 | ui.timer self-cancels on dead client/disconnect + teardown-RuntimeError guard (startup clean) |
+| G3 | preset-load awaits the @ui.refreshable hooks → matrix/range editor repaint on load (was fire-and-forget) |
+| G3b | "Loaded preset" notify moved before the awaited refresh (no slot-teardown error) |
+| N2 + N2-RESET | status chip recomputes from result-presence; SolveRunner.clear_results() invalidates prior solve on reset/preset-load (RESET→Idle verified) |
+| N3 | LIBRARY dialog Close button |
+| N4/U14 | sanitized user-facing internal refs ("PR 11"/"PR 10a"/engine names) in toasts/labels |
+| N5 | preflop chart subtitle reflects chart presence (no stale "no chart computed yet") |
+| dev-gate | Concrete/RvR method toggle gated behind env `POKER_SOLVER_DEV_CONCRETE`; prod hides it + forces RvR |
+| W1/W4 | prod RvR made authoritative: `_on_solve` forces rvr_mode=True in prod + `_spot_from_config` carries the mode across rebuilds (was reverted to Concrete on preset-load/reset) |
+| W3 | preset-load split into sync mutation core + async repaint (mutations no longer deferred) |
+| P1 | **board card picker rank-mirror fixed** (label derived from card rank; "As" now places As, not 2s) |
+| P5 | RESET SPOT repaints (board chips clear) |
+| W2 | `clear_results()` cancels+reaps an in-flight worker before clearing → no concurrent-worker / bad-join hazard (6 unit tests) |
+| W1b | RvR-force gated to POSTFLOP only (board ≥ 3) — preflop no longer errors on Solve (was forcing RvR → ValueError) |
+| W3b | preset/reset `on_click` made synchronous (mutations inline) + repaint scheduled via `background_tasks.create` — fixed 3 smoke regressions, G3 preserved |
+
+### Test + live re-verify (final build)
+- **Full UI suite: 96 passed, 0 failed, 0 errors** (test_ui_smoke 28, gui_audit_fixes 12, pr24a 11, preflop_chart 8, preset_load_refresh 5, clear_results 6, solver_mode 6, theme_toggle 2, blueprint_routing 14, e2e_blueprint_smoke 4). `ruff check ui/` clean.
+- **Live re-verify (Claude Preview, fresh build):** P1 board picker → clicking AS/KS/2S builds `AsKs2s` (was mirror `2s3s…`) ✓ · P5 RESET clears board chips → empty/preflop ✓ · G1/G3 FLOP T87S → "226 / 1326" with matrix repaint ✓ · N5 preflop chart solved → "Blueprint route", grid populated, no "no chart computed yet" ✓ · clean startup, zero server errors (G2) ✓.
+
+### Minor observation (out of UI-fix scope; follow-up)
+- The preflop OPEN (RFI) chart AA cell read `C36` (call 36%) on one solve — looks off for a standard RFI (expected raise-heavy). Not touched by these UI fixes; it's blueprint-strategy/projection data. Flag for engine/blueprint review.
+
+## Decision — RESOLVED
+**Method default:** "Concrete" (point-pair) reclassified as a **dev-only artifact**, hidden from production (env `POKER_SOLVER_DEV_CONCRETE`); production postflop = **Range-vs-range only** (per user, 2026-05-30). RvR is the method that answers the user's real "I have KK, faced this action, what now?" workflow (solve RvR → navigate tree to the node → click your hand in the matrix).
+
+## Deferred / known-remaining (documented, NOT fixed this session)
+- **P2** — decision-tree node click does NOT drive the range matrix (matrix stays at root); on/off-path nav reads only from the tree text. Real gap, larger change. *(scoped follow-up)*
+- **P3** — matrix highlights the *acting* player's hand while the combo inspector shows the *hero*'s combos → lit cell reads "0 combos." Manifests on Concrete point-pair spots (now dev-only). *(scoped follow-up)*
+- **ENGINE MERGE (blocker for the marquee):** prod RvR postflop is **not tractable on this branch's engine** — a modest 226×184 @ 100BB flop hangs in tree-build (RSS flat ~120MB, CPU-bound), and Stop can't interrupt the build phase. Needs main's IE/vector/suit-iso engine merged with this branch's progress/cancel hooks (backend track). Until then, postflop demos use the dev-flag Concrete path.
+- Smoke-test pre-existing failures (exploitability_history length drift from log_every) — *(Agent B triage; pre-existing, not a regression)*.
+
+## Merge path (per user workflow)
+Branch verified green → commit to `fix/gui-audit-message-leaks` → merge to `main` + private mirror is the **final gated step**, entangled with the engine reconciliation (this branch carries older engine files; main has the fast engine). UI work rides on top either way.

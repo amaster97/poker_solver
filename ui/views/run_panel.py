@@ -35,6 +35,7 @@ ElementFilter markers (Agent C asserts on these):
 from __future__ import annotations
 
 import logging
+import os
 import time
 from collections.abc import Callable
 from typing import Any
@@ -100,6 +101,27 @@ _TIER_INDEX: dict[str, tuple[int, float]] = {
     label: (iters, target_mBB) for label, iters, target_mBB in _TIER_DEFAULTS
 }
 _DEFAULT_TIER: str = "Standard"
+
+# Dev-only Concrete/Range-vs-range method toggle gate.
+#
+# Product decision (2026-05-30): "Concrete" = point-pair (fixes both
+# players to one hole-card combo) is a dev/test artifact, NOT a real
+# study mode. Production postflop is **Range-vs-range only**, so the
+# Concrete/RvR toggle is hidden and ``rvr_mode`` is forced True. The
+# toggle stays reachable behind this env var for developer / UI
+# debugging (RvR is currently slow on this branch's engine), where it
+# defaults to Concrete for fast iteration.
+_CONCRETE_DEV_ENV_VAR: str = "POKER_SOLVER_DEV_CONCRETE"
+
+
+def _concrete_dev_enabled() -> bool:
+    """Return True when the dev-only Concrete/RvR method toggle is enabled.
+
+    Reads ``POKER_SOLVER_DEV_CONCRETE`` from the environment at call time
+    (page-build time, not import time) so tests can flip it per-case with
+    ``monkeypatch.setenv`` / ``delenv``. Any non-empty value enables it.
+    """
+    return bool(os.environ.get(_CONCRETE_DEV_ENV_VAR, "").strip())
 
 
 def render(
@@ -195,13 +217,11 @@ def render(
             )
             tier_slider.mark("tier-slider")
             ui.tooltip(
-                "Measured against the 12 PR 10a preset fixtures plus 3 "
-                "turn-anchor subgames (see "
-                "docs/v1_5_slider_tier_defaults_measured.md). Each tier "
-                "sets both an iteration ceiling and a target "
-                "exploitability (mBB/pot). Empirically each tier "
-                "converges to well below its mBB/pot label on every "
-                "measured spot; wall-clock is the operative differentiator."
+                "Each tier sets both an iteration ceiling and a target "
+                "exploitability (mBB/pot). Higher tiers solve more "
+                "precisely but take longer; in practice every tier "
+                "converges to well below its mBB/pot label, so wall-clock "
+                "time is the main trade-off."
             )
             handles["tier_slider"] = tier_slider
 
@@ -291,21 +311,42 @@ def render(
         # to ``Range-vs-range``. The legacy blueprint path is available
         # via the opt-in checkbox below. See chart subtitle for the
         # method actually used.
-        with ui.row().classes("gap-2 items-center"):
-            ui.label("Solve mode:").classes("text-xs")
-            rvr_toggle = ui.toggle(
-                ["Concrete", "Range-vs-range"],
-                value="Concrete",
-            )
-            rvr_toggle.mark("rvr-mode-toggle")
-            ui.tooltip("Slower aggregator pass; honest framing — see Plan C Stage C1.")
-            handles["rvr_toggle"] = rvr_toggle
+        #
+        # Product decision (2026-05-30): "Concrete" (point-pair) is a
+        # dev/test artifact, not a real study mode. Production postflop is
+        # **Range-vs-range only**, so the toggle is hidden in production
+        # and ``rvr_mode`` is forced True (no "Concrete"/"point-pair" text
+        # reaches the production DOM). The toggle is restored — defaulting
+        # to Concrete for fast dev iteration — only when the dev env var
+        # ``POKER_SOLVER_DEV_CONCRETE`` is set (see ``_concrete_dev_enabled``).
+        if _concrete_dev_enabled():
+            # Dev path: show the toggle, default selection = Concrete so
+            # debugging is fast (RvR is slow on this branch's engine).
+            state.current_spot.rvr_mode = False
+            with ui.row().classes("gap-2 items-center"):
+                ui.label("Solve mode:").classes("text-xs")
+                rvr_toggle = ui.toggle(
+                    ["Concrete", "Range-vs-range"],
+                    value="Concrete",
+                )
+                rvr_toggle.mark("rvr-mode-toggle")
+                ui.tooltip(
+                    "Slower aggregator pass; honest framing — see Plan C Stage C1."
+                )
+                handles["rvr_toggle"] = rvr_toggle
 
-            def _on_rvr_toggle(e: Any) -> None:
-                state.current_spot.rvr_mode = str(e.value) == "Range-vs-range"
-                save_state()
+                def _on_rvr_toggle(e: Any) -> None:
+                    state.current_spot.rvr_mode = str(e.value) == "Range-vs-range"
+                    save_state()
 
-            rvr_toggle.on_value_change(_on_rvr_toggle)
+                rvr_toggle.on_value_change(_on_rvr_toggle)
+        else:
+            # Production path: no toggle. Postflop is Range-vs-range only;
+            # force the effective default so the existing solve dispatch
+            # (``Spot.to_rvr_call_args`` / ``solve_range_vs_range_nash``)
+            # routes through RvR and never falls into the point-pair path.
+            state.current_spot.rvr_mode = True
+        save_state()
 
         # ----- Pluribus-blueprint opt-in checkbox (task #61) -----
         # True-Nash vector-form CFR is the default since 2026-05-27 (per
@@ -572,12 +613,6 @@ def refresh_progress(state: AppState) -> None:
             method_label.set_text("Method: Pluribus blueprint aggregator (legacy)")
             nash_expl_label.set_text("")
         elif status in ("done", "stopped") and not rvr_mode_on:
-            # Engine is always Rust now; default the label to "rust" rather
-            # than the legacy "python" so a missing session never implies the
-            # test-only backend.
-            backend_str = (
-                state.current_solve.backend if state.current_solve else "rust"
-            )
             method_label.set_text("Method: concrete")
             nash_expl_label.set_text("")
         elif status == "running":

@@ -25,7 +25,9 @@ ElementFilter markers (Agent C asserts on these — see `pr10a_spec.md` §9):
 
 from __future__ import annotations
 
+import inspect
 import logging
+import os
 from typing import Any
 
 from poker_solver.card import RANKS, SUITS, Card
@@ -35,12 +37,35 @@ from ui.state import (
     Spot,
     enumerate_combos,
     enumerate_hand_classes,
+    fixture_default_ranges,
     list_fixture_preset_ids,
     load_fixture_config,
     save_state,
 )
 
 logger = logging.getLogger(__name__)
+
+# Dev-gate (W1/W4): read ``POKER_SOLVER_DEV_CONCRETE`` directly (no
+# cross-module import — same approach as ui/app.py and run_panel.py, so the
+# three modules share the gate semantics without an import cycle). Read at call
+# time so tests can flip it per-case with ``monkeypatch``.
+_CONCRETE_DEV_ENV_VAR: str = "POKER_SOLVER_DEV_CONCRETE"
+
+
+def _concrete_dev_enabled() -> bool:
+    """True when the dev-only Concrete/RvR method toggle is enabled."""
+    return bool(os.environ.get(_CONCRETE_DEV_ENV_VAR, "").strip())
+
+
+def _board_is_postflop(board: Any) -> bool:
+    """True when ``board`` (a card list) is a postflop board (3/4/5 cards).
+
+    Regression 1: ``rvr_mode`` (range-vs-range) is POSTFLOP-only — the
+    aggregator raises ``ValueError`` for a preflop spot. A postflop board has
+    3 (flop), 4 (turn) or 5 (river) cards; a preflop board is empty. Mirrors
+    ``Spot.starting_street`` (which derives the street from the same length).
+    """
+    return len(board or ()) >= 3
 
 
 def render(state: AppState) -> None:
@@ -142,11 +167,19 @@ def _render_board_section(state: AppState) -> None:
     # 4x13 suit-by-rank grid.
     with ui.grid(columns=13).classes("gap-1 max-w-md"):
         for suit_idx, suit_char in enumerate(SUITS):
-            for rank_idx, rank_char in enumerate(RANKS):
+            for rank_idx, _rank_char in enumerate(RANKS):
                 # Top-row = highest rank; reverse for visual A on left.
                 rank_value = 14 - rank_idx
                 card = Card(rank_value, suit_idx)
-                card_str = f"{rank_char}{suit_char}"
+                # P1: derive the LABEL from the actual card rank so the
+                # button text matches the Card it places. ``RANKS`` is
+                # ascending ("23456789TJQKA"), so the iteration's
+                # ``_rank_char`` (RANKS[rank_idx]) is the MIRROR of
+                # ``rank_value`` (= 14 - rank_idx). Using ``_rank_char``
+                # made the button labeled "As" place a "2s" (and the marker
+                # was wrong too). ``RANKS[rank_value - 2]`` is the char for
+                # ``rank_value`` (rank 2 -> index 0 ... rank 14 'A' -> 12).
+                card_str = f"{RANKS[rank_value - 2]}{suit_char}"
 
                 def _on_board_click(_e: Any, c: Card = card) -> None:
                     _toggle_board_card(state, c)
@@ -1028,17 +1061,25 @@ def _render_reset_preset_row(state: AppState) -> None:
     On bootstrap before mock_solver exists, fall back to the 12 IDs listed
     in ``pr10a_spec.md`` §7.4.
     """
-    from nicegui import ui
+    from nicegui import background_tasks, ui
 
-    def _on_reset() -> None:
-        state.current_spot = Spot()
-        save_state()
-        ui.notify("Spot reset to defaults.", type="info", position="top")
+    # Regressions 2 & 4: the on_click runs the SYNCHRONOUS mutation core
+    # (``_reset_spot_core`` -> set current_spot + ``clear_results`` +
+    # ``save_state`` + notify) INLINE at click time, then SCHEDULES the async
+    # repaint as a background task. A fully-async on_click let NiceGUI defer the
+    # WHOLE coroutine (mutations included) to a background task that could land
+    # AFTER a same-tick solve start / OOM error, clobbering ``runner.status``
+    # back to ``'idle'`` (``clear_results`` cancels + reaps the in-flight
+    # worker). Running the core inline commits the mutation at click time; the
+    # repaint still awaits the refreshable hooks (G3) inside the scheduled task.
+    def _reset(_e: Any = None) -> None:
+        _reset_spot_core(state)
+        background_tasks.create(_trigger_spot_views_refresh(state))
 
     ui.button(
         "Reset spot",
         icon="refresh",
-        on_click=_on_reset,
+        on_click=_reset,
     ).props("flat").mark("reset-spot-button")
 
     # Example-spots section header (Issue 3: clarify these are spot
@@ -1066,8 +1107,17 @@ def _render_reset_preset_row(state: AppState) -> None:
             # Marker convention: underscores in IDs become hyphens.
             marker_suffix = preset_id.replace("_", "-")
 
+            # Regressions 2 & 4: synchronous core inline + scheduled async
+            # repaint (see the ``_reset`` comment above). The mutations
+            # (``_load_preset_core`` -> set current_spot + ``clear_results`` +
+            # ``save_state`` + "Loaded preset" toast) commit at click time so a
+            # same-tick solve/OOM is not clobbered by a deferred
+            # ``clear_results``; the repaint still awaits the refreshable hooks
+            # (G3) inside the scheduled background task.
             def _load_preset(_e: Any = None, pid: str = preset_id) -> None:
-                _on_load_preset(state, pid)
+                if not _load_preset_core(state, pid):
+                    return
+                background_tasks.create(_trigger_spot_views_refresh(state))
 
             ui.button(
                 preset_id.replace("_", " "),
@@ -1075,8 +1125,104 @@ def _render_reset_preset_row(state: AppState) -> None:
             ).props("flat dense").classes("text-xs").mark(f"preset-{marker_suffix}")
 
 
-def _on_load_preset(state: AppState, preset_id: str) -> None:
-    """Load a preset via the ``ui.state.load_fixture_config`` gateway.
+def _reset_spot_core(state: AppState) -> None:
+    """Synchronous core of RESET SPOT: rebuild the default spot + invalidate.
+
+    W1/W4: the fresh ``Spot()`` defaults ``rvr_mode=False``; preserve the
+    production-correct mode so a reset doesn't silently revert prod to the
+    Concrete point-pair path (the ``_on_solve`` force is the authoritative
+    backstop, but keeping the spot itself coherent is cheap insurance — dev
+    carries the previous mode, prod is forced True).
+
+    N2-RESET: the fresh spot is unsolved, so the previous solve's
+    result/status must be dropped — otherwise the header chip (which reads
+    ``runner.status`` + ``_has_result(runner)``) keeps showing "Done" for a
+    spot that hasn't been solved. The 0.5s header poll repaints "Idle".
+
+    Kept synchronous (no awaits) so the click-time STATE MUTATIONS happen
+    inline; the repaint is awaited separately by :func:`_on_reset`.
+    """
+    from nicegui import ui
+
+    previous = state.current_spot
+    new_spot = Spot()
+    # Regression 1: the fresh default ``Spot()`` is PREFLOP (empty board), so
+    # ``_effective_rvr_mode`` keeps ``rvr_mode=False`` in production — RvR is
+    # postflop-only and the aggregator rejects preflop spots.
+    new_spot.rvr_mode = _effective_rvr_mode(previous, new_board=new_spot.board)
+    state.current_spot = new_spot
+    runner = getattr(state, "runner", None)
+    if runner is not None:
+        runner.clear_results()
+    save_state()
+    ui.notify("Spot reset to defaults.", type="info", position="top")
+
+
+async def _on_reset(state: AppState) -> None:
+    """RESET SPOT: replace the current spot with defaults, invalidate the prior
+    solve, and repaint the dependent views.
+
+    P5: ``_on_reset`` previously mutated state but never repainted, so the
+    board-picker chips (and ranges) stayed stale on screen. Mirror the
+    preset-load path: do the synchronous mutations in :func:`_reset_spot_core`,
+    then ``await _trigger_spot_views_refresh`` so the board clears and the
+    range inputs redraw to the fresh defaults inline.
+
+    Module-level (not a render-time closure) so it is directly testable via
+    ``nicegui.testing.User``.
+    """
+    _reset_spot_core(state)
+    await _trigger_spot_views_refresh(state)
+
+
+def _effective_rvr_mode(previous: Spot | None, new_board: Any = None) -> bool:
+    """W1/W4: the ``rvr_mode`` a freshly-built (re)loaded spot should carry.
+
+    Only meaningful when rebuilding from an EXISTING spot (preset load / reset
+    — ``previous`` is the spot being replaced). In that case:
+
+      * Production (dev-gate OFF): Range-vs-range — but ONLY for a POSTFLOP
+        spot (``new_board`` has 3/4/5 cards). RvR is a postflop concept; the
+        aggregator raises ``ValueError`` for a preflop spot, so a freshly-built
+        PREFLOP spot must keep ``rvr_mode=False`` (Regression 1).
+      * Dev (gate ON): carry the previous spot's ``rvr_mode`` so the user's
+        Concrete/RvR toggle choice survives the rebuild.
+
+    ``new_board`` is the board of the spot being CONSTRUCTED (not ``previous``);
+    the production RvR force keys off it so a preflop reset/preset stays
+    Concrete-routed. When omitted (legacy callers), it defaults to None →
+    preflop, so the force is conservative (only postflop spots get RvR).
+
+    When ``previous is None`` there is no UI session to preserve — the caller is
+    constructing a standalone spot (e.g. a duck-typed test fixture), so keep the
+    dataclass default (False) rather than imposing the production RvR force.
+    The authoritative production guarantee lives in ``ui.app._on_solve``, which
+    re-forces RvR (postflop-gated) at the dispatch point regardless of how the
+    spot was built.
+    """
+    if previous is None:
+        return bool(getattr(Spot(), "rvr_mode", False))
+    if not _concrete_dev_enabled():
+        return _board_is_postflop(new_board)
+    return bool(getattr(previous, "rvr_mode", False))
+
+
+def _load_preset_core(state: AppState, preset_id: str) -> bool:
+    """Synchronous core of the preset-load path (W3).
+
+    Does ALL the click-time STATE MUTATIONS inline — ``load_fixture_config``,
+    ``fixture_default_ranges``, :func:`_spot_from_config`,
+    ``state.current_spot = new_spot``, ``runner.clear_results()``,
+    ``save_state()`` and the "Loaded preset" / error toasts — and returns
+    ``True`` on success / ``False`` if the load aborted (so the async wrapper
+    knows whether to repaint).
+
+    W3: previously the whole load was a single ``async def`` whose ``on_click``
+    awaited it; NiceGUI deferred the entire coroutine to a background task, so
+    the mutations weren't synchronous with the click (which also caused the
+    earlier slot-teardown notify error). Splitting the synchronous mutations
+    out here — with only the repaint left async in :func:`_on_load_preset` —
+    makes the mutations happen inline at click time.
 
     The mock_solver import is hidden inside ``ui.state`` so that
     ``pr10a_spec.md`` §11 acceptance #7 (mock_solver imports appear in
@@ -1090,41 +1236,95 @@ def _on_load_preset(state: AppState, preset_id: str) -> None:
         ui.notify(
             f"Failed to load preset {preset_id}: {exc}", type="negative", position="top"
         )
-        return
+        return False
     if config is None:
         ui.notify(
             f"Preset {preset_id} unavailable (mock_solver not yet wired).",
             type="warning",
             position="top",
         )
-        return
+        return False
+
+    # Fetch the preset's explicit per-player ranges, if any. The
+    # range-vs-range FLOP/TURN/PREFLOP example spots carry no concrete
+    # hole cards on their config; without these strings the load would
+    # inherit the previous spot's ranges (a 1-combo river subgame, or the
+    # full 1326-combo default — the memory wall). ``None`` for hole-card
+    # anchored fixtures, which keep their concrete-combo behavior.
+    try:
+        default_ranges = fixture_default_ranges(preset_id)
+    except (KeyError, ValueError):
+        default_ranges = None
 
     # Materialize the config into the current spot. This now syncs the
     # WHOLE spot — board, BOTH players' ranges, stacks, and blinds — so the
     # board-picker chips and the range matrix match the loaded scenario
     # (previously only board/stacks/bet-sizes were copied and the UI never
     # repainted, so chips + ranges stayed on the old values).
-    new_spot = _spot_from_config(config, previous=state.current_spot)
+    new_spot = _spot_from_config(
+        config, previous=state.current_spot, default_ranges=default_ranges
+    )
     state.current_spot = new_spot
+    # N2-RESET: a freshly-loaded preset is unsolved — invalidate the prior
+    # solve's result/status so the header chip doesn't read "Done" for a spot
+    # that hasn't been solved yet. The 0.5s header poll repaints "Idle".
+    runner = getattr(state, "runner", None)
+    if runner is not None:
+        runner.clear_results()
     save_state()
 
+    # G3b: emit the success toast BEFORE the refresh (which the async wrapper
+    # awaits). ``_trigger_spot_views_refresh`` re-renders the
+    # ``@ui.refreshable`` bodies, tearing down + recreating their slots; once
+    # that has happened, the click handler's original slot context is gone and
+    # ``ui.notify`` resolves ``context.client`` through a deleted slot, raising
+    # ``RuntimeError: The parent element this slot belongs to has been
+    # deleted.`` (the load itself still succeeds; only the toast errored).
+    # Notifying here — while the handler's slot is still valid — both fixes the
+    # traceback and surfaces the toast a beat sooner.
+    ui.notify(f"Loaded preset: {preset_id}", type="info", position="top")
+    return True
+
+
+async def _on_load_preset(state: AppState, preset_id: str) -> None:
+    """Load a preset: synchronous mutations + async repaint (W3 + G3).
+
+    W3: the click-time STATE MUTATIONS run synchronously via
+    :func:`_load_preset_core`; only the dependent-view REPAINT stays async.
+
+    G3: the repaint (:func:`_trigger_spot_views_refresh`) must be *awaited*:
+    ``@ui.refreshable.refresh()`` returns an ``AwaitableResponse`` that, left
+    un-awaited, defers the actual re-render to a fire-and-forget background
+    task — so the freshly-loaded ranges only show up on the *next* event-loop
+    turn (or never, if the slot churns first). That deferral was the G3
+    staleness: the left range matrix + the right range editor kept their
+    pre-load look even though ``state.current_spot.ranges`` was already
+    updated. Awaiting forces the re-render to complete inline.
+    """
+    if not _load_preset_core(state, preset_id):
+        return
     # Repaint the dependent views. The spot-input panel (board chips +
     # range inputs + stacks/blinds) and the range matrix each render once
     # at page build and otherwise only redraw via their own refresh hooks,
     # so without these calls the freshly-loaded spot would be invisible.
-    _trigger_spot_views_refresh(state)
-
-    ui.notify(f"Loaded preset: {preset_id}", type="info", position="top")
+    await _trigger_spot_views_refresh(state)
 
 
-def _trigger_spot_views_refresh(state: AppState) -> None:
-    """Fire the spot-input + range-matrix refresh hooks (best-effort).
+async def _trigger_spot_views_refresh(state: AppState) -> None:
+    """Fire (and await) the spot-input + range-matrix refresh hooks.
 
-    Each view's ``render`` parks its refresh callable on the runner
-    (``_spot_input_refresh`` / ``_range_matrix_refresh``); ``state.matrix_refresh``
-    is the matrix hook under the name ``tree_browser`` also uses. We call
-    whichever are present and never let a missing hook (or a torn-down slot
-    during a tab switch) raise.
+    Each view's ``render`` parks its ``@ui.refreshable`` refresh callable on
+    the runner (``_spot_input_refresh`` / ``_range_matrix_refresh``);
+    ``state.matrix_refresh`` is the matrix hook under the name ``tree_browser``
+    also uses. We call whichever are present and never let a missing hook (or a
+    torn-down slot during a tab switch) raise.
+
+    Each hook returns a NiceGUI ``AwaitableResponse``. We **await** it (its
+    contract requires awaiting immediately after creation, or not at all) so
+    the re-render runs INLINE rather than as a deferred fire-and-forget task.
+    Without the await the body re-execution is punted to the next event-loop
+    turn, which is the G3 bug: the panes kept their stale pre-load look because
+    nothing in the synchronous click path ever pumped the deferred task.
     """
     runner = getattr(state, "runner", None)
     hooks = []
@@ -1138,23 +1338,51 @@ def _trigger_spot_views_refresh(state: AppState) -> None:
             continue
         seen.add(id(hook))
         try:
-            hook()
+            response = hook()
+            # ``refresh()`` returns an AwaitableResponse; await it so the
+            # re-render completes synchronously. Older/foreign hooks may return
+            # a plain value (or None) — only await genuine awaitables.
+            if inspect.isawaitable(response):
+                await response
         except Exception:  # noqa: BLE001 -- best-effort; slot may be gone
             logger.debug("spot-load refresh hook raised", exc_info=True)
 
 
 def _ranges_from_config(
-    config: Any, previous: Spot | None
+    config: Any,
+    previous: Spot | None,
+    default_ranges: tuple[str, str] | None = None,
 ) -> tuple[RangeWithFreqs, RangeWithFreqs]:
     """Derive both players' ranges for a freshly-loaded preset.
 
-    ``HUNLConfig`` carries concrete ``initial_hole_cards`` (the point-pair
-    a subgame fixture is anchored on) but NOT full per-player ranges. When
-    those hole cards are present we set each player's range to exactly that
-    combo so the loaded spot is a coherent concrete subgame and the matrix
-    visibly tracks the load. When they're absent (full-range fixtures) we
-    preserve the user's existing ranges if any, else default to full.
+    Resolution order:
+
+    1. ``default_ranges`` — explicit ``(oop_range_str, ip_range_str)`` the
+       preset attaches for range-vs-range FLOP/TURN/PREFLOP example spots
+       (no concrete hole cards). Parsed via ``RangeWithFreqs.from_string``
+       so the loaded spot is a real, deterministic, tractable range-vs-range
+       scenario regardless of what the previous spot held.
+    2. ``config.initial_hole_cards`` — the concrete point-pair a river
+       subgame fixture is anchored on; each player's range becomes exactly
+       that combo so the loaded spot is a coherent concrete subgame.
+    3. The previous spot's ranges, if any (preserve user edits).
+    4. Full ranges as a last resort.
+
+    Step 1 takes precedence over the hole-card path because a preset that
+    ships explicit ranges is declaring itself a range-vs-range spot.
     """
+    if default_ranges is not None and len(default_ranges) == 2:
+        oop_str, ip_str = default_ranges
+        try:
+            return (
+                RangeWithFreqs.from_string(oop_str),
+                RangeWithFreqs.from_string(ip_str),
+            )
+        except Exception:  # noqa: BLE001 -- malformed spec; fall through
+            logger.warning(
+                "preset default ranges failed to parse; falling back",
+                exc_info=True,
+            )
     hole = getattr(config, "initial_hole_cards", ()) or ()
     if isinstance(hole, (tuple, list)) and len(hole) == 2:
         ranges: list[RangeWithFreqs] = []
@@ -1174,12 +1402,18 @@ def _ranges_from_config(
     return (RangeWithFreqs.full(), RangeWithFreqs.full())
 
 
-def _spot_from_config(config: Any, previous: Spot | None = None) -> Spot:
+def _spot_from_config(
+    config: Any,
+    previous: Spot | None = None,
+    default_ranges: tuple[str, str] | None = None,
+) -> Spot:
     """Build a ``Spot`` from a ``HUNLConfig`` (preset load helper).
 
     Syncs board, both players' ranges (derived via :func:`_ranges_from_config`),
     stacks, blinds, ante, and bet sizes from the preset config so the whole
-    spot — not just the board — reflects the loaded scenario.
+    spot — not just the board — reflects the loaded scenario. ``default_ranges``
+    carries the preset's explicit per-player range strings (range-vs-range
+    fixtures) through to :func:`_ranges_from_config`.
     """
     board = list(config.initial_board)
     starting_stack = config.starting_stack
@@ -1187,7 +1421,7 @@ def _spot_from_config(config: Any, previous: Spot | None = None) -> Spot:
     stacks_bb = (int(starting_stack / big_blind), int(starting_stack / big_blind))
     return Spot(
         board=board,
-        ranges=_ranges_from_config(config, previous),
+        ranges=_ranges_from_config(config, previous, default_ranges),
         stacks_bb=stacks_bb,
         sb_blind=config.small_blind / big_blind,
         bb_blind=1.0,
@@ -1197,6 +1431,13 @@ def _spot_from_config(config: Any, previous: Spot | None = None) -> Spot:
         include_all_in=config.include_all_in,
         preflop_raise_cap=config.preflop_raise_cap,
         postflop_raise_cap=config.postflop_raise_cap,
+        # W1/W4: a fresh ``Spot`` defaults ``rvr_mode=False``; without this the
+        # loaded prod spot would silently route the Concrete point-pair path
+        # (until ``_on_solve`` re-forces it). Production -> True for a POSTFLOP
+        # board (Regression 1: a preflop preset stays Concrete-routed — the
+        # RvR aggregator rejects preflop spots); dev -> carry the previous
+        # spot's mode.
+        rvr_mode=_effective_rvr_mode(previous, new_board=board),
     )
 
 

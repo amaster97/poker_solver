@@ -475,6 +475,16 @@ class Spot:
     # warning at ``_pick_point_pair_hole_cards`` is suppressed in RvR
     # mode because hole-card selection is handled per-class by the
     # aggregator itself.
+    #
+    # The dataclass default stays ``False`` (point-pair) for backward
+    # compatibility with code/tests that construct a bare ``Spot()``. The
+    # *effective* production default is Range-vs-range: the run panel
+    # forces ``rvr_mode = True`` at page-build time whenever the dev-only
+    # Concrete toggle is hidden (the production case — see
+    # ``ui/views/run_panel.py:_concrete_dev_enabled`` /
+    # ``POKER_SOLVER_DEV_CONCRETE``). Setting it at render time rather than
+    # flipping this constant avoids surprising the many call sites that
+    # build ``Spot()`` / ``SimpleNamespace(rvr_mode=...)`` directly.
     rvr_mode: bool = False
     # Task #61: RvR solver-mode selector (post-PR-114 true-Nash unlock).
     # When ``rvr_mode`` is True, this field picks which engine entry the
@@ -1041,6 +1051,87 @@ class SolveRunner:
         self.preflop_route_info: Any | None = None
         self.chained_preflop_route_info: Any | None = None
         self.chained_postflop_route_info: Any | None = None
+
+    def clear_results(self) -> None:
+        """Invalidate the previous solve. Called when the spot changes
+        (reset / preset load) so the status chip + result panes don't show a
+        stale 'Done'/strategy for a spot that hasn't been solved.
+
+        Mirrors the canonical result/route-info reset list used at solve-start
+        (see ``start`` ~L1152 and ``start_preflop_chart`` ~L1399): every
+        result holder ``_has_result`` (``ui/app.py``) inspects plus the three
+        source-badge route-info fields, so the preflop / chained badges don't
+        linger on a fresh spot either.
+
+        W2 (concurrency hazard fix): RESET SPOT / preset-load may fire while a
+        solve is still in flight (the buttons are not disabled during a solve,
+        and an *async* preset-load handler can land its synchronous core AFTER
+        the worker has already started — see ``views/spot_input._load_preset_core``).
+        The previous version unconditionally set ``status="idle"`` and nulled
+        the result fields even with a live worker thread, which produced the
+        toxic ``(status="idle", thread alive)`` state:
+
+          * ``is_running`` (``status in ('running','paused')``) goes False
+            while the worker is still alive, so ``start()``'s in-flight guard
+            (``if self.is_running: raise SolveInFlightError``) is bypassed and a
+            SECOND worker can spawn alongside the orphaned first; and
+          * ``'idle'`` is in ``_TERMINAL_STATUSES``, so the next
+            ``_reap_finished_worker()`` would ``thread.join(timeout=2.0)`` a
+            LIVE worker — violating its "never join a running worker"
+            invariant and stalling the caller up to 2 s.
+
+        Fix: if a solve is in flight, cancel it FIRST and reap the worker so it
+        is truly finished BEFORE we touch any fields — this matches the
+        user-intended semantics (loading a preset / resetting the spot during a
+        solve abandons that solve). We reuse the existing ``stop()`` +
+        ``_reap_finished_worker()`` machinery rather than hand-rolling.
+
+        Locking note: the cancel + join MUST happen OUTSIDE ``self._lock``.
+        The worker's terminal-status write (``_worker`` ~L2154:
+        ``with self._lock: ... self.status = "stopped"``) also takes
+        ``self._lock``; joining the worker while holding the lock would
+        dead-lock. So we (1) signal stop and reap outside the lock, letting the
+        worker run its normal exit path and set its own terminal status, then
+        (2) take the lock to null the result/route-info fields and set
+        ``status="idle"``. By the time we set ``'idle'`` the worker thread has
+        been joined and dropped (``self._thread is None``), so the
+        ``(idle + live-thread)`` state can never be observed and the
+        ``start()`` guard / ``_reap`` invariant are never violated.
+        """
+        # Step 1 (outside the lock): cancel + reap any in-flight worker so we
+        # never clear out from under a live solve. ``stop()`` only sets the
+        # stop/cancel events (no lock); the worker observes it at its next
+        # ``log_every`` chunk boundary (mock: per-snapshot), runs its normal
+        # exit path — which acquires ``self._lock`` to set a terminal status —
+        # and we then join it. ``is_running`` covers the logical
+        # running/paused window; ``is_alive`` covers the finished-but-unreaped
+        # tail so a just-terminated worker is still collected.
+        if self.is_running or self.is_alive():
+            self.stop()
+            # Let the worker reach a terminal status and join it. Reaping only
+            # joins once the *logical* status is terminal (its own invariant),
+            # which the worker sets on its way out after observing the stop
+            # event; we then collect the OS thread handle. A short, bounded
+            # join keeps the UI thread responsive even in the unlikely event
+            # the worker is wedged — but the cooperative stop contract means
+            # it exits within one chunk.
+            self.join(timeout=5.0)
+            self._reap_finished_worker()
+
+        # Step 2 (under the lock): null the result/route-info holders and set
+        # the terminal 'idle' status. At this point the worker has been joined
+        # and dropped (or was never alive), so there is no live thread to
+        # orphan and no (idle + alive) window for the guards to trip on.
+        with self._lock:
+            self.result = None
+            self.rvr_result = None
+            self.nash_result = None
+            self.chained_result = None
+            self.preflop_chart_result = None
+            self.preflop_route_info = None
+            self.chained_preflop_route_info = None
+            self.chained_postflop_route_info = None
+            self.status = "idle"
 
     def start(
         self,
@@ -3185,6 +3276,27 @@ def load_fixture_config(preset_id: str) -> HUNLConfig | None:
     return load_fixture(preset_id)
 
 
+def fixture_default_ranges(preset_id: str) -> tuple[str, str] | None:
+    """Return a fixture's explicit ``(oop_range_str, ip_range_str)``, if any.
+
+    The range-vs-range example spots (FLOP/TURN/PREFLOP) carry no
+    ``initial_hole_cards`` on their ``HUNLConfig`` — they are not concrete
+    subgames. Each such preset attaches deterministic, tractable per-player
+    range strings (see ``ui.mock_solver_fixtures``); this is the load
+    gateway the spot-input view consults so a freshly loaded flop/turn spot
+    gets real ranges instead of inheriting the previous spot's (a 1-combo
+    subgame or the full 1326-combo default).
+
+    Returns ``None`` when the preset has no explicit ranges (hole-card
+    anchored river subgames) or when ``ui.mock_solver`` is unavailable.
+    """
+    try:
+        from ui.mock_solver import load_fixture_default_ranges
+    except (ImportError, ModuleNotFoundError):
+        return None
+    return load_fixture_default_ranges(preset_id)
+
+
 __all__ = [
     "AppState",
     "HandClass",
@@ -3197,6 +3309,7 @@ __all__ = [
     "classify_combo",
     "enumerate_combos",
     "enumerate_hand_classes",
+    "fixture_default_ranges",
     "get_state",
     "hand_class_label",
     "list_fixture_preset_ids",

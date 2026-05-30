@@ -146,20 +146,25 @@ def test_ranges_from_config_preserves_previous_when_no_hole_cards() -> None:
     assert ranges[1] is prev.ranges[1]
 
 
-def test_trigger_spot_views_refresh_calls_registered_hooks() -> None:
-    """``_trigger_spot_views_refresh`` fires the registered (de-duped) hooks."""
+async def test_trigger_spot_views_refresh_calls_registered_hooks() -> None:
+    """``_trigger_spot_views_refresh`` fires the registered (de-duped) hooks.
+
+    Now a coroutine: the helper awaits each hook's ``AwaitableResponse`` so the
+    ``@ui.refreshable`` re-render completes INLINE (G3 fix). Plain non-awaitable
+    hooks (as here) just fire once each and are not awaited.
+    """
     calls: list[str] = []
     runner = SimpleNamespace(
         _spot_input_refresh=lambda: calls.append("spot"),
         _range_matrix_refresh=lambda: calls.append("matrix"),
     )
     state = SimpleNamespace(runner=runner, matrix_refresh=runner._range_matrix_refresh)
-    _trigger_spot_views_refresh(state)
+    await _trigger_spot_views_refresh(state)
     # Both distinct hooks fire; the duplicated matrix hook fires only once.
     assert calls == ["spot", "matrix"]
 
 
-def test_trigger_spot_views_refresh_swallows_hook_errors() -> None:
+async def test_trigger_spot_views_refresh_swallows_hook_errors() -> None:
     """A raising hook must not bubble out (slot may be torn down mid-tab-switch)."""
 
     def _boom() -> None:
@@ -170,7 +175,7 @@ def test_trigger_spot_views_refresh_swallows_hook_errors() -> None:
         matrix_refresh=None,
     )
     # Must not raise.
-    _trigger_spot_views_refresh(state)
+    await _trigger_spot_views_refresh(state)
 
 
 # ---------------------------------------------------------------------------
