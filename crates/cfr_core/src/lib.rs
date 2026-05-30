@@ -80,6 +80,15 @@ pub mod arena;
 pub mod preflop_equity;
 pub mod preflop_rvr;
 
+// perf/suit-iso Stage 1 — exact suit/board isomorphism class grouping for
+// chance nodes (foundation only). Pure grouping machinery + hand-index
+// permutation helper, fully unit-tested. NOT wired into the solve / chance
+// walk; flag-off behavior is byte-identical. Stage 2 consumes
+// `suit_iso::group_chance_children` + `hand_index_permutation` to skip
+// isomorphic chance children. Allowed dead code at this stage.
+#[allow(dead_code)]
+mod suit_iso;
+
 use crate::solver::SolveOutput;
 
 /// Build-time version smoke check.

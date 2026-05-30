@@ -42,7 +42,7 @@ pub const SCHEMA_VERSION: u8 = 1;
 /// `itertools.permutations((0, 1, 2, 3))` byte-for-byte (24 entries, ordered).
 /// Used by `canonical_hand_key` so the Rust and Python tiers produce
 /// identical hand-key strings under a given board's chosen permutation.
-const SUIT_PERMUTATIONS: [[u8; 4]; 24] = [
+pub(crate) const SUIT_PERMUTATIONS: [[u8; 4]; 24] = [
     [0, 1, 2, 3],
     [0, 1, 3, 2],
     [0, 2, 1, 3],
@@ -80,12 +80,12 @@ const SUITS: &[u8; 4] = b"shdc";
 /// PR 6's `Card` representation is `u8` matching that integer encoding (see
 /// `hunl.rs`). This loader receives the same raw `u8` ids.
 #[inline]
-fn rank_of(card: u8) -> u8 {
+pub(crate) fn rank_of(card: u8) -> u8 {
     card / 4
 }
 
 #[inline]
-fn suit_of(card: u8) -> u8 {
+pub(crate) fn suit_of(card: u8) -> u8 {
     card % 4
 }
 
@@ -304,7 +304,7 @@ fn decode_nested_dict(
 /// match Python's `canonicalize_for_suit_iso` byte-for-byte (same string
 /// format, same tie-break — earliest-permutation wins among equal-keyed
 /// outputs).
-fn canonicalize_board(board: &[u8]) -> (String, usize) {
+pub(crate) fn canonicalize_board(board: &[u8]) -> (String, usize) {
     // Each permutation produces a sorted-pair tuple `(rank, perm[suit])`;
     // we keep the lexicographically smallest one with the smallest perm
     // index as the tie-breaker (matches Python's `<` comparison on tuples
