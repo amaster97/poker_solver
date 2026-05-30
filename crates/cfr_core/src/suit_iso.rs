@@ -238,6 +238,15 @@ pub(crate) struct CollapseMember {
     /// Per-player hand-index permutation induced by this member's `rel_perm`.
     /// `sigma[p]` is `hand_index_permutation(holes[p], …, rel_perm)`.
     pub(crate) sigma: [Vec<u32>; 2],
+    /// The prefix-stabilizing SUIT permutation (card-level) that maps the
+    /// representative's dealt card onto this member's dealt card (and, more
+    /// generally, the representative subtree's boards onto this member subtree's
+    /// boards). Needed by the Stage 3b OUTPUT expansion to pair a rep-side
+    /// chance child (dealing card `c`) with the member-side child dealing
+    /// `apply_perm_to_card(rel_perm, c)`: under a NESTED collapse the two
+    /// chance nodes have DIFFERENT board prefixes, so their children do NOT
+    /// align positionally — the relabel resolves the correct partner.
+    pub(crate) rel_perm: [u8; 4],
 }
 
 /// One chance-node class collapsed for the value walk: the representative child
@@ -457,6 +466,7 @@ pub(crate) fn build_suit_iso_cache(
                         sigma0.unwrap_or(identity0),
                         sigma1.unwrap_or(identity1),
                     ],
+                    rel_perm,
                 });
             }
             members.sort_by_key(|m| m.child_idx);

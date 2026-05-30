@@ -2718,7 +2718,25 @@ fn expand_member_strategies(
         (0..ctx.hand_count[1] as u32).collect(),
     ];
 
+    // INVARIANT (nested-collapse correctness, MED-3/4): this top-level loop may
+    // only DRIVE expansion from chance nodes that are themselves on a KEPT
+    // (allocated) path — i.e. whose path from the root crossed only
+    // representative children. A flop-rooted solve nests a river deal under each
+    // turn child; the river chance node living inside a NON-representative turn
+    // member (`skip_mask[node_idx] == true`) has its representative river child
+    // sparse-allocated to `None`, so reading it here panics. Those nested river
+    // members are already reconstructed by the recursive Chance arm of
+    // `expand_member_pair` (which descends the REP turn subtree's river collapse
+    // while composing sigmas), so we must NOT re-drive them from the top level.
+    // We derive the skip predicate from the SAME `member_skip_mask` the solve
+    // used to sparse-allocate, so "drive here" is exactly "this node is
+    // allocated" — never `None`.
+    let skip_mask = crate::suit_iso::member_skip_mask(&tree.nodes, cache);
+
     for node_idx in 0..tree.nodes.len() {
+        if skip_mask[node_idx] {
+            continue;
+        }
         let FlatNode::Chance { children, .. } = &tree.nodes[node_idx] else {
             continue;
         };
@@ -2746,8 +2764,20 @@ fn expand_member_strategies(
                     compose_sigma(&identity[0], &member.sigma[0]),
                     compose_sigma(&identity[1], &member.sigma[1]),
                 ];
+                // First-level card relabel is this member's own `rel_perm` (maps
+                // a rep-side board card onto the member-side board card). Threaded
+                // down so a NESTED chance pairing can resolve the member-side
+                // child by card image, not by (mismatched) positional index.
                 expand_member_pair(
-                    solver, tree, ctx, cache, rep_child, member.child_idx, &composed, out,
+                    solver,
+                    tree,
+                    ctx,
+                    cache,
+                    rep_child,
+                    member.child_idx,
+                    &composed,
+                    &member.rel_perm,
+                    out,
                 );
             }
         }
@@ -2766,23 +2796,45 @@ fn compose_sigma(outer: &[u32], inner: &[u32]) -> Vec<u32> {
     inner.iter().map(|&h| outer[h as usize]).collect()
 }
 
+/// Compose two suit permutations: `(outer ∘ inner)[s] = outer[inner[s]]`.
+///
+/// Mirrors [`compose_sigma`] at the card level. `inner` is the relabel crossed
+/// CLOSER to the root (the outer turn member), `outer` the one crossed deeper
+/// (the nested river member); reading right-to-left, a rep-side card `c` maps to
+/// the member-side board card `outer[inner[suit(c)]]`. Used by the Stage 3b
+/// nested-chance pairing to locate the member-side child dealing the relabeled
+/// image of a rep-side child's card.
+fn compose_suit_perm(outer: &[u8; 4], inner: &[u8; 4]) -> [u8; 4] {
+    [
+        outer[inner[0] as usize],
+        outer[inner[1] as usize],
+        outer[inner[2] as usize],
+        outer[inner[3] as usize],
+    ]
+}
+
 /// Recursive lockstep walker for Stage 3b. Walks the `member_idx` subtree
 /// against the `rep_idx` subtree (structurally identical, same DFS order),
-/// threading the composed per-player `sigma` that maps a MEMBER hand to the
-/// REPRESENTATIVE hand it permutes to.
+/// threading two relabelings from the membership(s) crossed so far:
+/// - `sigma`: the composed per-player HAND-index permutation mapping a MEMBER
+///   hand to the REPRESENTATIVE hand it permutes to;
+/// - `relabel`: the composed card-level SUIT permutation mapping a rep-side
+///   board card to the member-side board card it relabels to.
 ///
 /// - At a Decision pair: the rep node's infoset is allocated (it is on a kept
 ///   path); emit one member-board entry per hand by permuting the rep's average
 ///   strategy row (`member_row[h] = rep_row[sigma[player][h]]`) and keying on the
 ///   MEMBER node's `key_suffix` + member-board hole strings. Recurse on each
-///   child pair with the SAME sigma (a betting action crosses no chance).
-/// - At a Chance pair: a nested collapse may live under the REP child. Recurse
-///   class-by-class — but the REP subtree itself sparse-allocates its members,
-///   so to find allocated infosets we follow the REP's REPRESENTATIVE child on
-///   both sides, and for each nested member compose its sigma into the thread
-///   (`sigma_new = sigma ∘ member.sigma`). The member-side chance node is laid
-///   out identically, so its children align positionally with the rep-side
-///   chance node's children.
+///   child pair with the SAME sigma/relabel (a betting action crosses no chance).
+/// - At a Chance pair: the two chance nodes have DIFFERENT board prefixes (the
+///   rep board vs the member board), so their children do NOT align positionally
+///   — a rep-side child dealing card `c` corresponds to the member-side child
+///   dealing `apply_perm_to_card(relabel, c)`. We resolve the partner by CARD
+///   image, never by index. The REP subtree itself sparse-allocates its members,
+///   so to reach allocated infosets we descend each class's rep-side
+///   REPRESENTATIVE child (allocated), composing the nested member's sigma into
+///   the hand thread (`sigma ∘ nested.sigma`) and its `rel_perm` into the card
+///   thread (`relabel ∘ nested.rel_perm`).
 #[allow(clippy::too_many_arguments)]
 fn expand_member_pair(
     solver: &VectorDCFR,
@@ -2792,8 +2844,10 @@ fn expand_member_pair(
     rep_idx: usize,
     member_idx: usize,
     sigma: &[Vec<u32>; 2],
+    relabel: &[u8; 4],
     out: &mut HashMap<String, Vec<f64>>,
 ) {
+    use crate::suit_iso::apply_perm_to_card;
     match (&tree.nodes[rep_idx], &tree.nodes[member_idx]) {
         (
             FlatNode::Decision {
@@ -2829,9 +2883,12 @@ fn expand_member_pair(
                 out.insert(key, row);
             }
 
+            // A betting action crosses no chance: the rep and member Decision
+            // nodes have IDENTICAL board prefixes (only the betting history
+            // advances), so their children DO align positionally.
             debug_assert_eq!(rep_children.len(), member_children.len());
             for (&rc, &mc) in rep_children.iter().zip(member_children.iter()) {
-                expand_member_pair(solver, tree, ctx, cache, rc, mc, sigma, out);
+                expand_member_pair(solver, tree, ctx, cache, rc, mc, sigma, relabel, out);
             }
         }
         (
@@ -2845,43 +2902,82 @@ fn expand_member_pair(
             },
         ) => {
             debug_assert_eq!(rep_children.len(), member_children.len());
+            // The member-side chance node has a DIFFERENT board prefix than the
+            // rep-side one, so positional child alignment is WRONG. Index the
+            // member-side children by the card each deals, then pair a rep-side
+            // child dealing `c` with the member-side child dealing
+            // `apply_perm_to_card(relabel, c)`.
+            let member_child_by_card: HashMap<u8, usize> = member_children
+                .iter()
+                .filter_map(|&mc| tree.dealt_cards[mc].map(|card| (card, mc)))
+                .collect();
+            // The member-side child dealing the relabeled image of a rep card, if
+            // it exists. It may NOT exist: the tree skeleton is built from a single
+            // placeholder hand whose 4 hole cards are excluded from EVERY board
+            // deal (NOT suit-relabeled). So `relabel(rep_card)` can be one of those
+            // excluded cards, which has no member-side child. That member board is
+            // unreachable on this side (the dense reference reaches the same final
+            // 5-card board via a DIFFERENT deal order), so we skip it here rather
+            // than mis-pair. Returns `None` to signal "no member partner — skip".
+            let partner = |rep_card: u8| -> Option<usize> {
+                let img = apply_perm_to_card(relabel, rep_card);
+                member_child_by_card.get(&img).copied()
+            };
             // The rep-side chance node may itself collapse: its non-rep members
-            // are sparse (None infosets). To reach allocated infosets we follow
+            // are sparse (None infosets). To reach allocated infosets we descend
             // the rep-side REPRESENTATIVE child for each class, composing the
-            // nested member's sigma into the thread for member-side children.
+            // nested member's sigma/rel_perm into the threads for the member-side
+            // partner child.
             match cache.get(rep_idx) {
                 Some(rc) if rc.symmetric => {
                     for class in &rc.classes {
                         let nested_rep = class.representative_child_idx;
-                        // Position of the rep child within the chance child list,
-                        // so we can pair it with the member-side child at the
-                        // same position (structural identity).
-                        let rep_pos = rep_children
-                            .iter()
-                            .position(|&c| c == nested_rep)
-                            .expect("rep child must be in chance children");
+                        let nested_rep_card = tree.dealt_cards[nested_rep]
+                            .expect("rep-side chance child must deal a card");
                         for nested_member in &class.members {
-                            let mem_pos = rep_children
-                                .iter()
-                                .position(|&c| c == nested_member.child_idx)
-                                .expect("nested member child must be in chance children");
+                            let nested_member_card = tree.dealt_cards[nested_member.child_idx]
+                                .expect("rep-side chance member child must deal a card");
                             // Walk the rep-side REPRESENTATIVE child (allocated)
-                            // against the member-side child at the nested
-                            // member's position, threading the COMPOSED sigma:
-                            // first apply this nested member's sigma, then the
-                            // outer thread. `sigma ∘ nested.sigma`.
+                            // against the member-side partner of this nested
+                            // member's card, threading the composed maps.
+                            //
+                            // SIGMA maps a DEEP MEMBER-board hand to the DEEP REP
+                            // (allocated) hand, and `member_row[h] = rep_row[sigma[h]]`.
+                            // A deep-member hand `h` first maps via the incoming
+                            // (turn-level) `sigma` to the rep-CONTEXT hand on this
+                            // member-river board, then via the river `nested.sigma`
+                            // onto the rep-river-REP board. So the composite is
+                            // `nested.sigma ∘ sigma` (apply incoming sigma FIRST):
+                            // `composed[h] = nested.sigma[sigma[h]]`.
+                            //
+                            // RELABEL maps a DEEP REP card to the DEEP MEMBER card
+                            // (OPPOSITE direction to sigma), so it composes the
+                            // other way: `relabel ∘ nested.rel_perm` (apply the
+                            // river `nested.rel_perm` first, then the turn relabel).
                             let composed: [Vec<u32>; 2] = [
-                                compose_sigma(&sigma[0], &nested_member.sigma[0]),
-                                compose_sigma(&sigma[1], &nested_member.sigma[1]),
+                                compose_sigma(&nested_member.sigma[0], &sigma[0]),
+                                compose_sigma(&nested_member.sigma[1], &sigma[1]),
                             ];
+                            let composed_relabel =
+                                compose_suit_perm(relabel, &nested_member.rel_perm);
+                            // Sanity: the partner card equals relabel(member card)
+                            // == composed_relabel(rep card).
+                            debug_assert_eq!(
+                                apply_perm_to_card(relabel, nested_member_card),
+                                apply_perm_to_card(&composed_relabel, nested_rep_card),
+                            );
+                            let Some(mem) = partner(nested_member_card) else {
+                                continue;
+                            };
                             expand_member_pair(
                                 solver,
                                 tree,
                                 ctx,
                                 cache,
-                                rep_children[rep_pos],
-                                member_children[mem_pos],
+                                nested_rep,
+                                mem,
                                 &composed,
+                                &composed_relabel,
                                 out,
                             );
                         }
@@ -2889,11 +2985,16 @@ fn expand_member_pair(
                 }
                 _ => {
                     // No nested collapse on the rep side: every rep child is
-                    // allocated. Pair positionally with the member-side children
-                    // (same sigma — a chance deal that does not collapse crosses
-                    // no further permutation here).
-                    for (&rc, &mc) in rep_children.iter().zip(member_children.iter()) {
-                        expand_member_pair(solver, tree, ctx, cache, rc, mc, sigma, out);
+                    // allocated. Pair each rep child with the member-side child
+                    // dealing the relabeled image of its card (same threads — a
+                    // chance deal that does not collapse adds no permutation).
+                    for &rc in rep_children {
+                        let rc_card = tree.dealt_cards[rc]
+                            .expect("rep-side chance child must deal a card");
+                        let Some(mem) = partner(rc_card) else {
+                            continue;
+                        };
+                        expand_member_pair(solver, tree, ctx, cache, rc, mem, sigma, relabel, out);
                     }
                 }
             }
@@ -5113,6 +5214,50 @@ mod tests {
         }
     }
 
+    /// Count skipped DECISION nodes that lie strictly under at least TWO nested
+    /// collapse-member crossings — i.e. a river member under a turn member
+    /// (depth-2). Threads the membership-crossing depth down the same DFS the
+    /// `member_skip_mask` uses, incrementing each time the path descends a
+    /// NON-representative member of a usable (present + symmetric) collapse. A
+    /// flop-rooted nested collapse must produce >0 of these; a turn-rooted solve
+    /// produces zero (single deal => max depth 1).
+    fn count_depth2_skipped_decisions(
+        tree: &BettingTree,
+        cache: &crate::suit_iso::SuitIsoCache,
+    ) -> usize {
+        let mut count = 0usize;
+        // (node, membership-crossing depth so far).
+        let mut stack: Vec<(usize, u32)> = vec![(0, 0)];
+        while let Some((idx, depth)) = stack.pop() {
+            match &tree.nodes[idx] {
+                FlatNode::Decision { children, .. } => {
+                    if depth >= 2 {
+                        count += 1;
+                    }
+                    for &c in children {
+                        stack.push((c, depth));
+                    }
+                }
+                FlatNode::Chance { children, .. } => {
+                    let reps: std::collections::HashSet<usize> = match cache.get(idx) {
+                        Some(c) if c.symmetric => {
+                            c.classes.iter().map(|cl| cl.representative_child_idx).collect()
+                        }
+                        _ => children.iter().copied().collect(),
+                    };
+                    for &c in children {
+                        // Crossing a non-representative member of a usable
+                        // collapse is one membership level deeper.
+                        let next = if reps.contains(&c) { depth } else { depth + 1 };
+                        stack.push((c, next));
+                    }
+                }
+                FlatNode::Fold { .. } | FlatNode::Showdown { .. } => {}
+            }
+        }
+        count
+    }
+
     /// Suit-SYMMETRIC, board-disjoint range: ALL four-suit combos over a small
     /// rank set, filtered against `board`. Closed under every suit permutation,
     /// hence under any board stabilizer — the symmetry guard must accept it.
@@ -6218,6 +6363,45 @@ mod tests {
         build_average_strategy(&solver, &tree, &ctx, None)
     }
 
+    /// The set of infoset KEYS that collide across board deal orders in a dense
+    /// solve: keys carried by >=2 distinct tree nodes (a 5-card board reached by
+    /// turn-then-river vs river-then-turn maps to the SAME canonical board string,
+    /// hence the same `key_suffix`). These nodes are SEPARATE infosets in the
+    /// vector-form tree (each accrues its own regret) and at finite iterations
+    /// converge to slightly different strategies; `build_average_strategy`
+    /// resolves the collision by HashMap last-writer-wins. This ambiguity is
+    /// independent of suit-iso (it is present in the dense iso-OFF map) and is the
+    /// reason flop-rooted per-cell strategy parity is NOT bit-exact while the GAME
+    /// VALUE is. The nested-parity gate excludes these keys from its value check.
+    fn deal_order_colliding_keys(
+        cfg: &HUNLConfig,
+        holes: &[[u8; 2]],
+    ) -> std::collections::HashSet<String> {
+        let initial = HUNLState::initial(std::sync::Arc::new(cfg.clone()));
+        let ctx = EvalContext::from_hand_lists(holes.to_vec(), holes.to_vec(), cfg.big_blind);
+        let placeholder = initial.clone_with_hole_cards([ctx.hole[0][0], ctx.hole[1][0]]);
+        let tree = BettingTree::build_with_mode(&placeholder, BettingTreeMode::TemplateExtract);
+        let mut count: HashMap<String, usize> = HashMap::new();
+        for node in &tree.nodes {
+            if let FlatNode::Decision { key_suffix, .. } = node {
+                *count.entry(key_suffix.clone()).or_default() += 1;
+            }
+        }
+        // A key COLLIDES iff its `key_suffix` (board + street + history) is carried
+        // by >=2 decision nodes. Expand to full per-hand keys (hole + suffix).
+        let colliding_suffixes: std::collections::HashSet<&String> =
+            count.iter().filter(|(_, &c)| c >= 2).map(|(k, _)| k).collect();
+        let mut out = std::collections::HashSet::new();
+        for suffix in &colliding_suffixes {
+            for p in 0..2 {
+                for hole_str in &ctx.hole_str[p] {
+                    out.insert(format!("{hole_str}{suffix}"));
+                }
+            }
+        }
+        out
+    }
+
     /// Sparse iso-ON full average-strategy map: drives the SAME wiring the
     /// production path uses (sparse allocation via `member_skip_mask`, solve via
     /// `solve_with_cache` with the cache, then the Stage 3b member expansion in
@@ -6417,6 +6601,153 @@ mod tests {
             max_delta <= 1e-9,
             "[rayon] full-output value delta {max_delta:.3e} exceeds 1e-9",
         );
+    }
+
+    /// GATE A (FLOP-ROOTED nested) — the behavioral coverage the turn-rooted
+    /// gate cannot provide. A turn-rooted solve has ONE chance deal (river) =>
+    /// single-level collapse; a flop-rooted solve nests TWO deals (turn THEN
+    /// river) => the sparse allocation and the Stage 3b expansion must agree on
+    /// the DEPTH-2 nodes (a river member under a turn member). This is the path
+    /// that previously panicked at `dcfr_vector.rs` Stage 3b when the top-level
+    /// expansion driver re-processed a river chance node living inside a non-rep
+    /// turn member (whose representative river child was never allocated).
+    ///
+    /// MONOTONE (`As Ks 7s`, all-spades flop) and TWO-TONE (`As Ks 7h`) flops
+    /// both deal a turn then a river that collapse over the absent suits. For
+    /// each: iso-OFF (dense, all members) vs iso-ON (sparse + nested expansion)
+    /// must have the IDENTICAL key set and bit-exact (<=1e-12) values, AND
+    /// expand >0 members INCLUDING >=1 depth-2 member. Drives the SAME wiring as
+    /// the production path via explicit flags (no `env::set_var`).
+    #[test]
+    fn suit_iso_full_output_parity_flop_nested() {
+        let card = card_to_int;
+        let textures: [(&str, Vec<u8>); 2] = [
+            ("MONOTONE", vec![card(14, 0), card(13, 0), card(7, 0)]), // As Ks 7s
+            ("TWO-TONE", vec![card(14, 0), card(13, 0), card(7, 1)]), // As Ks 7h
+        ];
+        // Small full-ish symmetric rank set; flop-rooted nesting is expensive, so
+        // keep the iteration count modest. Parity is bit-exact at any iters.
+        let range_ranks: [u8; 3] = [12, 6, 5];
+        let iters: u32 = 24;
+        const TOL: f64 = 1e-12;
+
+        for (name, board) in &textures {
+            let cfg = collapse_flop_config(board);
+            let holes = collapse_symmetric_range(board, &range_ranks);
+            assert!(holes.len() >= 12, "{name}: range too small ({})", holes.len());
+
+            // Depth-2 census from the same value-collapse cache the sparse solve
+            // builds — proves the gate actually exercises a river member under a
+            // turn member (the nested path), not just two independent deals.
+            let initial = HUNLState::initial(std::sync::Arc::new(cfg.clone()));
+            let ctx = EvalContext::from_hand_lists(holes.clone(), holes.clone(), cfg.big_blind);
+            let placeholder = initial.clone_with_hole_cards([ctx.hole[0][0], ctx.hole[1][0]]);
+            let tree = BettingTree::build_with_mode(&placeholder, BettingTreeMode::TemplateExtract);
+            let reach = vec![1.0_f64; ctx.hand_count[0]];
+            let cache = crate::suit_iso::build_suit_iso_cache(
+                &tree.nodes,
+                &tree.dealt_cards,
+                &tree.initial_board(),
+                &ctx.hole,
+                &[&reach, &reach],
+            );
+            assert!(cache.is_active(), "[{name}] flop must collapse something");
+            let depth2 = count_depth2_skipped_decisions(&tree, &cache);
+
+            // (A) GAME-VALUE parity — the SOUND behavioral invariant. The
+            // nested-collapse SOLVE must reach the exact same root game value as a
+            // dense iso-OFF solve. This is insensitive to the board-deal-order key
+            // collision below, so the tolerance is bit-exact (<=1e-12).
+            let (_, _, _, gv_off) = solve_collapse_capture(&cfg, &holes, iters, false);
+            let (_, _, _, gv_on) = solve_collapse_capture(&cfg, &holes, iters, true);
+            let gv_delta = (gv_off - gv_on).abs();
+
+            let dense = dense_full_strategy(&cfg, &holes, iters);
+            // Serial (rayon OFF) sparse solve — bit-exact, no FP reordering.
+            let (sparse, members_expanded) = sparse_full_strategy(&cfg, &holes, iters, false);
+
+            // (B) IDENTICAL KEY SETS — every nested member-board key recovered.
+            let dense_keys: std::collections::HashSet<&String> = dense.keys().collect();
+            let sparse_keys: std::collections::HashSet<&String> = sparse.keys().collect();
+            let missing: Vec<&&String> = dense_keys.difference(&sparse_keys).collect();
+            let extra: Vec<&&String> = sparse_keys.difference(&dense_keys).collect();
+            assert!(
+                missing.is_empty(),
+                "[{name}] {} member-board keys MISSING from iso-ON output (e.g. {:?})",
+                missing.len(),
+                missing.iter().take(3).collect::<Vec<_>>(),
+            );
+            assert!(
+                extra.is_empty(),
+                "[{name}] {} keys present in iso-ON but not iso-OFF (e.g. {:?})",
+                extra.len(),
+                extra.iter().take(3).collect::<Vec<_>>(),
+            );
+
+            // (C) PER-CELL value parity on every NON-colliding key. A flop tree
+            // reaches the same 5-card board by multiple turn/river deal orders, so
+            // a board's `key_suffix` is carried by >=2 SEPARATE infoset nodes that
+            // converge to slightly different strategies; the public map resolves
+            // the collision by last-writer-wins. That ambiguity is present in the
+            // DENSE iso-OFF map itself (independent of suit-iso), so we cannot
+            // demand bit-exact per-cell parity on colliding keys. On every
+            // NON-colliding key the iso-ON expansion MUST be bit-exact, and every
+            // divergence MUST lie inside the colliding set (proving suit-iso adds
+            // ZERO error beyond the pre-existing collision ambiguity).
+            let colliding = deal_order_colliding_keys(&cfg, &holes);
+            let mut max_delta_noncolliding = 0.0_f64;
+            let mut divergent_total = 0usize;
+            let mut divergent_outside_collisions = 0usize;
+            for (k, dv) in &dense {
+                let sv = sparse.get(k).expect("key set already proven equal");
+                assert_eq!(dv.len(), sv.len(), "[{name}] row len mismatch at key {k}");
+                let kd = dv
+                    .iter()
+                    .zip(sv.iter())
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0_f64, f64::max);
+                if kd > 1e-12 {
+                    divergent_total += 1;
+                    if !colliding.contains(k) {
+                        divergent_outside_collisions += 1;
+                        max_delta_noncolliding = max_delta_noncolliding.max(kd);
+                    }
+                }
+            }
+
+            println!(
+                "[FLOP {name}] keys={}, members_expanded={members_expanded}, depth2_skipped={depth2}, \
+                 gv_off={gv_off:.10} gv_on={gv_on:.10} gv_Δ={gv_delta:.3e}, \
+                 divergent={divergent_total} (all inside deal-order collisions: \
+                 outside={divergent_outside_collisions}), colliding_keys={}",
+                dense.len(),
+                colliding.len(),
+            );
+
+            assert!(
+                gv_delta <= TOL,
+                "[{name}] game-value delta {gv_delta:.3e} exceeds {TOL:.0e} — the \
+                 nested collapse SOLVE is unsound"
+            );
+            assert_eq!(
+                divergent_outside_collisions, 0,
+                "[{name}] {divergent_outside_collisions} key(s) diverge OUTSIDE the \
+                 board-deal-order collision set (max|Δ|={max_delta_noncolliding:.3e}) — \
+                 the nested expansion mis-permuted a genuinely unique infoset"
+            );
+            // (D) non-vacuity: nested flop MUST expand members, with >=1 depth-2
+            // (river member under a turn member) — the path the turn-rooted gate
+            // never reaches.
+            assert!(
+                members_expanded > 0,
+                "[{name}] expected >0 expanded members — gate is vacuous"
+            );
+            assert!(
+                depth2 > 0,
+                "[{name}] expected >=1 depth-2 member (river member under a turn \
+                 member); got {depth2} — nested path not exercised"
+            );
+        }
     }
 
     /// Focused depth-2 nested-member unit test: a river member under a turn
