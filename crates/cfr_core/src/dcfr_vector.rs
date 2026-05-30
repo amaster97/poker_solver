@@ -4951,7 +4951,8 @@ mod tests {
         // hole index for both; build it via the stage-1 primitives.
         let hole_index_b2 = crate::suit_iso::build_hole_index(&holes_b2);
         let sigma_hand_map =
-            crate::suit_iso::hand_index_permutation(&holes_b1, &hole_index_b2, &SIGMA);
+            crate::suit_iso::hand_index_permutation(&holes_b1, &hole_index_b2, &SIGMA)
+                .expect("iso_symmetric_range is suit-closed; sigma must exist");
         let hand_map: [Vec<u32>; 2] = [sigma_hand_map.clone(), sigma_hand_map];
 
         let iters: u32 = 64;
@@ -5615,6 +5616,346 @@ mod tests {
             skipped("RAINBOW"),
             0,
             "RAINBOW (|S|=1) must skip zero members (all singletons)"
+        );
+    }
+
+    // ========================================================================
+    // perf/suit-iso — ASYMMETRIC-range fallback tests.
+    //
+    // The exact value collapse is sound ONLY when, at each collapsing chance
+    // node, every class `rel_perm` (a) maps both players' hole lists onto
+    // themselves (CLOSURE) and (b) leaves both players' reach invariant (REACH
+    // SYMMETRY). A point hero (a single suit-specific combo like AhKh) and a
+    // partial villain range violate closure: the σ-image of a hand can be absent
+    // from the hole list. The collapse-precondition check must detect this and
+    // DISABLE the collapse for that node (so the walk, the sparse-alloc mask, and
+    // the Stage 3b expansion all take the legacy per-child path) — it must NEVER
+    // panic on the missing image. With every node non-collapsing, iso-ON must be
+    // BIT-IDENTICAL to iso-OFF (a full fallback => zero collapse).
+    // ========================================================================
+
+    /// Flop-rooted config: a turn deal then a river deal, so the chance tree has
+    /// the depth-2 structure where collapse would fire on a symmetric range.
+    fn collapse_flop_config(board: &[u8]) -> HUNLConfig {
+        let mut cfg = collapse_turn_config(board);
+        cfg.starting_street = Street::Flop;
+        cfg.initial_board = board.to_vec();
+        cfg
+    }
+
+    /// Dense iso-OFF full average-strategy map for DISTINCT per-player hole lists
+    /// (`holes0` for P0, `holes1` for P1). Every node carries its own infoset, so
+    /// `build_average_strategy` emits the complete key set. This is the REFERENCE
+    /// the iso-ON path must reproduce, whether the iso-ON path falls back fully
+    /// (both ranges asymmetric) or collapses the nodes where BOTH players' cards
+    /// happen to be stabilizer-invariant (a symmetric villain paired with a point
+    /// hero whose cards survive a given node's stabilizer).
+    fn dense_full_strategy_two_ranges(
+        cfg: &HUNLConfig,
+        holes0: &[[u8; 2]],
+        holes1: &[[u8; 2]],
+        iters: u32,
+    ) -> HashMap<String, Vec<f64>> {
+        let initial = HUNLState::initial(std::sync::Arc::new(cfg.clone()));
+        let ctx = EvalContext::from_hand_lists(holes0.to_vec(), holes1.to_vec(), cfg.big_blind);
+        let placeholder = initial.clone_with_hole_cards([ctx.hole[0][0], ctx.hole[1][0]]);
+        let tree = BettingTree::build_with_mode(&placeholder, BettingTreeMode::TemplateExtract);
+
+        let mut solver = VectorDCFR::with_init_noise(&tree, ctx.hand_count, 1.5, 0.0, 2.0, 0.0, 0);
+        solver.solve_with_opts(&tree, &ctx, iters, None, None, Some(false), Some(false));
+        let final_iter = solver.iteration;
+        let (a, b, g) = (solver.alpha, solver.beta, solver.gamma);
+        for info in solver.infosets.iter_mut().flatten() {
+            VectorDCFR::discount(info, final_iter, a, b, g);
+        }
+        build_average_strategy(&solver, &tree, &ctx, None)
+    }
+
+    /// Sparse iso-ON full average-strategy map for DISTINCT per-player hole lists,
+    /// driving the SAME production wiring as the symmetric `sparse_full_strategy`:
+    /// the collapse cache is built from BOTH players' per-player hole lists exactly
+    /// as production does, the infoset allocation is masked by the resulting
+    /// `member_skip_mask`, the solve threads the cache, and `build_average_strategy`
+    /// runs the Stage 3b member expansion. Returns the map plus `members_skipped`
+    /// (how many decision nodes the mask dropped — `0` means a full fallback, `>0`
+    /// means a legitimate partial collapse the expansion had to reconstruct).
+    fn sparse_full_strategy_two_ranges(
+        cfg: &HUNLConfig,
+        holes0: &[[u8; 2]],
+        holes1: &[[u8; 2]],
+        iters: u32,
+    ) -> (HashMap<String, Vec<f64>>, usize) {
+        let initial = HUNLState::initial(std::sync::Arc::new(cfg.clone()));
+        let ctx = EvalContext::from_hand_lists(holes0.to_vec(), holes1.to_vec(), cfg.big_blind);
+        let placeholder = initial.clone_with_hole_cards([ctx.hole[0][0], ctx.hole[1][0]]);
+        let tree = BettingTree::build_with_mode(&placeholder, BettingTreeMode::TemplateExtract);
+
+        let reach0 = vec![1.0_f64; ctx.hand_count[0]];
+        let reach1 = vec![1.0_f64; ctx.hand_count[1]];
+        let cache = crate::suit_iso::build_suit_iso_cache(
+            &tree.nodes,
+            &tree.dealt_cards,
+            &tree.initial_board(),
+            &ctx.hole,
+            &[&reach0, &reach1],
+        );
+        let skip_mask = crate::suit_iso::member_skip_mask(&tree.nodes, &cache);
+        let members_skipped = tree
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(idx, n)| matches!(n, FlatNode::Decision { .. }) && skip_mask[*idx])
+            .count();
+
+        let mut solver = VectorDCFR::with_init_noise_masked(
+            &tree,
+            ctx.hand_count,
+            1.5,
+            0.0,
+            2.0,
+            0.0,
+            0,
+            &skip_mask,
+        );
+        solver.solve_with_opts(
+            &tree,
+            &ctx,
+            iters,
+            None,
+            Some(cache.clone()),
+            Some(false),
+            Some(false),
+        );
+        let final_iter = solver.iteration;
+        let (a, b, g) = (solver.alpha, solver.beta, solver.gamma);
+        for info in solver.infosets.iter_mut().flatten() {
+            VectorDCFR::discount(info, final_iter, a, b, g);
+        }
+        let map = build_average_strategy(&solver, &tree, &ctx, Some(&cache));
+        (map, members_skipped)
+    }
+
+    /// Assert a dense iso-OFF strategy map and a sparse iso-ON map (for an
+    /// asymmetric / partially-symmetric two-range pairing) have the IDENTICAL key
+    /// set and bit-exact values — the same full-output parity gate the symmetric
+    /// `suit_iso_full_output_parity` test applies, but for distinct per-player
+    /// ranges. A `<= 1e-12` tolerance accommodates only the strategy-normalization
+    /// rounding; an EXACT collapse plus expansion reproduces the dense map.
+    fn assert_full_output_parity_two_ranges(
+        dense: &HashMap<String, Vec<f64>>,
+        sparse: &HashMap<String, Vec<f64>>,
+        name: &str,
+    ) {
+        const TOL: f64 = 1e-12;
+        let dense_keys: std::collections::HashSet<&String> = dense.keys().collect();
+        let sparse_keys: std::collections::HashSet<&String> = sparse.keys().collect();
+        let missing: Vec<&&String> = dense_keys.difference(&sparse_keys).collect();
+        let extra: Vec<&&String> = sparse_keys.difference(&dense_keys).collect();
+        assert!(
+            missing.is_empty(),
+            "[{name}] {} keys MISSING from iso-ON output (e.g. {:?})",
+            missing.len(),
+            missing.iter().take(3).collect::<Vec<_>>(),
+        );
+        assert!(
+            extra.is_empty(),
+            "[{name}] {} keys present in iso-ON but not iso-OFF (e.g. {:?})",
+            extra.len(),
+            extra.iter().take(3).collect::<Vec<_>>(),
+        );
+        let mut max_delta = 0.0_f64;
+        for (k, dv) in dense {
+            let sv = sparse.get(k).expect("key set already proven equal");
+            assert_eq!(dv.len(), sv.len(), "[{name}] row len mismatch at key {k}");
+            for (a, b) in dv.iter().zip(sv.iter()) {
+                max_delta = max_delta.max((a - b).abs());
+            }
+        }
+        assert!(
+            max_delta <= TOL,
+            "[{name}] full-output value delta {max_delta:.3e} exceeds {TOL:.0e}",
+        );
+    }
+
+    /// A point hero hole list: a single suit-specific combo. Not suit-symmetric,
+    /// so its σ-image under a non-identity stabilizer perm is absent from the
+    /// (size-1) list -> closure fails -> collapse must disable for that node.
+    fn point_hero(c0: u8, c1: u8) -> Vec<[u8; 2]> {
+        let mut h = [c0, c1];
+        h.sort_unstable();
+        vec![h]
+    }
+
+    /// A partial, suit-ASYMMETRIC villain range: a handful of specific combos
+    /// (NOT all four suit-permutations of each rank pair), board-disjoint. Closed
+    /// under NO non-identity suit permutation.
+    fn partial_villain(board: &[u8]) -> Vec<[u8; 2]> {
+        let held: std::collections::HashSet<u8> = board.iter().copied().collect();
+        let card = card_to_int;
+        // s=0, h=1, d=2, c=3. A deliberately lopsided suit mix.
+        let candidates: [[u8; 2]; 8] = [
+            [card(12, 0), card(11, 0)], // QsJs
+            [card(9, 1), card(9, 2)],   // 9h9d
+            [card(8, 0), card(7, 1)],   // 8s7h
+            [card(6, 3), card(5, 3)],   // 6c5c
+            [card(14, 1), card(10, 1)], // AhTh
+            [card(13, 2), card(12, 2)], // KdQd
+            [card(4, 0), card(4, 1)],   // 4s4h
+            [card(3, 2), card(2, 3)],   // 3d2c
+        ];
+        candidates
+            .into_iter()
+            .filter(|h| !held.contains(&h[0]) && !held.contains(&h[1]))
+            .map(|mut h| {
+                h.sort_unstable();
+                h
+            })
+            .collect()
+    }
+
+    /// Build the collapse cache for a (cfg, holes0, holes1) and assert NO member
+    /// is ever SKIPPED — i.e. the precondition check disabled every NON-TRIVIAL
+    /// collapse. A node whose stabilizer is identity-only yields all-singleton
+    /// classes; it may carry `symmetric == true` but skips nothing, so it is
+    /// bit-identical to the legacy path (the same no-op the RAINBOW control hits
+    /// on a symmetric range). The load-bearing invariant for an asymmetric range
+    /// is therefore "zero members skipped", not "cache inactive". Also exercises
+    /// that the cache build does not panic.
+    fn assert_no_member_skipped(cfg: &HUNLConfig, holes0: &[[u8; 2]], holes1: &[[u8; 2]]) {
+        let initial = HUNLState::initial(std::sync::Arc::new(cfg.clone()));
+        let ctx = EvalContext::from_hand_lists(holes0.to_vec(), holes1.to_vec(), cfg.big_blind);
+        let placeholder = initial.clone_with_hole_cards([ctx.hole[0][0], ctx.hole[1][0]]);
+        let tree = BettingTree::build_with_mode(&placeholder, BettingTreeMode::TemplateExtract);
+        let reach0 = vec![1.0_f64; ctx.hand_count[0]];
+        let reach1 = vec![1.0_f64; ctx.hand_count[1]];
+        let cache = crate::suit_iso::build_suit_iso_cache(
+            &tree.nodes,
+            &tree.dealt_cards,
+            &tree.initial_board(),
+            &ctx.hole,
+            &[&reach0, &reach1],
+        );
+        // (1) Any node still flagged `symmetric` must collapse NOTHING: every
+        // class is a singleton (one member == its own representative).
+        for (idx, node) in tree.nodes.iter().enumerate() {
+            if let FlatNode::Chance { children, .. } = node {
+                if children.len() >= 2 {
+                    if let Some(c) = cache.get(idx) {
+                        if c.symmetric {
+                            for class in &c.classes {
+                                assert_eq!(
+                                    class.members.len(),
+                                    1,
+                                    "asymmetric range: chance node {idx} keeps a multi-member \
+                                     collapse class (would skip a member)"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // (2) The end-to-end guarantee the walk relies on: the skip mask drops
+        // nothing, so every node is traversed exactly as the legacy path does.
+        let skip = crate::suit_iso::member_skip_mask(&tree.nodes, &cache);
+        assert!(
+            skip.iter().all(|&s| !s),
+            "asymmetric range: member_skip_mask skipped {} node(s) — collapse not fully disabled",
+            skip.iter().filter(|&&s| s).count(),
+        );
+    }
+
+    /// FULLY ASYMMETRIC range (point hero {AhKh} + partial, suit-lopsided villain)
+    /// on a FLOP subgame. When NEITHER player's range is suit-closed, the
+    /// precondition check must (a) NOT panic on a missing σ-image and (b) disable
+    /// EVERY non-trivial collapse, so the iso-ON path is a full fallback — zero
+    /// members skipped — and its expanded output is bit-identical to a dense
+    /// iso-OFF solve. Covers RAINBOW (small stabilizer) and MONOTONE (|S|=6 — the
+    /// biggest closure surface, the most chances to mis-permute a missing image).
+    #[test]
+    fn suit_iso_asymmetric_point_hero_falls_back_clean() {
+        let card = card_to_int;
+        let iters: u32 = 24;
+        // (name, flop board). Hero AhKh is board-disjoint on both.
+        let boards: [(&str, Vec<u8>); 2] = [
+            ("RAINBOW", vec![card(14, 0), card(13, 2), card(7, 1)]), // As Kd 7h
+            ("MONOTONE", vec![card(12, 0), card(9, 0), card(4, 0)]), // Qs 9s 4s
+        ];
+        let hero = point_hero(card(14, 1), card(13, 1)); // AhKh
+
+        for (name, board) in &boards {
+            let villain = partial_villain(board);
+            assert!(villain.len() >= 4, "[{name}] villain range too small");
+            let cfg = collapse_flop_config(board);
+
+            // (1) The cache build itself must not panic and must FULLY disable
+            // collapse on this fully-asymmetric pairing (zero members skipped).
+            assert_no_member_skipped(&cfg, &hero, &villain);
+
+            // (2) End-to-end: dense iso-OFF == sparse iso-ON expanded output.
+            let dense = dense_full_strategy_two_ranges(&cfg, &hero, &villain, iters);
+            let (sparse, members_skipped) =
+                sparse_full_strategy_two_ranges(&cfg, &hero, &villain, iters);
+            assert_eq!(
+                members_skipped, 0,
+                "[{name}] fully-asymmetric range must skip ZERO members (full fallback)"
+            );
+            assert_full_output_parity_two_ranges(&dense, &sparse, name);
+            println!(
+                "[asym point-hero {name}] hero={} villain={} combos, members_skipped={members_skipped}: \
+                 iso-ON == iso-OFF (bit-exact full output), no panic",
+                hero.len(),
+                villain.len(),
+            );
+        }
+    }
+
+    /// PARTIALLY symmetric: a suit-SYMMETRIC villain range paired with an
+    /// ASYMMETRIC (point) hero on a MONOTONE flop (|S|=6). This is the strictly
+    /// HARDER case the symmetric-range parity tests never exercise: at most chance
+    /// nodes the hero's σ-image leaves the size-1 hole list (closure fails), so the
+    /// collapse MUST disable there without panicking; but at the nodes whose 4-card
+    /// prefix board makes BOTH of the hero's specific cards stabilizer-invariant,
+    /// closure AND reach-symmetry hold for both players, so the collapse legitimately
+    /// fires — a genuine PARTIAL collapse. Either way the iso-ON expanded output
+    /// must reproduce a dense iso-OFF solve bit-for-bit:
+    ///   - the precondition check never panics on a missing σ-image;
+    ///   - skipped members are reconstructed exactly by the Stage 3b expansion;
+    ///   - `members_skipped > 0` proves the gate is non-vacuous (the collapse
+    ///     really fired and the expansion really had work to do).
+    #[test]
+    fn suit_iso_partially_symmetric_falls_back_clean() {
+        let card = card_to_int;
+        let iters: u32 = 24;
+        let board = vec![card(12, 0), card(9, 0), card(4, 0)]; // Qs 9s 4s MONOTONE
+        let villain_ranks: [u8; 4] = [14, 11, 6, 5]; // A, J, 6, 5 (board-disjoint)
+        let villain = collapse_symmetric_range(&board, &villain_ranks); // σ-closed
+        let hero = point_hero(card(14, 1), card(13, 1)); // AhKh (asymmetric)
+        assert!(villain.len() >= 12, "villain range too small");
+
+        let cfg = collapse_flop_config(&board);
+
+        // The hero is asymmetric, so the GLOBAL range-symmetry gate must disable
+        // the collapse for the WHOLE solve (a per-node check could be fooled into
+        // collapsing nodes whose prefix board happens to fix the hero's suits, but
+        // the OUTPUT expansion then mis-pairs the member board's board-filtered
+        // hands). The build must NOT panic and must skip ZERO members.
+        assert_no_member_skipped(&cfg, &hero, &villain);
+
+        let dense = dense_full_strategy_two_ranges(&cfg, &hero, &villain, iters);
+        let (sparse, members_skipped) =
+            sparse_full_strategy_two_ranges(&cfg, &hero, &villain, iters);
+        assert_eq!(
+            members_skipped, 0,
+            "PARTIAL-SYM: an asymmetric hero must disable the collapse globally \
+             (full fallback) — got members_skipped={members_skipped}"
+        );
+        assert_full_output_parity_two_ranges(&dense, &sparse, "PARTIAL-SYM");
+        println!(
+            "[asym partial-sym MONOTONE] hero={} (asym) villain={} (sym), members_skipped={members_skipped}: \
+             iso-ON == iso-OFF (bit-exact full output), no panic",
+            hero.len(),
+            villain.len(),
         );
     }
 

@@ -175,25 +175,27 @@ pub(crate) fn build_hole_index(holes: &[[u8; 2]]) -> HashMap<[u8; 2], usize> {
 }
 
 /// Produce the hand-index permutation `sigma` induced by relabeling suits with
-/// `rel_perm` on a player's hole-card list.
+/// `rel_perm` on a player's hole-card list, or `None` if the list is not closed
+/// under `rel_perm`.
 ///
 /// `sigma[h]` is the index, in the *same* hole list, of the hand obtained by
 /// applying `rel_perm` to hand `h`'s two cards (re-sorted consistently). For a
-/// stabilizer permutation acting on a closed hole list, this is a true
-/// permutation (bijection) of the hand indices.
+/// stabilizer permutation acting on a suit-CLOSED hole list this is a true
+/// permutation (bijection) of the hand indices and the result is `Some(sigma)`.
+///
+/// Returns `None` the instant any permuted hand's image is absent from
+/// `hole_index` — i.e. the hole list is NOT closed under `rel_perm`. This is the
+/// exact precondition for an EXACT suit-iso value collapse, so a `None` here is
+/// not an error: it means "this node cannot collapse for this player; fall back
+/// to the legacy per-child path". The function NEVER panics on a missing image,
+/// so the collapse-precondition check in [`build_suit_iso_cache`] is total.
 ///
 /// `hole_index` must be `build_hole_index(holes)` for the same `holes`.
-///
-/// # Panics
-/// Panics if a permuted hand is not present in `hole_index`. For a `rel_perm`
-/// drawn from the board stabilizer acting on a suit-closed hole list this never
-/// happens; a panic signals the caller passed a non-stabilizing perm or a hole
-/// list that is not closed under `rel_perm`.
 pub(crate) fn hand_index_permutation(
     holes: &[[u8; 2]],
     hole_index: &HashMap<[u8; 2], usize>,
     rel_perm: &[u8; 4],
-) -> Vec<u32> {
+) -> Option<Vec<u32>> {
     holes
         .iter()
         .map(|&h| {
@@ -202,10 +204,10 @@ pub(crate) fn hand_index_permutation(
                 apply_perm_to_card(rel_perm, h[1]),
             ];
             image.sort_unstable();
-            *hole_index
-                .get(&image)
-                .expect("permuted hand must exist in the same hole list (stabilizer closure)")
-                as u32
+            // A missing image means the hole list is not closed under
+            // `rel_perm`: short-circuit to `None` (collapse disabled) instead of
+            // panicking, so an asymmetric range cleanly falls back.
+            hole_index.get(&image).map(|&idx| idx as u32)
         })
         .collect()
 }
@@ -326,6 +328,42 @@ pub(crate) fn build_suit_iso_cache(
 
     let hole_index = [build_hole_index(&holes[0]), build_hole_index(&holes[1])];
 
+    // GLOBAL range-symmetry gate. The per-node value collapse permutes a child
+    // board's per-hand vectors onto a sibling board's via a stabilizer perm; the
+    // matching OUTPUT expansion reconstructs each skipped member-board's strategy
+    // by the same perm. BOTH are exact only when the WHOLE game — both players'
+    // ranges AND their reach — is invariant under the relevant suit relabelings.
+    // A per-node check that a perm happens to FIX a player's specific cards (e.g.
+    // a point combo whose suits are absent from that node's prefix) passes the
+    // local closure test yet does NOT make the game suit-symmetric: a board card
+    // dealt later can be relabeled by a perm that the point combo is not closed
+    // under, and the expansion then mis-pairs the member board with a
+    // representative whose board-filtered hand indexing differs. So we require the
+    // STRONG, global precondition: each player's range must be closed under EVERY
+    // permutation in the ROOT board stabilizer, with reach invariant under each.
+    // If either player fails for any root-stabilizer perm, NO node may collapse —
+    // the whole solve falls back to the legacy per-child path. This is the exact
+    // domain the symmetric-range parity tests cover, and it is provably sound;
+    // any asymmetric or partially-symmetric range disables the collapse here
+    // WITHOUT panicking (the closure test returns `None`, never throws).
+    let root_stab: Vec<[u8; 4]> = board_stabilizer(initial_board)
+        .into_iter()
+        .map(|i| SUIT_PERMUTATIONS[i])
+        .collect();
+    let range_globally_symmetric = |p: usize| -> bool {
+        root_stab.iter().all(|perm| {
+            match hand_index_permutation(&holes[p], &hole_index[p], perm) {
+                Some(sigma) => reach_is_symmetric(reach[p], &sigma),
+                None => false,
+            }
+        })
+    };
+    if !range_globally_symmetric(0) || !range_globally_symmetric(1) {
+        return SuitIsoCache {
+            nodes: vec![None; nodes.len()],
+        };
+    }
+
     // Reconstruct the prefix board per node via an explicit DFS that threads
     // the running board. The root's prefix is `initial_board`; each chance
     // child appends its dealt card. We only need prefixes AT chance nodes, but
@@ -389,22 +427,36 @@ pub(crate) fn build_suit_iso_cache(
         for iso in &iso_classes {
             let mut members: Vec<CollapseMember> = Vec::with_capacity(iso.members.len());
             for &(member_local_idx, rel_perm) in &iso.members {
-                let sigma0 =
-                    hand_index_permutation(&holes[0], &hole_index[0], &rel_perm);
-                let sigma1 =
-                    hand_index_permutation(&holes[1], &hole_index[1], &rel_perm);
-                // Guard: the collapse is exact only if BOTH players' reach is
-                // invariant under this rel_perm. (The non-trivial constraint is
-                // on the opponent reach used inside the value walk; we require
-                // both so the guard holds whichever player is updating.)
-                if !reach_is_symmetric(reach[0], &sigma0)
-                    || !reach_is_symmetric(reach[1], &sigma1)
-                {
+                // Precondition (a) CLOSURE: every hand's suit-permuted image must
+                // exist in that player's hole list. `hand_index_permutation`
+                // returns `None` when it does not (asymmetric range), which we
+                // treat as "not collapsible" — NOT an error. A non-closed list
+                // also fails reach symmetry, so a missing sigma disables the
+                // collapse and we record a benign identity placeholder (never
+                // consumed, since `symmetric` is now false and every consumer
+                // gates on it).
+                let sigma0 = hand_index_permutation(&holes[0], &hole_index[0], &rel_perm);
+                let sigma1 = hand_index_permutation(&holes[1], &hole_index[1], &rel_perm);
+                // Precondition (b) REACH SYMMETRY: reach[h] == reach[sigma(h)]
+                // for both players. A `None` sigma (closure failure) or any
+                // asymmetric reach disables the collapse for this whole node.
+                let closed_and_symmetric = match (&sigma0, &sigma1) {
+                    (Some(s0), Some(s1)) => {
+                        reach_is_symmetric(reach[0], s0) && reach_is_symmetric(reach[1], s1)
+                    }
+                    _ => false,
+                };
+                if !closed_and_symmetric {
                     symmetric = false;
                 }
+                let identity0: Vec<u32> = (0..holes[0].len() as u32).collect();
+                let identity1: Vec<u32> = (0..holes[1].len() as u32).collect();
                 members.push(CollapseMember {
                     child_idx: children[member_local_idx],
-                    sigma: [sigma0, sigma1],
+                    sigma: [
+                        sigma0.unwrap_or(identity0),
+                        sigma1.unwrap_or(identity1),
+                    ],
                 });
             }
             members.sort_by_key(|m| m.child_idx);
@@ -751,7 +803,8 @@ mod tests {
             .collect();
 
         for perm in &stab {
-            let sigma = hand_index_permutation(&holes, &hole_index, perm);
+            let sigma = hand_index_permutation(&holes, &hole_index, perm)
+                .expect("all-holes list is suit-closed; sigma must exist");
             assert_eq!(sigma.len(), holes.len());
 
             // Bijection: every output index hit exactly once.
@@ -764,7 +817,8 @@ mod tests {
 
             // Round-trip: sigma composed with the inverse perm's sigma = id.
             let inv = invert_perm(perm);
-            let sigma_inv = hand_index_permutation(&holes, &hole_index, &inv);
+            let sigma_inv = hand_index_permutation(&holes, &hole_index, &inv)
+                .expect("all-holes list is suit-closed; inverse sigma must exist");
             for h in 0..holes.len() {
                 let back = sigma_inv[sigma[h] as usize] as usize;
                 assert_eq!(back, h, "sigma then inverse-sigma must be identity");
