@@ -578,7 +578,7 @@ def refresh_progress(state: AppState) -> None:
             backend_str = (
                 state.current_solve.backend if state.current_solve else "rust"
             )
-            method_label.set_text(f"Method: concrete ({backend_str})")
+            method_label.set_text("Method: concrete")
             nash_expl_label.set_text("")
         elif status == "running":
             # Surface "would use true-Nash" while still solving so the
@@ -921,8 +921,8 @@ def _chart_quality_label(state: AppState) -> str:
     """Return the chart subtitle for the current solve mode + backend.
 
     Per PR 24a §3.4 + task #61 (default flipped 2026-05-27):
-      * concrete + Rust  -> "true Nash (Rust best-response walk, v1.3.2)"
-      * concrete + Python -> "true Nash (Python best-response walk, slow)"
+      * concrete + Rust  -> "true Nash (best-response walk)"
+      * concrete + Python -> "true Nash (best-response walk (slow))"
       * RvR + ``solver_mode == "true_nash"`` (default) -> "true Nash RvR
                               (vector-form CFR, default; v1.7.0+; post-PR-114)"
       * RvR + ``solver_mode == "blueprint"`` (legacy opt-in) -> "blueprint
@@ -949,8 +949,8 @@ def _chart_quality_label(state: AppState) -> str:
     if solve is not None:
         backend = str(getattr(solve, "backend", "python")).lower()
     if backend == "rust":
-        return "true Nash (Rust best-response walk, v1.3.2)"
-    return "true Nash (Python best-response walk, slow)"
+        return "true Nash (best-response walk)"
+    return "true Nash (best-response walk (slow))"
 
 
 def _format_tier_label(tier: str, iterations: int, target_mBB: float) -> str:

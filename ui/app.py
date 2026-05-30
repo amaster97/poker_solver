@@ -839,7 +839,7 @@ def _on_preflop_chart_solve(state: AppState) -> None:
         )
     except RuntimeError as exc:
         ui.notify(
-            f"A solve is already running: {exc}",
+            "A solve is already running — stop it first, then start a new one.",
             type="warning",
             position="top",
         )
@@ -977,7 +977,7 @@ def _on_solve(state: AppState) -> None:
                 solver_mode=getattr(spot, "solver_mode", "blueprint"),
             )
         except RuntimeError as exc:
-            ui.notify(f"Solve already running: {exc}", type="warning", position="top")
+            ui.notify("A solve is already running — stop it first, then start a new one.", type="warning", position="top")
             return
         state.current_solve = SolveSession(
             spot=spot,
@@ -1002,7 +1002,7 @@ def _on_solve(state: AppState) -> None:
             force_tree_solve=force_tree_solve,
         )
     except RuntimeError as exc:
-        ui.notify(f"Solve already running: {exc}", type="warning", position="top")
+        ui.notify("A solve is already running — stop it first, then start a new one.", type="warning", position="top")
         return
 
     state.current_solve = SolveSession(
@@ -1092,7 +1092,7 @@ def _on_chained_solve(state: AppState) -> None:
             rvr_hero_player=spot.hero_player,
         )
     except RuntimeError as exc:
-        ui.notify(f"Solve already running: {exc}", type="warning", position="top")
+        ui.notify("A solve is already running — stop it first, then start a new one.", type="warning", position="top")
         return
 
     state.current_solve = SolveSession(
