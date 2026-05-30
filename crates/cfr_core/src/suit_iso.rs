@@ -210,6 +210,215 @@ pub(crate) fn hand_index_permutation(
         .collect()
 }
 
+// ============================================================================
+// Stage 2b — value-collapse tables wired into the chance walk.
+//
+// Stage 1 above builds the per-chance-node isomorphism classes. Stage 2b
+// turns each class into a concrete *value-collapse* table: for every member
+// child we precompute the hand-index permutation (for BOTH players) that maps
+// the representative child's per-hand value vector onto the member child's,
+// so the solver can traverse only the representative and permute its values to
+// the members. The collapse is EXACT only when the opponent's reach vector is
+// suit-symmetric under each class's `rel_perm`s — captured by `is_symmetric`.
+// ============================================================================
+
+/// A single value-collapse member of a chance-node class: the member's child
+/// index plus the per-player hand-index permutation that maps the
+/// representative child's value vector onto this member's.
+///
+/// `sigma[p][h]` is the index, in player `p`'s hole list, of the hand obtained
+/// by applying the member's `rel_perm` to hand `h`. The representative member
+/// has the identity permutation in both slots.
+#[derive(Debug, Clone)]
+pub(crate) struct CollapseMember {
+    /// Original child index of this member (preserves DFS summation order).
+    pub(crate) child_idx: usize,
+    /// Per-player hand-index permutation induced by this member's `rel_perm`.
+    /// `sigma[p]` is `hand_index_permutation(holes[p], …, rel_perm)`.
+    pub(crate) sigma: [Vec<u32>; 2],
+}
+
+/// One chance-node class collapsed for the value walk: the representative child
+/// to actually traverse, plus every member (including the representative) in
+/// ascending child-index order.
+#[derive(Debug, Clone)]
+pub(crate) struct CollapseClass {
+    pub(crate) representative_child_idx: usize,
+    pub(crate) members: Vec<CollapseMember>,
+}
+
+/// Per-chance-node value-collapse table. `representative_set[child]` is `true`
+/// iff `child` is a class representative (the only members actually traversed).
+/// `classes` lists every class for this node in representative-index order.
+///
+/// `symmetric` is the range-symmetry guard result for BOTH players: the
+/// collapse for this node is only EXACT when every class `rel_perm` leaves both
+/// players' INITIAL reach vectors invariant. When `false` the solver MUST fall
+/// back to the legacy per-child loop for this node.
+#[derive(Debug, Clone)]
+pub(crate) struct ChanceCollapse {
+    pub(crate) classes: Vec<CollapseClass>,
+    pub(crate) symmetric: bool,
+}
+
+/// The whole-tree value-collapse cache, keyed by chance-node `FlatNode` index.
+/// `nodes[idx]` is `Some(collapse)` for a multi-child chance node that has a
+/// usable (symmetric) collapse table, `None` otherwise (non-chance node,
+/// single-child run-out chance, or a node whose range failed the symmetry
+/// guard).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SuitIsoCache {
+    nodes: Vec<Option<ChanceCollapse>>,
+}
+
+impl SuitIsoCache {
+    /// O(1) lookup of the collapse table for chance node `node_idx`. Returns
+    /// `None` when no usable collapse exists (so the caller runs the legacy
+    /// loop).
+    #[inline]
+    pub(crate) fn get(&self, node_idx: usize) -> Option<&ChanceCollapse> {
+        self.nodes.get(node_idx).and_then(|o| o.as_ref())
+    }
+
+    /// True iff at least one chance node has a usable collapse table (used to
+    /// short-circuit the dispatch when nothing collapsed).
+    #[inline]
+    pub(crate) fn is_active(&self) -> bool {
+        self.nodes.iter().any(|o| o.is_some())
+    }
+}
+
+/// Check whether a reach vector is invariant under a hand-index permutation:
+/// `reach[h] == reach[sigma[h]]` for all `h`. The value collapse is exact only
+/// when this holds for the OPPONENT's reach under every class `rel_perm`.
+fn reach_is_symmetric(reach: &[f64], sigma: &[u32]) -> bool {
+    debug_assert_eq!(reach.len(), sigma.len());
+    reach
+        .iter()
+        .enumerate()
+        .all(|(h, &r)| r == reach[sigma[h] as usize])
+}
+
+/// Build the whole-tree value-collapse cache.
+///
+/// For every multi-child `FlatNode::Chance` node we reconstruct its prefix
+/// board (the running board on the table when the deal happens — `initial_board`
+/// plus the chance cards dealt on the path from the root), group its children
+/// into [`IsoClass`]es via [`group_chance_children`], and precompute each
+/// member's per-player hand-index permutation. The class is collapsible only if
+/// both players' INITIAL reach vectors are invariant under every member
+/// `rel_perm` (the [`reach_is_symmetric`] guard); a node with any asymmetric
+/// class is recorded as `symmetric = false` and the solver falls back to the
+/// legacy loop for it.
+///
+/// `dealt_cards[child]` is the card a chance child adds versus its parent's
+/// prefix (the Stage-1 side table). `holes[p]` is player `p`'s hole list,
+/// positionally aligned with the reach vectors. `reach[p]` is player `p`'s
+/// INITIAL reach vector.
+pub(crate) fn build_suit_iso_cache(
+    nodes: &[crate::exploit::FlatNode],
+    dealt_cards: &[Option<u8>],
+    initial_board: &[u8],
+    holes: &[Vec<[u8; 2]>; 2],
+    reach: &[&[f64]; 2],
+) -> SuitIsoCache {
+    use crate::exploit::FlatNode;
+
+    let hole_index = [build_hole_index(&holes[0]), build_hole_index(&holes[1])];
+
+    // Reconstruct the prefix board per node via an explicit DFS that threads
+    // the running board. The root's prefix is `initial_board`; each chance
+    // child appends its dealt card. We only need prefixes AT chance nodes, but
+    // threading the board for every node is O(tree) and simplest.
+    let mut prefix_at: Vec<Option<Vec<u8>>> = vec![None; nodes.len()];
+    let mut stack: Vec<(usize, Vec<u8>)> = vec![(0, initial_board.to_vec())];
+    while let Some((idx, board)) = stack.pop() {
+        match &nodes[idx] {
+            FlatNode::Chance { children, .. } => {
+                prefix_at[idx] = Some(board.clone());
+                for &c in children {
+                    let mut child_board = board.clone();
+                    if let Some(card) = dealt_cards[c] {
+                        child_board.push(card);
+                    }
+                    stack.push((c, child_board));
+                }
+            }
+            FlatNode::Decision { children, .. } => {
+                for &c in children {
+                    stack.push((c, board.clone()));
+                }
+            }
+            FlatNode::Fold { .. } | FlatNode::Showdown { .. } => {}
+        }
+    }
+
+    let mut out: Vec<Option<ChanceCollapse>> = vec![None; nodes.len()];
+    for idx in 0..nodes.len() {
+        let FlatNode::Chance { children, .. } = &nodes[idx] else {
+            continue;
+        };
+        if children.len() < 2 {
+            continue;
+        }
+        let prefix = match &prefix_at[idx] {
+            Some(b) => b,
+            None => continue,
+        };
+        // Dealt card per child, in child-index order. Every child of a chance
+        // node records its dealt card; bail out (skip collapse) if any is
+        // missing rather than mis-grouping.
+        let mut child_dealt: Vec<u8> = Vec::with_capacity(children.len());
+        let mut complete = true;
+        for &c in children {
+            match dealt_cards[c] {
+                Some(card) => child_dealt.push(card),
+                None => {
+                    complete = false;
+                    break;
+                }
+            }
+        }
+        if !complete {
+            continue;
+        }
+
+        let iso_classes = group_chance_children(prefix, &child_dealt);
+        let mut classes: Vec<CollapseClass> = Vec::with_capacity(iso_classes.len());
+        let mut symmetric = true;
+        for iso in &iso_classes {
+            let mut members: Vec<CollapseMember> = Vec::with_capacity(iso.members.len());
+            for &(member_local_idx, rel_perm) in &iso.members {
+                let sigma0 =
+                    hand_index_permutation(&holes[0], &hole_index[0], &rel_perm);
+                let sigma1 =
+                    hand_index_permutation(&holes[1], &hole_index[1], &rel_perm);
+                // Guard: the collapse is exact only if BOTH players' reach is
+                // invariant under this rel_perm. (The non-trivial constraint is
+                // on the opponent reach used inside the value walk; we require
+                // both so the guard holds whichever player is updating.)
+                if !reach_is_symmetric(reach[0], &sigma0)
+                    || !reach_is_symmetric(reach[1], &sigma1)
+                {
+                    symmetric = false;
+                }
+                members.push(CollapseMember {
+                    child_idx: children[member_local_idx],
+                    sigma: [sigma0, sigma1],
+                });
+            }
+            members.sort_by_key(|m| m.child_idx);
+            classes.push(CollapseClass {
+                representative_child_idx: children[iso.representative_child_idx],
+                members,
+            });
+        }
+        out[idx] = Some(ChanceCollapse { classes, symmetric });
+    }
+
+    SuitIsoCache { nodes: out }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

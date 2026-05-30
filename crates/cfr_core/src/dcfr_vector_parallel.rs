@@ -170,6 +170,8 @@ pub(crate) fn parallel_traverse_chance(
     offset: usize,
     terminal_ie: bool,
     has_chance_template: &[bool],
+    suit_iso: bool,
+    suit_iso_cache: &crate::suit_iso::SuitIsoCache,
 ) -> Vec<f64> {
     let update_hands = eval_ctx.hand_count[update_player];
 
@@ -256,6 +258,8 @@ pub(crate) fn parallel_traverse_chance(
                 range.start,
                 terminal_ie,
                 has_chance_template,
+                suit_iso,
+                suit_iso_cache,
             )
         })
         .collect();

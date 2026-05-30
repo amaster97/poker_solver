@@ -879,6 +879,28 @@ impl VectorDCFR {
         // its precompute is built into the cache; when unset, no IE data is
         // built and the legacy cached path runs unchanged.
         let terminal_ie = terminal_ie_enabled();
+        // `perf/suit-iso` Stage 2b — read `CFR_SUIT_ISO` ONCE per solve. When
+        // set, build the value-collapse cache (per-chance-node iso classes +
+        // per-member hand-index permutations) from the INITIAL reach vectors
+        // and thread a `suit_iso` bool through the chance walk. When unset, the
+        // cache is empty/inactive and the chance loop is byte-identical to the
+        // legacy path.
+        let suit_iso = suit_iso_enabled();
+        let suit_iso_cache = if suit_iso {
+            crate::suit_iso::build_suit_iso_cache(
+                &tree.nodes,
+                &tree.dealt_cards,
+                &tree.initial_board(),
+                &eval_ctx.hole,
+                &[&reach_p0, &reach_p1],
+            )
+        } else {
+            crate::suit_iso::SuitIsoCache::default()
+        };
+        // Only thread the collapse on when the cache actually collapsed
+        // something (every class symmetric somewhere). A built-but-empty cache
+        // keeps the legacy loop, identical to flag-off.
+        let suit_iso = suit_iso && suit_iso_cache.is_active();
         let terminal_cache = TerminalCache::build(tree, eval_ctx, terminal_ie);
         // v1.10 PR-3 — build the RunoutCache once at solve-start so the
         // flop-level walker can reuse its scratch buffers across all
@@ -938,6 +960,8 @@ impl VectorDCFR {
                     terminal_ie,
                     &self.has_chance_template,
                     &mut runout_cache,
+                    suit_iso,
+                    &suit_iso_cache,
                 );
                 arena.reset_to(outer_mark);
                 // Update player 1.
@@ -960,6 +984,8 @@ impl VectorDCFR {
                     terminal_ie,
                     &self.has_chance_template,
                     &mut runout_cache,
+                    suit_iso,
+                    &suit_iso_cache,
                 );
                 arena.reset_to(outer_mark);
             }
@@ -1039,6 +1065,8 @@ pub(crate) fn traverse_recursive_with_parallel(
     terminal_ie: bool,
     has_chance_template: &[bool],
     runout_cache: &mut RunoutCache,
+    suit_iso: bool,
+    suit_iso_cache: &crate::suit_iso::SuitIsoCache,
 ) -> Vec<f64> {
     let node = &tree.nodes[node_idx];
     let update_hands = eval_ctx.hand_count[update_player];
@@ -1089,6 +1117,80 @@ pub(crate) fn traverse_recursive_with_parallel(
             r
         }
         FlatNode::Chance { prob, children } => {
+            // `perf/suit-iso` Stage 2b — value-collapse fast path. When the
+            // flag is on AND this chance node has a usable (symmetric) collapse
+            // table, traverse only one REPRESENTATIVE child per iso class and
+            // permute its per-hand value vector onto every member via the
+            // precomputed hand-index permutation, skipping the non-rep members'
+            // traversals entirely. We accumulate in ORIGINAL child-index order
+            // so flag-off and flag-on agree on the IEEE-754 summation sequence.
+            //
+            // **Permutation direction.** A member board is `rel_perm` applied
+            // to the representative board (`rel_perm` fixes the prefix and maps
+            // rep's dealt card to the member's). `sigma[h]` is the index of the
+            // hand obtained by applying `rel_perm` to hand `h`. Empirically the
+            // exact relation is `member_values[h] = rep_values[sigma[h]]` — the
+            // value of the member's hand `h` equals the rep's value at the hand
+            // that `rel_perm` carries `h` to. (Verified by the
+            // `suit_iso_value_collapse_parity` gate hitting 0.0.)
+            if suit_iso && children.len() >= 2 {
+                if let Some(collapse) = suit_iso_cache.get(node_idx) {
+                    if collapse.symmetric {
+                        let prob_val = *prob;
+                        let children_vec: Vec<usize> = children.clone();
+                        // Traverse each representative ONCE; permute its value
+                        // vector onto every member. We index the resulting
+                        // per-child value vectors by ORIGINAL child index so
+                        // the final accumulation below can sum in strict
+                        // child-index order — byte-identical IEEE-754 order to
+                        // the legacy loop, hence a 0.0 gate delta.
+                        let mut child_values_by_idx: HashMap<usize, Vec<f64>> =
+                            HashMap::with_capacity(children_vec.len());
+                        for class in &collapse.classes {
+                            let rep_values = traverse_recursive_with_parallel(
+                                tree,
+                                eval_ctx,
+                                terminal_cache,
+                                arena,
+                                class.representative_child_idx,
+                                update_player,
+                                iteration,
+                                alpha,
+                                beta,
+                                gamma,
+                                reach_p,
+                                reach_opp,
+                                infosets,
+                                offset,
+                                false,
+                                terminal_ie,
+                                has_chance_template,
+                                runout_cache,
+                                suit_iso,
+                                suit_iso_cache,
+                            );
+                            for member in &class.members {
+                                let sigma = &member.sigma[update_player];
+                                debug_assert_eq!(sigma.len(), update_hands);
+                                let mut member_values = vec![0.0_f64; update_hands];
+                                for i in 0..update_hands {
+                                    member_values[i] = rep_values[sigma[i] as usize];
+                                }
+                                child_values_by_idx.insert(member.child_idx, member_values);
+                            }
+                        }
+                        let mut values = vec![0.0_f64; update_hands];
+                        for c in &children_vec {
+                            let child_values = &child_values_by_idx[c];
+                            for (i, v) in child_values.iter().enumerate() {
+                                values[i] += prob_val * v;
+                            }
+                        }
+                        arena.reset_to(entry_mark);
+                        return values;
+                    }
+                }
+            }
             // Decide: parallel dispatch, flop walker, turn walker, or
             // sequential walk?
             //
@@ -1135,6 +1237,8 @@ pub(crate) fn traverse_recursive_with_parallel(
                     offset,
                     terminal_ie,
                     has_chance_template,
+                    suit_iso,
+                    suit_iso_cache,
                 );
                 arena.reset_to(entry_mark);
                 return r;
@@ -1181,6 +1285,8 @@ pub(crate) fn traverse_recursive_with_parallel(
                     terminal_ie,
                     has_chance_template,
                     runout_cache,
+                    suit_iso,
+                    suit_iso_cache,
                 );
                 arena.reset_to(entry_mark);
                 return r;
@@ -1212,6 +1318,8 @@ pub(crate) fn traverse_recursive_with_parallel(
                     terminal_ie,
                     has_chance_template,
                     runout_cache,
+                    suit_iso,
+                    suit_iso_cache,
                 );
                 arena.reset_to(entry_mark);
                 return r;
@@ -1241,6 +1349,8 @@ pub(crate) fn traverse_recursive_with_parallel(
                     terminal_ie,
                     has_chance_template,
                     runout_cache,
+                    suit_iso,
+                    suit_iso_cache,
                 );
                 let _t = prof_start!();
                 for (i, v) in child_values.iter().enumerate() {
@@ -1308,6 +1418,8 @@ pub(crate) fn traverse_recursive_with_parallel(
                         terminal_ie,
                         has_chance_template,
                         runout_cache,
+                        suit_iso,
+                        suit_iso_cache,
                     );
                     let _t = prof_start!();
                     for h in 0..update_hands {
@@ -1382,6 +1494,8 @@ pub(crate) fn traverse_recursive_with_parallel(
                     terminal_ie,
                     has_chance_template,
                     runout_cache,
+                    suit_iso,
+                    suit_iso_cache,
                 );
                 let dst = a * update_hands;
                 let action_values =
@@ -1727,6 +1841,8 @@ pub(crate) fn traverse_flop_chance_recursive(
     terminal_ie: bool,
     has_chance_template: &[bool],
     runout_cache: &mut RunoutCache,
+    suit_iso: bool,
+    suit_iso_cache: &crate::suit_iso::SuitIsoCache,
 ) -> Vec<f64> {
     let update_hands = eval_ctx.hand_count[update_player];
     debug_assert!(
@@ -1772,6 +1888,8 @@ pub(crate) fn traverse_flop_chance_recursive(
             terminal_ie,
             has_chance_template,
             runout_cache,
+            suit_iso,
+            suit_iso_cache,
         );
         // Bit-identical to the legacy chance arm: `values[i] += prob * v_i`.
         // Same loop body, same accumulation order.
@@ -1832,6 +1950,8 @@ pub(crate) fn traverse_with_infosets(
     offset: usize,
     terminal_ie: bool,
     has_chance_template: &[bool],
+    suit_iso: bool,
+    suit_iso_cache: &crate::suit_iso::SuitIsoCache,
 ) -> Vec<f64> {
     let mut local_cache = RunoutCache::empty();
     TLS_ARENA.with(|cell| {
@@ -1857,6 +1977,8 @@ pub(crate) fn traverse_with_infosets(
             terminal_ie,
             has_chance_template,
             &mut local_cache,
+            suit_iso,
+            suit_iso_cache,
         );
         arena.reset_to(entry_mark);
         r
@@ -1905,6 +2027,8 @@ fn traverse_turn_chance_recursive(
     terminal_ie: bool,
     has_chance_template: &[bool],
     runout_cache: &mut RunoutCache,
+    suit_iso: bool,
+    suit_iso_cache: &crate::suit_iso::SuitIsoCache,
 ) -> Vec<f64> {
     let update_hands = eval_ctx.hand_count[update_player];
     let mut values = vec![0.0_f64; update_hands];
@@ -1932,6 +2056,8 @@ fn traverse_turn_chance_recursive(
             terminal_ie,
             has_chance_template,
             runout_cache,
+            suit_iso,
+            suit_iso_cache,
         );
         // Bit-identical to the legacy chance arm: `values[i] += prob * v_i`.
         for (i, v) in child_values.iter().enumerate() {
@@ -2317,6 +2443,15 @@ fn terminal_value_vector_ie(
 /// `parallel_chance_enabled`), so flag-off solves never touch the IE path.
 pub(crate) fn terminal_ie_enabled() -> bool {
     matches!(std::env::var("CFR_TERMINAL_IE"), Ok(v) if !v.is_empty())
+}
+
+/// Read `CFR_SUIT_ISO` from the environment. Returns `true` iff the variable
+/// is set to any non-empty value. Called ONCE per `VectorDCFR::solve` and
+/// threaded through the chance traversal (mirroring `terminal_ie_enabled`), so
+/// flag-off solves never build or consult the suit-iso value-collapse cache
+/// and stay byte-identical to the legacy path.
+pub(crate) fn suit_iso_enabled() -> bool {
+    matches!(std::env::var("CFR_SUIT_ISO"), Ok(v) if !v.is_empty())
 }
 
 /// Build an output `HashMap<String, Vec<f64>>` matching Python's
@@ -4434,6 +4569,415 @@ mod tests {
             "[noise ON] default global-seed noise was expected to BREAK σ-symmetry \
              (on={strat_delta_on:.3e} vs off={strat_delta_off:.3e}); if it did not, \
              re-check the noise seeding before relying on this finding"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Suit-iso STAGE 2b — value-collapse parity gate.
+    //
+    // Solves the SAME turn-rooted RvR subgame with CFR_SUIT_ISO OFF vs ON
+    // (noise OFF) on four flop/turn textures and asserts bit-exact (<=1e-12)
+    // equality of: (a) game value, (b) the root per-hand value vector, and
+    // (c) the REPRESENTATIVE-board infoset average strategies. Non-rep member
+    // boards are NOT compared (they are stale until stage 2c output
+    // reconstruction). The collapse runs on the EXISTING full tree; the win is
+    // skipping non-representative members' traversal.
+    // ------------------------------------------------------------------
+
+    /// Turn-rooted RvR config on `board` (4 cards). `postflop_raise_cap = 1`
+    /// and two bet sizes keep the river subgame small (<~1GB) while still
+    /// producing genuinely mixed multi-action infosets.
+    fn collapse_turn_config(board: &[u8]) -> HUNLConfig {
+        HUNLConfig {
+            starting_stack: 1000,
+            small_blind: 50,
+            big_blind: 100,
+            ante: 0,
+            starting_street: Street::Turn,
+            initial_board: board.to_vec(),
+            initial_pot: 1000,
+            initial_contributions: [500, 500],
+            initial_hole_cards: None,
+            preflop_raise_cap: 4,
+            postflop_raise_cap: 1,
+            bet_size_fractions: vec![0.75],
+            include_all_in: false,
+            force_allin_threshold: 1,
+            min_bet_bb: 1,
+            rake_rate: 0.0,
+            rake_cap: 0,
+            abstraction_path: None,
+            abstraction_version: None,
+            use_pcs: false,
+        }
+    }
+
+    /// Suit-SYMMETRIC, board-disjoint range: ALL four-suit combos over a small
+    /// rank set, filtered against `board`. Closed under every suit permutation,
+    /// hence under any board stabilizer — the symmetry guard must accept it.
+    fn collapse_symmetric_range(board: &[u8], ranks: &[u8]) -> Vec<[u8; 2]> {
+        let held: std::collections::HashSet<u8> = board.iter().copied().collect();
+        let mut holes: Vec<[u8; 2]> = Vec::new();
+        for (i, &r0) in ranks.iter().enumerate() {
+            for &r1 in &ranks[i..] {
+                for s0 in 0u8..4 {
+                    for s1 in 0u8..4 {
+                        let c0 = card_to_int(r0, s0);
+                        let c1 = card_to_int(r1, s1);
+                        if c0 >= c1 || held.contains(&c0) || held.contains(&c1) {
+                            continue;
+                        }
+                        holes.push([c0, c1]);
+                    }
+                }
+            }
+        }
+        holes
+    }
+
+    /// Run a turn-rooted solve and capture, for the chosen `suit_iso` setting:
+    /// the node-aligned average strategies, the per-node deciding player, the
+    /// root per-hand value vector (P0 update), and the P0 game value (mean of
+    /// the root value vector over P0 hands). The value capture re-runs the
+    /// root traversal once AFTER the strategy snapshot, with the same
+    /// suit-iso flag/cache the solve used, so flag-on permutes from
+    /// representatives exactly as the solve did.
+    type CollapseCapture = (Vec<Option<Vec<f64>>>, Vec<usize>, Vec<f64>, f64);
+
+    #[allow(clippy::type_complexity)]
+    fn solve_collapse_capture(
+        cfg: &HUNLConfig,
+        holes: &[[u8; 2]],
+        iters: u32,
+        suit_iso: bool,
+    ) -> CollapseCapture {
+        let initial = HUNLState::initial(std::sync::Arc::new(cfg.clone()));
+        let ctx = EvalContext::from_hand_lists(holes.to_vec(), holes.to_vec(), cfg.big_blind);
+        let placeholder = initial.clone_with_hole_cards([ctx.hole[0][0], ctx.hole[1][0]]);
+        let tree = BettingTree::build_with_mode(&placeholder, BettingTreeMode::TemplateExtract);
+
+        // Drive the solve through the real env-flag path so the collapse fires
+        // inside `solve` exactly as production would.
+        let mut solver =
+            VectorDCFR::with_init_noise(&tree, ctx.hand_count, 1.5, 0.0, 2.0, 0.0, 0);
+        if suit_iso {
+            std::env::set_var("CFR_SUIT_ISO", "1");
+        } else {
+            std::env::remove_var("CFR_SUIT_ISO");
+        }
+        solver.solve(&tree, &ctx, iters, None);
+        std::env::remove_var("CFR_SUIT_ISO");
+
+        let final_iter = solver.iteration;
+        let (a, b, g) = (solver.alpha, solver.beta, solver.gamma);
+        for info in solver.infosets.iter_mut().flatten() {
+            VectorDCFR::discount(info, final_iter, a, b, g);
+        }
+
+        // (c) node-aligned average strategies + per-node player.
+        let mut avg: Vec<Option<Vec<f64>>> = Vec::with_capacity(solver.infosets.len());
+        let mut node_player: Vec<usize> = Vec::with_capacity(solver.infosets.len());
+        for (node_idx, slot) in solver.infosets.iter().enumerate() {
+            match slot {
+                Some(info) => {
+                    let mut rows = vec![0.0_f64; info.hand_count * info.action_count];
+                    VectorDCFR::compute_avg_strategy(info, &mut rows);
+                    avg.push(Some(rows));
+                    let player = match &tree.nodes[node_idx] {
+                        FlatNode::Decision { player, .. } => *player as usize,
+                        _ => unreachable!(),
+                    };
+                    node_player.push(player);
+                }
+                None => {
+                    avg.push(None);
+                    node_player.push(usize::MAX);
+                }
+            }
+        }
+
+        // (a)/(b) root per-hand value vector + game value. Build the same
+        // collapse cache the solve used and run one root traversal with the
+        // matching suit-iso flag. The strategy snapshot above is already taken,
+        // so the extra regret/strategy mutation here does not affect (c).
+        let reach = vec![1.0_f64; ctx.hand_count[0]];
+        let cache = if suit_iso {
+            crate::suit_iso::build_suit_iso_cache(
+                &tree.nodes,
+                &tree.dealt_cards,
+                &tree.initial_board(),
+                &ctx.hole,
+                &[&reach, &reach],
+            )
+        } else {
+            crate::suit_iso::SuitIsoCache::default()
+        };
+        let iso_on = suit_iso && cache.is_active();
+        let terminal_cache = TerminalCache::build(&tree, &ctx, false);
+        let mut runout_cache = RunoutCache::build(&tree, &ctx);
+        let mut arena = BumpArena::new();
+        let root_values = traverse_recursive_with_parallel(
+            &tree,
+            &ctx,
+            &terminal_cache,
+            &mut arena,
+            0,
+            0,
+            final_iter + 1,
+            a,
+            b,
+            g,
+            &reach,
+            &reach,
+            &mut solver.infosets,
+            0,
+            false,
+            false,
+            &solver.has_chance_template,
+            &mut runout_cache,
+            iso_on,
+            &cache,
+        );
+        let game_value =
+            root_values.iter().sum::<f64>() / (root_values.len().max(1) as f64);
+        (avg, node_player, root_values, game_value)
+    }
+
+    /// Representatives-only strategy delta: compares average strategies between
+    /// the iso-off and iso-on solves at every decision node whose board is a
+    /// class REPRESENTATIVE (or sits entirely above any chance node, i.e. on
+    /// the turn line). Member-board nodes are skipped — they are stale under
+    /// the collapse until stage 2c. Returns `(max_delta, compared_nodes)`.
+    fn collapse_rep_strategy_delta(
+        avg_off: &[Option<Vec<f64>>],
+        avg_on: &[Option<Vec<f64>>],
+        node_player: &[usize],
+        action_counts: &[usize],
+        rep_node: &[bool],
+    ) -> (f64, usize) {
+        let mut max_delta = 0.0_f64;
+        let mut compared = 0usize;
+        for node_idx in 0..avg_off.len() {
+            if !rep_node[node_idx] {
+                continue;
+            }
+            let (rows_off, rows_on) = match (&avg_off[node_idx], &avg_on[node_idx]) {
+                (Some(r0), Some(r1)) => (r0, r1),
+                (None, None) => continue,
+                _ => panic!("node {node_idx} infoset presence mismatch off vs on"),
+            };
+            let _ = node_player[node_idx];
+            let a = action_counts[node_idx];
+            compared += 1;
+            for (off_v, on_v) in rows_off.iter().zip(rows_on.iter()) {
+                max_delta = max_delta.max((off_v - on_v).abs());
+            }
+            debug_assert_eq!(rows_off.len() % a.max(1), 0);
+        }
+        (max_delta, compared)
+    }
+
+    /// Mark every node that is either above all chance nodes (turn line) or is
+    /// in the subtree of a chance-class REPRESENTATIVE child (recursively).
+    /// These are the nodes whose strategies the collapse keeps current.
+    fn mark_representative_nodes(
+        tree: &BettingTree,
+        cache: &crate::suit_iso::SuitIsoCache,
+    ) -> Vec<bool> {
+        let mut rep = vec![false; tree.nodes.len()];
+        // DFS from root; a node is "kept" until we cross a chance node, where
+        // only representative children stay kept.
+        let mut stack: Vec<(usize, bool)> = vec![(0, true)];
+        while let Some((idx, kept)) = stack.pop() {
+            rep[idx] = kept;
+            match &tree.nodes[idx] {
+                FlatNode::Chance { children, .. } => {
+                    let reps: std::collections::HashSet<usize> = match cache.get(idx) {
+                        Some(c) if c.symmetric => c
+                            .classes
+                            .iter()
+                            .map(|cl| cl.representative_child_idx)
+                            .collect(),
+                        // No collapse here -> every child kept.
+                        _ => children.iter().copied().collect(),
+                    };
+                    for &c in children {
+                        stack.push((c, kept && reps.contains(&c)));
+                    }
+                }
+                FlatNode::Decision { children, .. } => {
+                    for &c in children {
+                        stack.push((c, kept));
+                    }
+                }
+                _ => {}
+            }
+        }
+        rep
+    }
+
+    #[test]
+    fn suit_iso_value_collapse_parity() {
+        // SUITS = "shdc" => s=0, h=1, d=2, c=3.
+        let card = card_to_int;
+        // Four 4-card turn textures (rank set chosen distinct from range ranks
+        // where possible so the board does not gut the range).
+        let textures: [(&str, Vec<u8>); 4] = [
+            // RAINBOW: all four suits present once -> stabilizer = identity,
+            // |S| = 1, every river child a singleton (no members skipped).
+            ("RAINBOW", vec![card(14, 0), card(13, 1), card(10, 2), card(7, 3)]),
+            // TWO-TONE: suits s,h present; d,c absent -> (d c) swap, |S| = 2.
+            ("TWO-TONE", vec![card(14, 0), card(13, 0), card(10, 1), card(7, 1)]),
+            // MONOTONE: all spades -> S3 on {h,d,c}, |S| = 6 (largest collapse).
+            ("MONOTONE", vec![card(14, 0), card(13, 0), card(10, 0), card(7, 0)]),
+            // PAIRED: Ks Kd + 9h 4c. King suits s,d share rankset {K} -> (s d)
+            // swap; h,c distinct ranksets, c absent w/ no partner -> |S| = 2.
+            ("PAIRED", vec![card(13, 0), card(13, 2), card(9, 1), card(4, 3)]),
+        ];
+        // Small symmetric range: over/under cards + connectors, board-disjoint.
+        let range_ranks: [u8; 4] = [12, 11, 6, 5]; // Q, J, 6, 5
+        let iters: u32 = 48;
+
+        let mut results: Vec<(String, f64, f64, f64, usize, usize)> = Vec::new();
+        for (name, board) in &textures {
+            let cfg = collapse_turn_config(board);
+            let holes = collapse_symmetric_range(board, &range_ranks);
+            assert!(holes.len() >= 12, "{name}: range too small ({})", holes.len());
+
+            // Build the cache once to report skipped-member counts + rep mask.
+            let initial = HUNLState::initial(std::sync::Arc::new(cfg.clone()));
+            let ctx = EvalContext::from_hand_lists(holes.clone(), holes.clone(), cfg.big_blind);
+            let placeholder =
+                initial.clone_with_hole_cards([ctx.hole[0][0], ctx.hole[1][0]]);
+            let tree =
+                BettingTree::build_with_mode(&placeholder, BettingTreeMode::TemplateExtract);
+            let reach = vec![1.0_f64; ctx.hand_count[0]];
+            let cache = crate::suit_iso::build_suit_iso_cache(
+                &tree.nodes,
+                &tree.dealt_cards,
+                &tree.initial_board(),
+                &ctx.hole,
+                &[&reach, &reach],
+            );
+            // Count total children vs representatives at collapsing chance
+            // nodes -> members skipped.
+            let mut total_children = 0usize;
+            let mut total_reps = 0usize;
+            for (idx, node) in tree.nodes.iter().enumerate() {
+                if let FlatNode::Chance { children, .. } = node {
+                    if let Some(c) = cache.get(idx) {
+                        if c.symmetric && children.len() >= 2 {
+                            total_children += children.len();
+                            total_reps += c.classes.len();
+                        }
+                    }
+                }
+            }
+            let members_skipped = total_children - total_reps;
+            let rep_node = mark_representative_nodes(&tree, &cache);
+
+            let action_counts: Vec<usize> = tree
+                .nodes
+                .iter()
+                .map(|n| match n {
+                    FlatNode::Decision { actions, .. } => actions.len(),
+                    _ => 0,
+                })
+                .collect();
+
+            let (avg_off, np_off, rv_off, gv_off) =
+                solve_collapse_capture(&cfg, &holes, iters, false);
+            let (avg_on, np_on, rv_on, gv_on) =
+                solve_collapse_capture(&cfg, &holes, iters, true);
+            assert_eq!(np_off, np_on, "{name}: tree topology mismatch off vs on");
+
+            // (a) game value delta.
+            let gv_delta = (gv_off - gv_on).abs();
+            // (b) root per-hand value vector delta.
+            assert_eq!(rv_off.len(), rv_on.len(), "{name}: root value len mismatch");
+            let rv_delta = rv_off
+                .iter()
+                .zip(rv_on.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0_f64, f64::max);
+            // (c) representative-board strategy delta.
+            let (strat_delta, compared) = collapse_rep_strategy_delta(
+                &avg_off,
+                &avg_on,
+                &np_off,
+                &action_counts,
+                &rep_node,
+            );
+
+            println!(
+                "[{name}] hands/player={}, river-chance children skipped={} (kept {} reps of {}), \
+                 rep infosets compared={}\n  \
+                 |game_value Δ|={gv_delta:.3e}  max|root value Δ|={rv_delta:.3e}  \
+                 max|rep strat Δ|={strat_delta:.3e}",
+                holes.len(),
+                members_skipped,
+                total_reps,
+                total_children,
+                compared,
+            );
+
+            results.push((
+                (*name).to_string(),
+                gv_delta,
+                rv_delta,
+                strat_delta,
+                members_skipped,
+                compared,
+            ));
+        }
+
+        // ---- ASSERTIONS: bit-exact (<=1e-12) on all four textures. ----
+        const TOL: f64 = 1e-12;
+        for (name, gv_d, rv_d, st_d, _skip, compared) in &results {
+            assert!(
+                *compared > 0,
+                "[{name}] no representative infosets were compared — gate is vacuous"
+            );
+            assert!(
+                *gv_d <= TOL,
+                "[{name}] game_value delta {gv_d:.3e} exceeds {TOL:.0e}"
+            );
+            assert!(
+                *rv_d <= TOL,
+                "[{name}] root value-vector delta {rv_d:.3e} exceeds {TOL:.0e}"
+            );
+            assert!(
+                *st_d <= TOL,
+                "[{name}] representative strategy delta {st_d:.3e} exceeds {TOL:.0e}"
+            );
+        }
+
+        // MONOTONE (|S| = 6) must skip the most members of the four.
+        let skipped = |n: &str| {
+            results
+                .iter()
+                .find(|r| r.0 == n)
+                .map(|r| r.4)
+                .unwrap_or(0)
+        };
+        assert!(
+            skipped("MONOTONE") > skipped("TWO-TONE"),
+            "MONOTONE (|S|=6) should skip more members than TWO-TONE (|S|=2): \
+             monotone={}, two-tone={}",
+            skipped("MONOTONE"),
+            skipped("TWO-TONE"),
+        );
+        assert!(
+            skipped("MONOTONE") > skipped("RAINBOW"),
+            "MONOTONE (|S|=6) should skip more members than RAINBOW (|S|=1): \
+             monotone={}, rainbow={}",
+            skipped("MONOTONE"),
+            skipped("RAINBOW"),
+        );
+        assert_eq!(
+            skipped("RAINBOW"),
+            0,
+            "RAINBOW (|S|=1) must skip zero members (all singletons)"
         );
     }
 }
