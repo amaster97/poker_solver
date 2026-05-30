@@ -2574,10 +2574,21 @@ pub(crate) fn suit_iso_enabled() -> bool {
 /// the hand was always blocked by opp's reach at this node) emit
 /// uniform — matching `compute_avg_strategy` (`trainer.cpp:111-120`,
 /// MIT).
+///
+/// `suit_iso_cache` is the SAME value-collapse cache the solve dispatched on
+/// (`perf/suit-iso` Stage 3a). When `Some` and active, the dense first pass
+/// only emits entries for nodes that carry an allocated infoset (representative
+/// and turn-line nodes); the member-board subtrees were sparse-allocated to
+/// `None`. A second pass (Stage 3b) reconstructs every skipped member-board
+/// entry by permuting the representative's converged strategy via the member's
+/// precomputed `sigma`, so the iso-ON output is COMPLETE — identical key set and
+/// values to a dense iso-OFF solve. When `None` (the legacy / flag-off path) the
+/// second pass is a no-op and the output is byte-identical to before.
 pub(crate) fn build_average_strategy(
     solver: &VectorDCFR,
     tree: &BettingTree,
     ctx: &EvalContext,
+    suit_iso_cache: Option<&crate::suit_iso::SuitIsoCache>,
 ) -> HashMap<String, Vec<f64>> {
     let mut out: HashMap<String, Vec<f64>> = HashMap::new();
     for (node_idx, slot) in solver.infosets.iter().enumerate() {
@@ -2611,7 +2622,249 @@ pub(crate) fn build_average_strategy(
             out.insert(key, row);
         }
     }
+
+    // `perf/suit-iso` Stage 3b — member output expansion. The dense pass above
+    // emitted entries only for nodes carrying an allocated infoset; under the
+    // sparse allocation the non-representative member subtrees are `None`. Walk
+    // each collapsing chance node's members in lockstep against its
+    // representative subtree, permuting the rep's converged strategy onto each
+    // member, so the iso-ON output regains every member-board key.
+    if let Some(cache) = suit_iso_cache {
+        if cache.is_active() {
+            expand_member_strategies(solver, tree, ctx, cache, &mut out);
+        }
+    }
+
     out
+}
+
+/// `perf/suit-iso` Stage 3b — reconstruct the member-board strategy entries the
+/// sparse allocation skipped, by permuting each collapsing chance node's
+/// representative strategy onto its members.
+///
+/// For every `FlatNode::Chance` carrying a present-AND-`symmetric` collapse, and
+/// for every NON-representative member of each class, we lockstep-walk the
+/// member subtree against the representative subtree. Rep and member subtrees
+/// are STRUCTURALLY IDENTICAL and built in the same DFS order, so the member
+/// node at offset `k` into the member subtree corresponds to the rep node at
+/// offset `k` into the rep subtree. For each paired Decision node we take the
+/// rep's converged average strategy (its infoset IS allocated), permute each
+/// hand-row by the member's per-player `sigma` (`member_row[h] =
+/// rep_row[sigma[h]]`, the same direction as the value-collapse at
+/// `dcfr_vector.rs:~1287`), and emit a map entry per hand using the MEMBER
+/// node's own `key_suffix` (which already encodes the member board) plus the
+/// member-board hole strings `ctx.hole_str[player][h]`.
+///
+/// Nested membership (a river member under a turn member) is handled by the
+/// recursive [`expand_member_pair`] walker, which COMPOSES sigmas as it
+/// descends: a node under two levels of membership maps to its representative
+/// via `sigma_outer ∘ sigma_inner`.
+fn expand_member_strategies(
+    solver: &VectorDCFR,
+    tree: &BettingTree,
+    ctx: &EvalContext,
+    cache: &crate::suit_iso::SuitIsoCache,
+    out: &mut HashMap<String, Vec<f64>>,
+) {
+    // Identity per-player sigma (no membership crossed yet). Composing with this
+    // is a no-op, so a top-level member's own sigma drives the first level.
+    let identity: [Vec<u32>; 2] = [
+        (0..ctx.hand_count[0] as u32).collect(),
+        (0..ctx.hand_count[1] as u32).collect(),
+    ];
+
+    for node_idx in 0..tree.nodes.len() {
+        let FlatNode::Chance { children, .. } = &tree.nodes[node_idx] else {
+            continue;
+        };
+        if children.len() < 2 {
+            continue;
+        }
+        let Some(collapse) = cache.get(node_idx) else {
+            continue;
+        };
+        if !collapse.symmetric {
+            continue;
+        }
+        for class in &collapse.classes {
+            let rep_child = class.representative_child_idx;
+            for member in &class.members {
+                if member.child_idx == rep_child {
+                    // The representative's own entries are emitted by the dense
+                    // pass; only members need reconstruction.
+                    continue;
+                }
+                // Compose the (identity) outer sigma with this member's sigma:
+                // for the first membership level, the composed sigma IS the
+                // member's sigma. `compose[p][h] = identity[p][member.sigma[p][h]]`.
+                let composed: [Vec<u32>; 2] = [
+                    compose_sigma(&identity[0], &member.sigma[0]),
+                    compose_sigma(&identity[1], &member.sigma[1]),
+                ];
+                expand_member_pair(
+                    solver, tree, ctx, cache, rep_child, member.child_idx, &composed, out,
+                );
+            }
+        }
+    }
+}
+
+/// Compose two per-player hand-index permutations: `(outer ∘ inner)[h] =
+/// outer[inner[h]]`.
+///
+/// `inner` is the membership crossed CLOSER to the root (applied first as we
+/// descend), `outer` is the one crossed deeper. Reading right-to-left, a member
+/// hand `h` deep under nested membership maps to the representative hand
+/// `outer[inner[h]]`. Both inputs are true permutations of `0..n`, so the result
+/// is too.
+fn compose_sigma(outer: &[u32], inner: &[u32]) -> Vec<u32> {
+    inner.iter().map(|&h| outer[h as usize]).collect()
+}
+
+/// Recursive lockstep walker for Stage 3b. Walks the `member_idx` subtree
+/// against the `rep_idx` subtree (structurally identical, same DFS order),
+/// threading the composed per-player `sigma` that maps a MEMBER hand to the
+/// REPRESENTATIVE hand it permutes to.
+///
+/// - At a Decision pair: the rep node's infoset is allocated (it is on a kept
+///   path); emit one member-board entry per hand by permuting the rep's average
+///   strategy row (`member_row[h] = rep_row[sigma[player][h]]`) and keying on the
+///   MEMBER node's `key_suffix` + member-board hole strings. Recurse on each
+///   child pair with the SAME sigma (a betting action crosses no chance).
+/// - At a Chance pair: a nested collapse may live under the REP child. Recurse
+///   class-by-class — but the REP subtree itself sparse-allocates its members,
+///   so to find allocated infosets we follow the REP's REPRESENTATIVE child on
+///   both sides, and for each nested member compose its sigma into the thread
+///   (`sigma_new = sigma ∘ member.sigma`). The member-side chance node is laid
+///   out identically, so its children align positionally with the rep-side
+///   chance node's children.
+#[allow(clippy::too_many_arguments)]
+fn expand_member_pair(
+    solver: &VectorDCFR,
+    tree: &BettingTree,
+    ctx: &EvalContext,
+    cache: &crate::suit_iso::SuitIsoCache,
+    rep_idx: usize,
+    member_idx: usize,
+    sigma: &[Vec<u32>; 2],
+    out: &mut HashMap<String, Vec<f64>>,
+) {
+    match (&tree.nodes[rep_idx], &tree.nodes[member_idx]) {
+        (
+            FlatNode::Decision {
+                children: rep_children,
+                ..
+            },
+            FlatNode::Decision {
+                player,
+                children: member_children,
+                key_suffix,
+                ..
+            },
+        ) => {
+            let player = *player as usize;
+            // The rep node IS on a kept path, so its infoset is allocated.
+            let info = solver.infosets[rep_idx].as_ref().expect(
+                "Stage 3b: representative decision node must carry an allocated infoset",
+            );
+            let action_count = info.action_count;
+            let hand_count = info.hand_count;
+            let mut rep_avg = vec![0.0_f64; hand_count * action_count];
+            VectorDCFR::compute_avg_strategy(info, &mut rep_avg);
+
+            let sig = &sigma[player];
+            debug_assert_eq!(sig.len(), hand_count);
+            for h in 0..hand_count {
+                let hole_str = &ctx.hole_str[player][h];
+                let mut key = String::with_capacity(hole_str.len() + key_suffix.len());
+                key.push_str(hole_str);
+                key.push_str(key_suffix);
+                let src = sig[h] as usize * action_count;
+                let row: Vec<f64> = rep_avg[src..src + action_count].to_vec();
+                out.insert(key, row);
+            }
+
+            debug_assert_eq!(rep_children.len(), member_children.len());
+            for (&rc, &mc) in rep_children.iter().zip(member_children.iter()) {
+                expand_member_pair(solver, tree, ctx, cache, rc, mc, sigma, out);
+            }
+        }
+        (
+            FlatNode::Chance {
+                children: rep_children,
+                ..
+            },
+            FlatNode::Chance {
+                children: member_children,
+                ..
+            },
+        ) => {
+            debug_assert_eq!(rep_children.len(), member_children.len());
+            // The rep-side chance node may itself collapse: its non-rep members
+            // are sparse (None infosets). To reach allocated infosets we follow
+            // the rep-side REPRESENTATIVE child for each class, composing the
+            // nested member's sigma into the thread for member-side children.
+            match cache.get(rep_idx) {
+                Some(rc) if rc.symmetric => {
+                    for class in &rc.classes {
+                        let nested_rep = class.representative_child_idx;
+                        // Position of the rep child within the chance child list,
+                        // so we can pair it with the member-side child at the
+                        // same position (structural identity).
+                        let rep_pos = rep_children
+                            .iter()
+                            .position(|&c| c == nested_rep)
+                            .expect("rep child must be in chance children");
+                        for nested_member in &class.members {
+                            let mem_pos = rep_children
+                                .iter()
+                                .position(|&c| c == nested_member.child_idx)
+                                .expect("nested member child must be in chance children");
+                            // Walk the rep-side REPRESENTATIVE child (allocated)
+                            // against the member-side child at the nested
+                            // member's position, threading the COMPOSED sigma:
+                            // first apply this nested member's sigma, then the
+                            // outer thread. `sigma ∘ nested.sigma`.
+                            let composed: [Vec<u32>; 2] = [
+                                compose_sigma(&sigma[0], &nested_member.sigma[0]),
+                                compose_sigma(&sigma[1], &nested_member.sigma[1]),
+                            ];
+                            expand_member_pair(
+                                solver,
+                                tree,
+                                ctx,
+                                cache,
+                                rep_children[rep_pos],
+                                member_children[mem_pos],
+                                &composed,
+                                out,
+                            );
+                        }
+                    }
+                }
+                _ => {
+                    // No nested collapse on the rep side: every rep child is
+                    // allocated. Pair positionally with the member-side children
+                    // (same sigma — a chance deal that does not collapse crosses
+                    // no further permutation here).
+                    for (&rc, &mc) in rep_children.iter().zip(member_children.iter()) {
+                        expand_member_pair(solver, tree, ctx, cache, rc, mc, sigma, out);
+                    }
+                }
+            }
+        }
+        (FlatNode::Fold { .. }, FlatNode::Fold { .. })
+        | (FlatNode::Showdown { .. }, FlatNode::Showdown { .. }) => {
+            // Terminal leaves carry no strategy entry.
+        }
+        (rep_node, member_node) => {
+            panic!(
+                "Stage 3b lockstep mismatch: rep node {rep_idx} ({rep_node:?}) and \
+                 member node {member_idx} ({member_node:?}) have different FlatNode kinds; \
+                 the subtrees should be structurally identical"
+            );
+        }
+    }
 }
 
 /// Top-level vector-form DCFR solve for true range-vs-range Nash.
@@ -2786,12 +3039,17 @@ pub fn solve_range_vs_range_postflop_with_hands(
         rng_seed,
         &skip_mask,
     );
+    // Stage 3b — the member output expansion below needs the SAME cache the
+    // solve dispatched on (so class/member/sigma data matches exactly what the
+    // sparse allocation skipped). `solve_with_cache` consumes its argument, so
+    // clone here and retain the original for `build_average_strategy`. Flag-off
+    // yields an empty/inactive cache, so the clone + expansion are no-ops.
     solver.solve_with_cache(
         &tree,
         &eval_ctx,
         iterations,
         hand_weights,
-        Some(suit_iso_cache),
+        Some(suit_iso_cache.clone()),
     );
 
     // Final discount catch-up to mirror `dcfr.rs::DCFRSolver::solve`
@@ -2804,7 +3062,8 @@ pub fn solve_range_vs_range_postflop_with_hands(
         VectorDCFR::discount(info, final_iter, alpha, beta, gamma);
     }
 
-    let average_strategy = build_average_strategy(&solver, &tree, &eval_ctx);
+    let average_strategy =
+        build_average_strategy(&solver, &tree, &eval_ctx, Some(&suit_iso_cache));
     let decision_node_count = solver
         .infosets
         .iter()
@@ -3715,8 +3974,8 @@ mod tests {
             VectorDCFR::discount(info, final_iter_tmpl, 1.5, 0.0, 2.0);
         }
 
-        let strat_std = build_average_strategy(&solver_std, &tree_std, &ctx_std);
-        let strat_tmpl = build_average_strategy(&solver_tmpl, &tree_tmpl, &ctx_tmpl);
+        let strat_std = build_average_strategy(&solver_std, &tree_std, &ctx_std, None);
+        let strat_tmpl = build_average_strategy(&solver_tmpl, &tree_tmpl, &ctx_tmpl, None);
 
         assert_eq!(
             strat_std.len(),
@@ -3956,8 +4215,8 @@ mod tests {
             VectorDCFR::discount(info, final_iter_tmpl, 1.5, 0.0, 2.0);
         }
 
-        let strat_std = build_average_strategy(&solver_std, &tree_std, &ctx_std);
-        let strat_tmpl = build_average_strategy(&solver_tmpl, &tree_tmpl, &ctx_tmpl);
+        let strat_std = build_average_strategy(&solver_std, &tree_std, &ctx_std, None);
+        let strat_tmpl = build_average_strategy(&solver_tmpl, &tree_tmpl, &ctx_tmpl, None);
 
         assert_eq!(
             strat_std.len(),
@@ -4527,7 +4786,7 @@ mod tests {
         // Public-API average strategy (board-keyed) for the
         // exploitability / game-value walk, which is self-consistent per
         // board and needs no cross-board key mapping.
-        let public = build_average_strategy(&solver, &tree, &ctx);
+        let public = build_average_strategy(&solver, &tree, &ctx, None);
         (avg, node_player, public)
     }
 
@@ -5473,5 +5732,367 @@ mod tests {
             gv_delta <= TOL,
             "game-value delta {gv_delta:.3e} exceeds {TOL:.0e}",
         );
+    }
+
+    // ========================================================================
+    // perf/suit-iso Stage 3b — member OUTPUT expansion (full-output parity).
+    // ========================================================================
+
+    /// Dense iso-OFF full average-strategy map: every member-board node carries
+    /// its own infoset, so `build_average_strategy` emits the complete key set.
+    /// This is the REFERENCE the iso-ON expansion must reproduce exactly.
+    fn dense_full_strategy(
+        cfg: &HUNLConfig,
+        holes: &[[u8; 2]],
+        iters: u32,
+    ) -> HashMap<String, Vec<f64>> {
+        let initial = HUNLState::initial(std::sync::Arc::new(cfg.clone()));
+        let ctx = EvalContext::from_hand_lists(holes.to_vec(), holes.to_vec(), cfg.big_blind);
+        let placeholder = initial.clone_with_hole_cards([ctx.hole[0][0], ctx.hole[1][0]]);
+        let tree = BettingTree::build_with_mode(&placeholder, BettingTreeMode::TemplateExtract);
+
+        let mut solver = VectorDCFR::with_init_noise(&tree, ctx.hand_count, 1.5, 0.0, 2.0, 0.0, 0);
+        // Dense solve: no cache, all members converged.
+        solver.solve_with_cache(&tree, &ctx, iters, None, None);
+        let final_iter = solver.iteration;
+        let (a, b, g) = (solver.alpha, solver.beta, solver.gamma);
+        for info in solver.infosets.iter_mut().flatten() {
+            VectorDCFR::discount(info, final_iter, a, b, g);
+        }
+        build_average_strategy(&solver, &tree, &ctx, None)
+    }
+
+    /// Sparse iso-ON full average-strategy map: drives the SAME wiring the
+    /// production path uses (sparse allocation via `member_skip_mask`, solve via
+    /// `solve_with_cache` with the cache, then the Stage 3b member expansion in
+    /// `build_average_strategy`). Returns the map plus `members_expanded` — the
+    /// number of skipped member decision nodes the expansion was responsible for
+    /// (so the parity test can assert non-vacuity).
+    fn sparse_full_strategy(
+        cfg: &HUNLConfig,
+        holes: &[[u8; 2]],
+        iters: u32,
+    ) -> (HashMap<String, Vec<f64>>, usize) {
+        let initial = HUNLState::initial(std::sync::Arc::new(cfg.clone()));
+        let ctx = EvalContext::from_hand_lists(holes.to_vec(), holes.to_vec(), cfg.big_blind);
+        let placeholder = initial.clone_with_hole_cards([ctx.hole[0][0], ctx.hole[1][0]]);
+        let tree = BettingTree::build_with_mode(&placeholder, BettingTreeMode::TemplateExtract);
+
+        let reach = vec![1.0_f64; ctx.hand_count[0]];
+        let cache = crate::suit_iso::build_suit_iso_cache(
+            &tree.nodes,
+            &tree.dealt_cards,
+            &tree.initial_board(),
+            &ctx.hole,
+            &[&reach, &reach],
+        );
+        let skip_mask = crate::suit_iso::member_skip_mask(&tree.nodes, &cache);
+        // members_expanded = skipped DECISION nodes (those the dense pass omits
+        // and the Stage 3b walker must reconstruct).
+        let members_expanded = tree
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(idx, n)| matches!(n, FlatNode::Decision { .. }) && skip_mask[*idx])
+            .count();
+
+        let mut solver = VectorDCFR::with_init_noise_masked(
+            &tree,
+            ctx.hand_count,
+            1.5,
+            0.0,
+            2.0,
+            0.0,
+            0,
+            &skip_mask,
+        );
+        solver.solve_with_cache(&tree, &ctx, iters, None, Some(cache.clone()));
+        let final_iter = solver.iteration;
+        let (a, b, g) = (solver.alpha, solver.beta, solver.gamma);
+        for info in solver.infosets.iter_mut().flatten() {
+            VectorDCFR::discount(info, final_iter, a, b, g);
+        }
+        let map = build_average_strategy(&solver, &tree, &ctx, Some(&cache));
+        (map, members_expanded)
+    }
+
+    /// GATE A — full-output parity. For each of the four turn textures, the
+    /// iso-ON (sparse + Stage 3b expansion) average-strategy map must have the
+    /// IDENTICAL KEY SET and bit-exact (<=1e-12) values versus a dense iso-OFF
+    /// solve. RAINBOW (|S|=1) is the no-skip control (zero members expanded);
+    /// MONOTONE / TWO-TONE / PAIRED must expand >0 members (non-vacuous).
+    #[test]
+    fn suit_iso_full_output_parity() {
+        let card = card_to_int;
+        let textures: [(&str, Vec<u8>); 4] = [
+            ("RAINBOW", vec![card(14, 0), card(13, 1), card(10, 2), card(7, 3)]),
+            ("TWO-TONE", vec![card(14, 0), card(13, 0), card(10, 1), card(7, 1)]),
+            ("MONOTONE", vec![card(14, 0), card(13, 0), card(10, 0), card(7, 0)]),
+            ("PAIRED", vec![card(13, 0), card(13, 2), card(9, 1), card(4, 3)]),
+        ];
+        let range_ranks: [u8; 4] = [12, 11, 6, 5];
+        let iters: u32 = 48;
+        const TOL: f64 = 1e-12;
+
+        for (name, board) in &textures {
+            let cfg = collapse_turn_config(board);
+            let holes = collapse_symmetric_range(board, &range_ranks);
+            assert!(holes.len() >= 12, "{name}: range too small ({})", holes.len());
+
+            let dense = dense_full_strategy(&cfg, &holes, iters);
+            let (sparse, members_expanded) = sparse_full_strategy(&cfg, &holes, iters);
+
+            // (1) IDENTICAL KEY SETS — the 3a omission must be fully recovered.
+            let dense_keys: std::collections::HashSet<&String> = dense.keys().collect();
+            let sparse_keys: std::collections::HashSet<&String> = sparse.keys().collect();
+            let missing: Vec<&&String> = dense_keys.difference(&sparse_keys).collect();
+            let extra: Vec<&&String> = sparse_keys.difference(&dense_keys).collect();
+            assert!(
+                missing.is_empty(),
+                "[{name}] {} member-board keys MISSING from iso-ON output (e.g. {:?})",
+                missing.len(),
+                missing.iter().take(3).collect::<Vec<_>>(),
+            );
+            assert!(
+                extra.is_empty(),
+                "[{name}] {} keys present in iso-ON but not iso-OFF (e.g. {:?})",
+                extra.len(),
+                extra.iter().take(3).collect::<Vec<_>>(),
+            );
+
+            // (2) bit-exact values on every key.
+            let mut max_delta = 0.0_f64;
+            for (k, dv) in &dense {
+                let sv = sparse.get(k).expect("key set already proven equal");
+                assert_eq!(dv.len(), sv.len(), "[{name}] row len mismatch at key {k}");
+                for (a, b) in dv.iter().zip(sv.iter()) {
+                    max_delta = max_delta.max((a - b).abs());
+                }
+            }
+
+            println!(
+                "[{name}] keys={} (dense) / {} (iso-ON), members_expanded={members_expanded}, \
+                 max|Δ|={max_delta:.3e}",
+                dense.len(),
+                sparse.len(),
+            );
+
+            assert!(
+                max_delta <= TOL,
+                "[{name}] full-output value delta {max_delta:.3e} exceeds {TOL:.0e}",
+            );
+
+            // (3) non-vacuity: RAINBOW skips nothing; the rest must expand >0.
+            if *name == "RAINBOW" {
+                assert_eq!(
+                    members_expanded, 0,
+                    "RAINBOW (|S|=1) must expand zero members (no-skip control)"
+                );
+            } else {
+                assert!(
+                    members_expanded > 0,
+                    "[{name}] expected >0 expanded members — gate is vacuous"
+                );
+            }
+        }
+    }
+
+    /// GATE A (rayon variant) — confirm the `CFR_RAYON_CHANCE` chance-parallel
+    /// path agrees with a dense iso-OFF solve on full output. Rayon reorders FP
+    /// summation across chance branches, so the tolerance is looser (1e-9) than
+    /// the serial 1e-12 gate. Single texture (MONOTONE, the largest collapse) to
+    /// keep the test cheap.
+    #[test]
+    fn suit_iso_full_output_parity_rayon() {
+        let card = card_to_int;
+        let board = vec![card(14, 0), card(13, 0), card(10, 0), card(7, 0)]; // MONOTONE
+        let range_ranks: [u8; 4] = [12, 11, 6, 5];
+        let iters: u32 = 48;
+
+        let cfg = collapse_turn_config(&board);
+        let holes = collapse_symmetric_range(&board, &range_ranks);
+
+        // Dense reference WITHOUT rayon (serial, deterministic).
+        let dense = dense_full_strategy(&cfg, &holes, iters);
+
+        // Sparse iso-ON WITH rayon. Set the env var around the solve only.
+        std::env::set_var("CFR_RAYON_CHANCE", "1");
+        let (sparse, members_expanded) = sparse_full_strategy(&cfg, &holes, iters);
+        std::env::remove_var("CFR_RAYON_CHANCE");
+
+        let dense_keys: std::collections::HashSet<&String> = dense.keys().collect();
+        let sparse_keys: std::collections::HashSet<&String> = sparse.keys().collect();
+        assert_eq!(
+            dense_keys, sparse_keys,
+            "[rayon] iso-ON key set must equal dense iso-OFF key set"
+        );
+
+        let mut max_delta = 0.0_f64;
+        for (k, dv) in &dense {
+            let sv = sparse.get(k).unwrap();
+            for (a, b) in dv.iter().zip(sv.iter()) {
+                max_delta = max_delta.max((a - b).abs());
+            }
+        }
+        println!(
+            "[rayon MONOTONE] keys={}, members_expanded={members_expanded}, max|Δ|={max_delta:.3e}",
+            dense.len(),
+        );
+        assert!(members_expanded > 0, "rayon gate vacuous (no members expanded)");
+        assert!(
+            max_delta <= 1e-9,
+            "[rayon] full-output value delta {max_delta:.3e} exceeds 1e-9",
+        );
+    }
+
+    /// Focused depth-2 nested-member unit test: a river member under a turn
+    /// member. Asserts the COMPOSED sigma threaded by the Stage 3b walker equals
+    /// `sigma_outer ∘ sigma_inner` applied to the representative's hand indices.
+    ///
+    /// Construction: a MONOTONE flop-rooted subgame deals a turn card then a
+    /// river card. The flop is all-spades, so both the turn deal and the
+    /// nested river deal collapse over the absent suits — guaranteeing at least
+    /// one depth-2 member chain. We pull the two membership sigmas straight from
+    /// the cache and verify the walker's composition law against them.
+    #[test]
+    fn nested_member_sigma_composition_depth2() {
+        let card = card_to_int;
+        // MONOTONE flop (all spades) => both turn and river deals collapse over
+        // {h, d, c}. A flop-rooted config produces a turn chance node whose
+        // members each contain a river chance node that also collapses.
+        let board = vec![card(14, 0), card(13, 0), card(7, 0)]; // As Ks 7s flop
+        let mut cfg = collapse_turn_config(&board);
+        cfg.starting_street = Street::Flop;
+        cfg.initial_board = board.clone();
+
+        let range_ranks: [u8; 4] = [12, 11, 6, 5];
+        let holes = collapse_symmetric_range(&board, &range_ranks);
+        assert!(holes.len() >= 12, "range too small ({})", holes.len());
+
+        let initial = HUNLState::initial(std::sync::Arc::new(cfg.clone()));
+        let ctx = EvalContext::from_hand_lists(holes.clone(), holes.clone(), cfg.big_blind);
+        let placeholder = initial.clone_with_hole_cards([ctx.hole[0][0], ctx.hole[1][0]]);
+        let tree = BettingTree::build_with_mode(&placeholder, BettingTreeMode::TemplateExtract);
+        let reach = vec![1.0_f64; ctx.hand_count[0]];
+        let cache = crate::suit_iso::build_suit_iso_cache(
+            &tree.nodes,
+            &tree.dealt_cards,
+            &tree.initial_board(),
+            &ctx.hole,
+            &[&reach, &reach],
+        );
+        assert!(cache.is_active(), "monotone flop must collapse something");
+
+        // Find a turn chance node with a usable collapse whose NON-rep member
+        // subtree contains a usable river chance collapse -> a depth-2 chain.
+        let mut found_depth2 = false;
+        for outer_idx in 0..tree.nodes.len() {
+            let FlatNode::Chance { .. } = &tree.nodes[outer_idx] else {
+                continue;
+            };
+            let Some(outer) = cache.get(outer_idx) else {
+                continue;
+            };
+            if !outer.symmetric {
+                continue;
+            }
+            for outer_class in &outer.classes {
+                let outer_rep = outer_class.representative_child_idx;
+                for outer_member in &outer_class.members {
+                    if outer_member.child_idx == outer_rep {
+                        continue;
+                    }
+                    // Descend the MEMBER subtree to a nested chance node, and the
+                    // REP subtree in lockstep, until we hit a chance pair.
+                    if let Some((inner_rep_chance, inner_member_chance)) =
+                        first_chance_pair(&tree, outer_rep, outer_member.child_idx)
+                    {
+                        let Some(inner) = cache.get(inner_rep_chance) else {
+                            continue;
+                        };
+                        if !inner.symmetric {
+                            continue;
+                        }
+                        // The inner (rep-side) chance node carries the nested
+                        // collapse; its members' sigmas compose with the outer
+                        // member's sigma. Verify on player 0.
+                        let FlatNode::Chance {
+                            children: inner_rep_children,
+                            ..
+                        } = &tree.nodes[inner_rep_chance]
+                        else {
+                            unreachable!()
+                        };
+                        let FlatNode::Chance {
+                            children: inner_member_children,
+                            ..
+                        } = &tree.nodes[inner_member_chance]
+                        else {
+                            unreachable!()
+                        };
+                        assert_eq!(inner_rep_children.len(), inner_member_children.len());
+
+                        for inner_class in &inner.classes {
+                            for inner_member in &inner_class.members {
+                                if inner_member.child_idx
+                                    == inner_class.representative_child_idx
+                                {
+                                    continue;
+                                }
+                                // composed[h] = outer.sigma[inner.sigma[h]].
+                                let composed = compose_sigma(
+                                    &outer_member.sigma[0],
+                                    &inner_member.sigma[0],
+                                );
+                                // Independent recomputation: apply inner then
+                                // outer permutation, element by element.
+                                for h in 0..ctx.hand_count[0] {
+                                    let via_inner = inner_member.sigma[0][h] as usize;
+                                    let expect = outer_member.sigma[0][via_inner];
+                                    assert_eq!(
+                                        composed[h], expect,
+                                        "depth-2 composed sigma mismatch at hand {h}: \
+                                         got {} want {expect}",
+                                        composed[h],
+                                    );
+                                }
+                                found_depth2 = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            found_depth2,
+            "expected at least one depth-2 (river member under turn member) chain \
+             on a monotone flop"
+        );
+    }
+
+    /// Lockstep-descend the `rep` and `member` subtrees (Decision children pair
+    /// positionally) until the FIRST `FlatNode::Chance` pair, returning their
+    /// indices. Used by the depth-2 nested-member test to locate the inner
+    /// (river) chance node under an outer (turn) member.
+    fn first_chance_pair(
+        tree: &BettingTree,
+        rep: usize,
+        member: usize,
+    ) -> Option<(usize, usize)> {
+        match (&tree.nodes[rep], &tree.nodes[member]) {
+            (FlatNode::Chance { .. }, FlatNode::Chance { .. }) => Some((rep, member)),
+            (
+                FlatNode::Decision { children: rc, .. },
+                FlatNode::Decision { children: mc, .. },
+            ) => {
+                for (&r, &m) in rc.iter().zip(mc.iter()) {
+                    if let Some(pair) = first_chance_pair(tree, r, m) {
+                        return Some(pair);
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
     }
 }
