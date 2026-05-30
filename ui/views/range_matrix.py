@@ -711,6 +711,28 @@ def _selected_player(state: AppState) -> int:
     return selected
 
 
+def _matrix_player(state: AppState, snapshot: object | None) -> int:
+    """Return the seat whose range + strategy the matrix projects.
+
+    The matrix shows *whose decision it is*: the player TO ACT at the
+    currently-selected tree node (``snapshot.player_to_act``). The combo
+    inspector, the 13x13 grid, and the header subtitle must ALL agree on
+    this seat — otherwise the grid lights up the acting player's hand
+    (e.g. P1's QQ) while the inspector reports the hero's combos (P0's
+    AhKc), so the lit cell reads "QQ (0 combos)" (P3). Falling back to
+    the input-tab selection (``_selected_player``) only when no node
+    snapshot resolves keeps the pre-solve / chance-node view coherent.
+
+    This is the single source of truth for the "matrix seat" so the three
+    render paths can never drift apart again.
+    """
+
+    node_player = _snapshot_player(snapshot) if snapshot is not None else None
+    if node_player is not None and node_player in (0, 1):
+        return node_player
+    return _selected_player(state)
+
+
 def _show_frequencies(state: AppState) -> bool:
     prefs = _safe_state_field(state, "prefs", None)
     if prefs is None:
@@ -752,13 +774,10 @@ def _build_grid_summaries(
     # snapshot's ``player_to_act``; the displayed range must match that
     # same player or the per-combo strategy lookup queries one player's
     # range with the other player's infoset (incoherent cells when the
-    # navigated node belongs to the opponent). Fall back to the input-tab
-    # selection when no node snapshot resolves (pre-solve / chance node).
-    node_player = _snapshot_player(snapshot) if snapshot is not None else None
-    if node_player is not None and node_player in (0, 1):
-        grid_player = node_player
-    else:
-        grid_player = _selected_player(state)
+    # navigated node belongs to the opponent). ``_matrix_player`` is the
+    # shared seat resolver used by the grid, the combo inspector, and the
+    # header subtitle so the three never disagree (P3).
+    grid_player = _matrix_player(state, snapshot)
     range_ = _current_range(state, grid_player)
 
     rendered: list[_CellRender] = []
@@ -968,14 +987,21 @@ class _ComboRow:
 
 
 def _build_combo_rows(state: AppState, hand_class: str) -> list[_ComboRow]:
-    range_ = _current_range(state, _selected_player(state))
+    # P3: the inspector must describe the SAME seat the grid lights up —
+    # the player to act at the selected node — not always the input-tab
+    # hero. Resolving the range against ``_selected_player`` while the
+    # snapshot's strategy lookup used the node's ``player_to_act`` is what
+    # produced the "QQ (0 combos)" mismatch (grid showed P1's QQ; inspector
+    # queried P0's range, which holds AhKc not QQ). ``_matrix_player`` ties
+    # the range, the strategy player, and the legal actions to one seat.
+    snapshot = _current_tree_snapshot(state)
+    player = _matrix_player(state, snapshot)
+    range_ = _current_range(state, player)
     if range_ is None:
         return []
     board_cards = set(_current_board(state))
     strategy = _current_strategy(state)
-    snapshot = _current_tree_snapshot(state)
     state_obj = _snapshot_state(snapshot)
-    player = _snapshot_player(snapshot)
     legal_actions = _snapshot_legal_actions(snapshot)
 
     rows: list[_ComboRow] = []
@@ -1300,11 +1326,10 @@ def _matrix_subtitle(state: AppState) -> str:
     hero_player = int(getattr(spot, "hero_player", 0)) if spot is not None else 0
     # When a decision-tree node is selected, the "to act" player is the
     # node's ``player_to_act`` (so the header tracks the navigated node,
-    # not just the input-tab selection). Fall back to the rendered slot
-    # when there's no resolvable node (pre-solve root view).
+    # not just the input-tab selection). ``_matrix_player`` is the shared
+    # seat resolver — header, grid, and inspector all read it (P3).
     snapshot = _current_tree_snapshot(state)
-    node_player = _snapshot_player(snapshot) if snapshot is not None else None
-    player = node_player if node_player is not None else _selected_player(state)
+    player = _matrix_player(state, snapshot)
     if spot is not None and getattr(spot, "rvr_mode", False):
         position = "aggressor" if hero_player == 0 else "defender"
         return (

@@ -390,3 +390,17 @@ F01 fast postflop solve (river subgame <1s) · F02 decision tree populates · F0
 
 ## Merge path (per user workflow)
 Branch verified green → commit to `fix/gui-audit-message-leaks` → merge to `main` + private mirror is the **final gated step**, entangled with the engine reconciliation (this branch carries older engine files; main has the fast engine). UI work rides on top either way.
+
+## UPDATE 2 — P2/P3 RESOLVED (full UI suite 102 passed)
+- **P2 FIXED** — decision-tree node selection now drives the range matrix. Root cause was NOT the wiring (it existed) but `Spot.to_hunl_config()` **dropping a postflop subgame's pot/contributions** (river_tiny: solved pot 1000/(500,500) → round-trip 200/(100,100)) → wrong bet-size action abstraction (7 legal vs the solved 4) → `_strategy_for_combo`'s shape guard rejected every combo → all-zero strategy (looked "locked to root"). Fix: stash the exact solved `HUNLConfig` on `SolveRunner` (`_solved_config`, set in `start()`); `tree_browser._build_tree_from_runner` builds the browse/matrix tree from it (spot round-trip is now only a fallback). Live: matrix renders real strategy (QQ "MIX"), header tracks the node.
+- **P3 FIXED** — grid, combo inspector, and header now resolve the seat via one shared `_matrix_player(state, snapshot)` (player-to-act at the selected node) → no more "0 combos" mismatch. Verified for both hero-to-act and villain-to-act.
+- New regression test `tests/test_ui_node_matrix_p2p3.py`. py_compile + ruff clean.
+
+### NEW latent gaps (documented follow-ups; not blocking)
+- **Spot-model SPR gap:** `_spot_from_config` / `Spot.to_hunl_config()` drops a postflop subgame's pot+contributions, so a **hand-built** (not fixture-loaded) postflop spot misrepresents SPR. The P2 fix sidesteps it for the solved-config matrix/tree only. Real spot-model correctness issue → fix in the spot model.
+- **Test-isolation flake:** `test_ui_smoke.py::test_board_picker_accepts_three_cards` is order-dependent (global `_state_singleton` leaks `current_spot.starting_street` across test files). Passes standalone + in stable full-suite order (102 green); fixtures should call `reset_state_for_testing()` to make the suite order-independent.
+
+### User feedback (2026-05-30) — design direction captured
+- Solver feels flat / results only fold-call: largely the **Concrete (dev-only) / river-subgame degenerate** reality; rich raise+bet-size+mixed strategies come with the **RvR engine**. Display richness (action/bet-size breakdown) is **engine-gated** — defer (engine will define the bet-size menu + street tree; don't build twice).
+- **Safe non-blocking polish (won't be invalidated):** real card graphics (♠♥♦♣ + color) for board/labels/inspector; matrix color/contrast; visual dress-up. *(do after P2/P3; pending user go-ahead)*
+- **Chain solve** today = preflop→FLOP chain by hand CLASS (action-seq + flop picker), postflop step engine-gated. User's intent = specific-hole-card **preflop→river walkthrough** with rec + range per street → today's tab is a partial version. Decision pending: clarify-now vs build-toward-the-walkthrough.

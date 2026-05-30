@@ -552,18 +552,33 @@ def _build_tree_from_runner(state: AppState) -> SolveTree | None:
         if isinstance(cached_tree, SolveTree):
             return cached_tree
 
-    # Recover the Spot that produced this result; build the game graph.
-    solve_session = _safe_state_field(state, "current_solve", None)
-    spot = getattr(solve_session, "spot", None) or _safe_state_field(
-        state, "current_spot", None
-    )
-    if spot is None:
-        return None
+    # Recover the config that produced this result, then build the game
+    # graph. PREFER the exact config the solve ran against (``runner.
+    # _solved_config``, stashed by ``SolveRunner.start``): the ``Spot`` ->
+    # ``HUNLConfig`` round-trip (``to_hunl_config``) does NOT preserve a
+    # postflop subgame's pot / contributions, so a tree rebuilt from the
+    # spot can land on a different action abstraction (more bet sizes) than
+    # the strategy vectors were indexed by. That mismatch silently zeroed
+    # every per-combo lookup in the range matrix (P2). The spot is the
+    # fallback only when no solved config was stashed (legacy / external
+    # result injection).
+    config = getattr(runner, "_solved_config", None)
+    if config is None:
+        solve_session = _safe_state_field(state, "current_solve", None)
+        spot = getattr(solve_session, "spot", None) or _safe_state_field(
+            state, "current_spot", None
+        )
+        if spot is None:
+            return None
+        try:
+            config = spot.to_hunl_config()
+        except Exception:  # noqa: BLE001 -- a malformed spot must not crash the UI
+            logger.exception("tree_browser: failed to derive config from spot")
+            return None
     try:
-        config = spot.to_hunl_config()
         game = HUNLPoker(config=config)
         tree = SolveTree(game, result)
-    except Exception:  # noqa: BLE001 -- a malformed spot must not crash the UI
+    except Exception:  # noqa: BLE001 -- a malformed config must not crash the UI
         logger.exception("tree_browser: failed to build SolveTree from result")
         return None
 

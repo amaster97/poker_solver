@@ -972,6 +972,12 @@ class SolveRunner:
         self._stop_event: threading.Event = threading.Event()
         self._lock: threading.Lock = threading.Lock()
         self.result: SolveResult | None = None
+        # P2: the exact ``HUNLConfig`` the current/last solve ran against.
+        # Set by ``start(...)``; read by ``tree_browser._build_tree_from_runner``
+        # so the browse/matrix tree shares the SOLVED action abstraction (the
+        # spot round-trip can otherwise drop a postflop subgame's pot and
+        # produce a mismatched legal-action count). ``None`` until first solve.
+        self._solved_config: Any | None = None
         self.iteration: int = 0
         self.expl_history: list[tuple[int, float]] = []  # (iter, expl_mBB_per_pot)
         self.status: str = "idle"  # idle | running | paused | done | stopped | error
@@ -1263,6 +1269,18 @@ class SolveRunner:
             # their result holder (mirrors the preflop_chart pattern).
             self._mode = "chained" if solver_mode == "chained" else self.__dict__.get("_mode", "")
         config = game.config
+        # P2 fix: stash the EXACT config this solve runs against. The
+        # finished ``SolveResult`` carries no config of its own, and the
+        # ``Spot`` round-trip (``_spot_from_config`` -> ``to_hunl_config``)
+        # does NOT preserve a postflop subgame's pot / contributions — so a
+        # tree rebuilt from the spot can land on a DIFFERENT action
+        # abstraction (e.g. 7 legal bet sizes vs the 4 the strategy was
+        # solved with). That shape mismatch silently zeroed every per-combo
+        # strategy lookup in the range matrix (``_strategy_for_combo``
+        # rejects an arr whose length != len(legal_actions)). Keeping the
+        # solved config here lets the tree-browser / matrix project against
+        # the very abstraction the strategy vectors were indexed by.
+        self._solved_config = config
         self._thread = threading.Thread(
             target=self._worker,
             kwargs={
