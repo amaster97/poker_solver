@@ -4066,4 +4066,374 @@ mod tests {
             "max diff must be finite (got {max_abs_diff})"
         );
     }
+
+    // ------------------------------------------------------------------
+    // Suit-iso STAGE 2a — empirical premise validation (TEST-ONLY).
+    //
+    // The board-collapse feature (stage 2b/3) assumes that two FULL boards
+    // related by a suit permutation σ (B2 = σ(B1)), solved INDEPENDENTLY
+    // with the EXISTING solver on a suit-SYMMETRIC range, converge to
+    // PERMUTED-EQUAL strategies and EQUAL game value / exploitability:
+    //   strategy_on_B2[h] == strategy_on_B1[σ⁻¹(h)]
+    //   game_value(B1) == game_value(B2)
+    //   exploitability(B1) == exploitability(B2)
+    // This test confirms that premise empirically and, crucially, isolates
+    // the interaction with the PR-90 regret-INIT noise: noise is seeded by
+    // a GLOBAL `PcsRng` stream consumed in (node-order, h*A+a slot-order),
+    // NOT keyed to the concrete hand a slot represents — so the noise on
+    // B1's hand `h` lands on B2's hand `h` (a DIFFERENT concrete hand,
+    // σ(B1's hand h)), breaking the symmetry. Hence the premise holds
+    // bit-exactly only with noise OFF (or noise re-seeded by a canonical
+    // infoset key). We quantify both configurations.
+    // ------------------------------------------------------------------
+
+    /// SUITS = "shdc" => s=0, h=1, d=2, c=3.
+    const SUIT_S: u8 = 0;
+    const SUIT_H: u8 = 1;
+    const SUIT_D: u8 = 2;
+    const SUIT_C: u8 = 3;
+
+    /// σ = swap suits s <-> h (= `SUIT_PERMUTATIONS[6]`), a genuine
+    /// relabeling that is NOT in B1's stabilizer (B1 has two spades, σ(B1)
+    /// has two hearts), so B1 and σ(B1) are distinct boards / non-trivial.
+    const SIGMA: [u8; 4] = [1, 0, 2, 3];
+
+    /// Apply a suit permutation to a card (rank fixed, suit relabeled).
+    /// Local mirror of `suit_iso::apply_perm_to_card` for hole pairs.
+    fn perm_card(perm: &[u8; 4], c: u8) -> u8 {
+        crate::suit_iso::apply_perm_to_card(perm, c)
+    }
+
+    fn perm_hole(perm: &[u8; 4], h: [u8; 2]) -> [u8; 2] {
+        let mut out = [perm_card(perm, h[0]), perm_card(perm, h[1])];
+        out.sort_unstable();
+        out
+    }
+
+    /// Build the cap-2 river fixture: B1 = As Ks 7h 2d 3c and a
+    /// suit-SYMMETRIC, board-disjoint range. `raise_cap = 2` + two bet
+    /// sizes give genuinely mixed multi-action infosets. The range is the
+    /// union over a small rank set of ALL suit combos that avoid the
+    /// B1 ∪ B2 board card union (which is σ-invariant), so it is closed
+    /// under σ for BOTH players.
+    fn iso_river_config(board: &[u8]) -> HUNLConfig {
+        HUNLConfig {
+            starting_stack: 1000,
+            small_blind: 50,
+            big_blind: 100,
+            ante: 0,
+            starting_street: Street::River,
+            initial_board: board.to_vec(),
+            initial_pot: 1000,
+            initial_contributions: [500, 500],
+            initial_hole_cards: None,
+            preflop_raise_cap: 4,
+            postflop_raise_cap: 2,
+            bet_size_fractions: vec![0.5, 1.0],
+            include_all_in: false,
+            force_allin_threshold: 1,
+            min_bet_bb: 1,
+            rake_rate: 0.0,
+            rake_cap: 0,
+            abstraction_path: None,
+            abstraction_version: None,
+            use_pcs: false,
+        }
+    }
+
+    fn b1_board() -> Vec<u8> {
+        vec![
+            card_to_int(14, SUIT_S), // As
+            card_to_int(13, SUIT_S), // Ks
+            card_to_int(7, SUIT_H),  // 7h
+            card_to_int(2, SUIT_D),  // 2d
+            card_to_int(3, SUIT_C),  // 3c
+        ]
+    }
+
+    /// σ-closed, board-disjoint range for one player. Rank set chosen for a
+    /// non-degenerate showdown (over/under pairs, made hands, air); all
+    /// four-suit combos per rank-pair are emitted then filtered against the
+    /// σ-invariant `B1 ∪ B2` board union, preserving σ-closure.
+    fn iso_symmetric_range(board_union: &std::collections::HashSet<u8>) -> Vec<[u8; 2]> {
+        let ranks: [u8; 6] = [14, 12, 9, 8, 5, 4]; // A, Q, 9, 8, 5, 4
+        let mut holes: Vec<[u8; 2]> = Vec::new();
+        for (i, &r0) in ranks.iter().enumerate() {
+            for &r1 in &ranks[i..] {
+                for s0 in 0u8..4 {
+                    for s1 in 0u8..4 {
+                        let c0 = card_to_int(r0, s0);
+                        let c1 = card_to_int(r1, s1);
+                        if c0 >= c1 {
+                            continue;
+                        }
+                        if board_union.contains(&c0) || board_union.contains(&c1) {
+                            continue;
+                        }
+                        holes.push([c0, c1]);
+                    }
+                }
+            }
+        }
+        holes
+    }
+
+    /// Node-aligned solve result: `(avg_per_node, player_per_node,
+    /// board_keyed_strategy)`. `avg_per_node[i]` is `Some(rows)` (row-major
+    /// `hand * action_count`) for a decision node, `None` otherwise;
+    /// `player_per_node[i]` is the deciding player (`usize::MAX` for
+    /// non-decision nodes); the last element is the public, board-keyed
+    /// average strategy for the exploitability walk.
+    type IsoNodeAligned = (Vec<Option<Vec<f64>>>, Vec<usize>, HashMap<String, Vec<f64>>);
+
+    /// Node-aligned average-strategy snapshot. Because the betting tree is
+    /// board-independent (the board only changes the `key_suffix` strings,
+    /// never the topology), the snapshots for B1 and B2 are index-for-index
+    /// aligned, letting us compare per (node, hand) without any fragile
+    /// key-string surgery.
+    fn solve_node_aligned(
+        cfg: &HUNLConfig,
+        holes: &[[u8; 2]],
+        iters: u32,
+        noise: f64,
+        seed: u64,
+    ) -> IsoNodeAligned {
+        let initial = HUNLState::initial(std::sync::Arc::new(cfg.clone()));
+        let ctx = EvalContext::from_hand_lists(holes.to_vec(), holes.to_vec(), cfg.big_blind);
+        let placeholder = initial.clone_with_hole_cards([ctx.hole[0][0], ctx.hole[1][0]]);
+        let tree = BettingTree::build_with_mode(&placeholder, BettingTreeMode::Standard);
+        let mut solver = VectorDCFR::with_init_noise(
+            &tree,
+            ctx.hand_count,
+            1.5,
+            0.0,
+            2.0,
+            noise,
+            seed,
+        );
+        solver.solve(&tree, &ctx, iters, None);
+        let final_iter = solver.iteration;
+        let (a, b, g) = (solver.alpha, solver.beta, solver.gamma);
+        for info in solver.infosets.iter_mut().flatten() {
+            VectorDCFR::discount(info, final_iter, a, b, g);
+        }
+        // Node-aligned per-infoset average strategy + the per-node player
+        // (so the caller maps hand indices with the right player's range).
+        let mut avg: Vec<Option<Vec<f64>>> = Vec::with_capacity(solver.infosets.len());
+        let mut node_player: Vec<usize> = Vec::with_capacity(solver.infosets.len());
+        for (node_idx, slot) in solver.infosets.iter().enumerate() {
+            match slot {
+                Some(info) => {
+                    let mut rows = vec![0.0_f64; info.hand_count * info.action_count];
+                    VectorDCFR::compute_avg_strategy(info, &mut rows);
+                    avg.push(Some(rows));
+                    let player = match &tree.nodes[node_idx] {
+                        FlatNode::Decision { player, .. } => *player as usize,
+                        _ => unreachable!(),
+                    };
+                    node_player.push(player);
+                }
+                None => {
+                    avg.push(None);
+                    node_player.push(usize::MAX);
+                }
+            }
+        }
+        // Public-API average strategy (board-keyed) for the
+        // exploitability / game-value walk, which is self-consistent per
+        // board and needs no cross-board key mapping.
+        let public = build_average_strategy(&solver, &tree, &ctx);
+        (avg, node_player, public)
+    }
+
+    /// Max per-(node, hand, action) strategy delta between B1 and B2 under
+    /// the σ-induced hand-index permutation, and the matching game-value /
+    /// exploitability deltas. `hand_map[p][h]` is the index, in B2's
+    /// player-`p` hole list, of σ(B1's player-`p` hand h).
+    #[allow(clippy::too_many_arguments)]
+    fn iso_compare(
+        avg_b1: &[Option<Vec<f64>>],
+        avg_b2: &[Option<Vec<f64>>],
+        node_player: &[usize],
+        hand_map: &[Vec<u32>; 2],
+        action_counts: &[usize],
+    ) -> f64 {
+        let mut max_delta = 0.0_f64;
+        for node_idx in 0..avg_b1.len() {
+            let (rows1, rows2) = match (&avg_b1[node_idx], &avg_b2[node_idx]) {
+                (Some(r1), Some(r2)) => (r1, r2),
+                (None, None) => continue,
+                _ => panic!("node {node_idx} infoset presence mismatch between B1 and B2"),
+            };
+            let p = node_player[node_idx];
+            let a = action_counts[node_idx];
+            let hand_count = hand_map[p].len();
+            for h in 0..hand_count {
+                let h2 = hand_map[p][h] as usize;
+                for action in 0..a {
+                    let v1 = rows1[h * a + action];
+                    let v2 = rows2[h2 * a + action];
+                    max_delta = max_delta.max((v1 - v2).abs());
+                }
+            }
+        }
+        max_delta
+    }
+
+    #[test]
+    fn iso_boards_solve_to_permuted_equal() {
+        let b1 = b1_board();
+        let b2: Vec<u8> = b1.iter().map(|&c| perm_card(&SIGMA, c)).collect();
+        assert_ne!(b1, b2, "σ must produce a genuinely different board");
+
+        // σ-invariant board-card union -> the range filter preserves
+        // σ-closure for both players on both boards.
+        let mut board_union: std::collections::HashSet<u8> = b1.iter().copied().collect();
+        board_union.extend(b2.iter().copied());
+
+        let holes_b1 = iso_symmetric_range(&board_union);
+        // Sanity: the range is genuinely closed under σ (each σ-image is in
+        // the same list) — the precondition for an isomorphic game.
+        let set_b1: std::collections::HashSet<[u8; 2]> = holes_b1.iter().copied().collect();
+        for &h in &holes_b1 {
+            assert!(
+                set_b1.contains(&perm_hole(&SIGMA, h)),
+                "range must be closed under σ (got open hand {h:?})"
+            );
+        }
+        assert!(holes_b1.len() >= 12, "range too small to exercise mixing");
+
+        let cfg_b1 = iso_river_config(&b1);
+        let cfg_b2 = iso_river_config(&b2);
+
+        // B2's hole list = the same enumeration, board-disjoint for B2.
+        // Because `board_union` is σ-invariant, this equals σ(holes_b1) as a
+        // set, so the σ-image of every B1 hand resolves into it.
+        let holes_b2 = iso_symmetric_range(&board_union);
+
+        // hand_map[p][h] = index in holes_b2 of σ(holes_b1[h]). holes_b1 ==
+        // holes_b2 here (identical filtered enumeration), so we can use one
+        // hole index for both; build it via the stage-1 primitives.
+        let hole_index_b2 = crate::suit_iso::build_hole_index(&holes_b2);
+        let sigma_hand_map =
+            crate::suit_iso::hand_index_permutation(&holes_b1, &hole_index_b2, &SIGMA);
+        let hand_map: [Vec<u32>; 2] = [sigma_hand_map.clone(), sigma_hand_map];
+
+        let iters: u32 = 64;
+
+        // Precompute action counts per node (same tree for B1 and B2).
+        let initial = HUNLState::initial(std::sync::Arc::new(cfg_b1.clone()));
+        let placeholder = initial.clone_with_hole_cards([holes_b1[0], holes_b1[1]]);
+        let tree = BettingTree::build_with_mode(&placeholder, BettingTreeMode::Standard);
+        let action_counts: Vec<usize> = tree
+            .nodes
+            .iter()
+            .map(|n| match n {
+                FlatNode::Decision { actions, .. } => actions.len(),
+                _ => 0,
+            })
+            .collect();
+        let multi_action = action_counts.iter().filter(|&&a| a >= 2).count();
+        let max_actions = action_counts.iter().copied().max().unwrap_or(0);
+        assert!(multi_action > 0, "fixture must have multi-action infosets");
+
+        // ---- Configuration A: init noise in its DEFAULT (off) state. ----
+        let (avg_b1_off, np_off, pub_b1_off) =
+            solve_node_aligned(&cfg_b1, &holes_b1, iters, 0.0, 0);
+        let (avg_b2_off, np_off2, pub_b2_off) =
+            solve_node_aligned(&cfg_b2, &holes_b2, iters, 0.0, 0);
+        assert_eq!(np_off, np_off2, "tree topology must match between boards");
+
+        let strat_delta_off = iso_compare(
+            &avg_b1_off,
+            &avg_b2_off,
+            &np_off,
+            &hand_map,
+            &action_counts,
+        );
+
+        let expl_b1_off = crate::exploit::compute_exploitability_and_value(&cfg_b1, &pub_b1_off);
+        let expl_b2_off = crate::exploit::compute_exploitability_and_value(&cfg_b2, &pub_b2_off);
+        let gv_delta_off = (expl_b1_off.game_value - expl_b2_off.game_value).abs();
+        let ex_delta_off = (expl_b1_off.exploitability - expl_b2_off.exploitability).abs();
+
+        // ---- Configuration B: init noise ENABLED (default global seed). ----
+        let noise = 1e-6_f64;
+        let (avg_b1_on, np_on, _pub_b1_on) =
+            solve_node_aligned(&cfg_b1, &holes_b1, iters, noise, 1);
+        let (avg_b2_on, np_on2, _pub_b2_on) =
+            solve_node_aligned(&cfg_b2, &holes_b2, iters, noise, 1);
+        assert_eq!(np_on, np_on2, "tree topology must match between boards");
+        let strat_delta_on =
+            iso_compare(&avg_b1_on, &avg_b2_on, &np_on, &hand_map, &action_counts);
+
+        // Surface a representative mixed row to prove the strategies are
+        // non-degenerate (a strictly-interior probability, not all 0/1).
+        let mut sample_mixed: Option<Vec<f64>> = None;
+        'outer: for (node_idx, slot) in avg_b1_off.iter().enumerate() {
+            if let Some(rows) = slot {
+                let a = action_counts[node_idx];
+                for h in 0..hand_map[np_off[node_idx]].len() {
+                    let row = &rows[h * a..h * a + a];
+                    if row.iter().any(|&p| p > 1e-3 && p < 1.0 - 1e-3) {
+                        sample_mixed = Some(row.to_vec());
+                        break 'outer;
+                    }
+                }
+            }
+        }
+
+        println!(
+            "iso_boards_solve_to_permuted_equal:\n  \
+             hands/player = {}, decision infosets = {}, multi-action infosets = {}, \
+             max actions/infoset = {}, iters = {}\n  \
+             [noise OFF] max |strat σ-Δ| = {strat_delta_off:.3e}, \
+             |game_value Δ| = {gv_delta_off:.3e}, |exploit Δ| = {ex_delta_off:.3e}\n  \
+             [noise ON  (ε={noise:.0e}, seed=1)] max |strat σ-Δ| = {strat_delta_on:.3e}",
+            holes_b1.len(),
+            avg_b1_off.iter().filter(|s| s.is_some()).count(),
+            multi_action,
+            max_actions,
+            iters,
+        );
+        println!("  sample mixed strategy row (proves non-degenerate): {sample_mixed:?}");
+        println!(
+            "  game_value: B1 = {:.12}, B2 = {:.12}",
+            expl_b1_off.game_value, expl_b2_off.game_value
+        );
+        println!(
+            "  exploitability: B1 = {:.12}, B2 = {:.12}",
+            expl_b1_off.exploitability, expl_b2_off.exploitability
+        );
+
+        // ---- ASSERTIONS ----
+        // With noise OFF the premise must hold to tight tolerance:
+        // strategies permuted-equal (1e-4 per probability), game value
+        // (1e-5) and exploitability (1e-5) equal.
+        assert!(
+            strat_delta_off < 1e-4,
+            "[noise OFF] σ-permuted strategy delta {strat_delta_off:.3e} exceeds 1e-4 — \
+             suit-iso premise FAILS even without noise"
+        );
+        assert!(
+            gv_delta_off < 1e-5,
+            "[noise OFF] game_value delta {gv_delta_off:.3e} exceeds 1e-5"
+        );
+        assert!(
+            ex_delta_off < 1e-5,
+            "[noise OFF] exploitability delta {ex_delta_off:.3e} exceeds 1e-5"
+        );
+
+        // With the DEFAULT global-seed noise the σ-symmetry is broken: the
+        // RNG stream assigns noise by slot index, not by concrete hand, so
+        // B1's hand h and B2's σ(h) get DIFFERENT noise and diverge. We
+        // assert the divergence is materially larger than the noise-off
+        // floor — this is the load-bearing finding for stage 2b.
+        assert!(
+            strat_delta_on > strat_delta_off,
+            "[noise ON] default global-seed noise was expected to BREAK σ-symmetry \
+             (on={strat_delta_on:.3e} vs off={strat_delta_off:.3e}); if it did not, \
+             re-check the noise seeding before relying on this finding"
+        );
+    }
 }
