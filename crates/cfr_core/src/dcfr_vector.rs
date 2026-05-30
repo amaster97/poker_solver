@@ -935,6 +935,48 @@ impl VectorDCFR {
         hand_weights: Option<[Vec<f64>; 2]>,
         prebuilt_suit_iso_cache: Option<crate::suit_iso::SuitIsoCache>,
     ) {
+        self.solve_with_opts(
+            tree,
+            eval_ctx,
+            iterations,
+            hand_weights,
+            prebuilt_suit_iso_cache,
+            None,
+            None,
+        );
+    }
+
+    /// Test-facing solve entry that accepts EXPLICIT overrides for the two
+    /// process-global env flags the solve path would otherwise read
+    /// (`CFR_TERMINAL_IE` via [`terminal_ie_enabled`] and `CFR_RAYON_CHANCE`
+    /// via [`crate::dcfr_vector_parallel::parallel_chance_enabled`]).
+    ///
+    /// **Why this exists.** Those env vars are process-global, and cargo runs
+    /// tests on parallel threads. A test that mutates one (e.g. the IE parity
+    /// tests setting `CFR_TERMINAL_IE`, or the rayon parity variant setting
+    /// `CFR_RAYON_CHANCE`) leaks the flag into any OTHER test's solve running
+    /// concurrently, making flag-sensitive parity gates order-dependent. By
+    /// threading the flags explicitly, every test solve is deterministic and
+    /// self-contained regardless of scheduling — no `set_var`/`remove_var`.
+    ///
+    /// **Invariant — production parity.** `None` means "read the env" (the
+    /// production behaviour, byte-identical to the pre-override path);
+    /// `Some(v)` forces the flag to `v` WITHOUT touching the environment.
+    /// Production callers pass `None`/`None`, so the env-driven behaviour is
+    /// unchanged. Suit-iso has no override param because it is already fully
+    /// controllable through the prebuilt cache argument (a supplied active
+    /// cache drives the collapse without consulting `CFR_SUIT_ISO`).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn solve_with_opts(
+        &mut self,
+        tree: &BettingTree,
+        eval_ctx: &EvalContext,
+        iterations: u32,
+        hand_weights: Option<[Vec<f64>; 2]>,
+        prebuilt_suit_iso_cache: Option<crate::suit_iso::SuitIsoCache>,
+        terminal_ie_override: Option<bool>,
+        rayon_override: Option<bool>,
+    ) {
         // Initial reach vectors per player. Brown's reference initializes
         // from `hand_weights_ptr_` (the per-hand range weights from the
         // `RiverGame`); we now plug per-combo fractional weights from
@@ -969,8 +1011,10 @@ impl VectorDCFR {
         // Read `CFR_TERMINAL_IE` ONCE per solve (mirroring `rayon_enabled`).
         // When set, the inclusion-exclusion terminal evaluator is used and
         // its precompute is built into the cache; when unset, no IE data is
-        // built and the legacy cached path runs unchanged.
-        let terminal_ie = terminal_ie_enabled();
+        // built and the legacy cached path runs unchanged. An explicit
+        // override (test path) bypasses the env read entirely; `None` reads
+        // the env (production), keeping that path byte-identical.
+        let terminal_ie = terminal_ie_override.unwrap_or_else(terminal_ie_enabled);
         // `perf/suit-iso` Stage 2b — read `CFR_SUIT_ISO` ONCE per solve. When
         // set, build the value-collapse cache (per-chance-node iso classes +
         // per-member hand-index permutations) from the INITIAL reach vectors
@@ -1025,7 +1069,8 @@ impl VectorDCFR {
         // traversal gets parallelized (the rest of the tree stays
         // sequential to avoid oversubscription). Default (env var
         // unset) is bit-identical to pre-PR-4.
-        let rayon_enabled = crate::dcfr_vector_parallel::parallel_chance_enabled();
+        let rayon_enabled = rayon_override
+            .unwrap_or_else(crate::dcfr_vector_parallel::parallel_chance_enabled);
         // v1.10 PR-1 — pull the thread-local bump arena once and reuse
         // across all iterations. Per-`traverse` scratch buffers
         // (`strategy`, `action_values`, `next_reach`) come from this
@@ -2920,6 +2965,44 @@ pub fn solve_range_vs_range_postflop_with_hands(
     rng_seed: u64,
     hand_weights: Option<[Vec<f64>; 2]>,
 ) -> Result<VectorSolveOutput, String> {
+    // Production path: both env-flag overrides are `None`, so the solve reads
+    // `CFR_TERMINAL_IE` / `CFR_RAYON_CHANCE` from the environment exactly as
+    // before (byte-identical behaviour).
+    solve_range_vs_range_postflop_with_opts(
+        config,
+        hand_lists,
+        iterations,
+        alpha,
+        beta,
+        gamma,
+        regret_init_noise,
+        rng_seed,
+        hand_weights,
+        None,
+        None,
+    )
+}
+
+/// End-to-end RvR solve with EXPLICIT overrides for the two process-global
+/// env flags (`CFR_TERMINAL_IE`, `CFR_RAYON_CHANCE`). `None` => read env
+/// (production); `Some(v)` => force the flag to `v` without touching the
+/// environment. Exists so flag-sensitive tests (the IE / rayon parity gates)
+/// are deterministic under cargo's parallel scheduler instead of racing on
+/// leaked process-global env mutations. See [`VectorDCFR::solve_with_opts`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn solve_range_vs_range_postflop_with_opts(
+    config: &HUNLConfig,
+    hand_lists: Option<[Vec<[u8; 2]>; 2]>,
+    iterations: u32,
+    alpha: f64,
+    beta: f64,
+    gamma: f64,
+    regret_init_noise: f64,
+    rng_seed: u64,
+    hand_weights: Option<[Vec<f64>; 2]>,
+    terminal_ie_override: Option<bool>,
+    rayon_override: Option<bool>,
+) -> Result<VectorSolveOutput, String> {
     if config.initial_hole_cards.is_some() {
         return Err(
             "solve_range_vs_range_postflop requires initial_hole_cards = None; \
@@ -3044,12 +3127,14 @@ pub fn solve_range_vs_range_postflop_with_hands(
     // sparse allocation skipped). `solve_with_cache` consumes its argument, so
     // clone here and retain the original for `build_average_strategy`. Flag-off
     // yields an empty/inactive cache, so the clone + expansion are no-ops.
-    solver.solve_with_cache(
+    solver.solve_with_opts(
         &tree,
         &eval_ctx,
         iterations,
         hand_weights,
         Some(suit_iso_cache.clone()),
+        terminal_ie_override,
+        rayon_override,
     );
 
     // Final discount catch-up to mirror `dcfr.rs::DCFRSolver::solve`
@@ -4258,11 +4343,13 @@ mod tests {
     /// recursion (reach-weighted regret/strategy accumulation over many
     /// iterations), not just at a single leaf.
     ///
-    /// **Isolation contract.** `CFR_TERMINAL_IE` is process-global and
-    /// cargo runs tests on parallel threads, so this test must be run
-    /// with `--test-threads=1` (or `--exact` in isolation). It does the
-    /// baseline (flag UNSET) solve FIRST, then sets the var, then removes
-    /// it, leaving the environment clean for any subsequent test.
+    /// **Isolation contract.** The IE flag is threaded EXPLICITLY into the
+    /// solve via [`solve_range_vs_range_postflop_with_opts`] (`Some(false)`
+    /// for the baseline, `Some(true)` for the IE path) instead of mutating
+    /// the process-global `CFR_TERMINAL_IE`. Rayon is also forced off
+    /// explicitly. This makes the test fully self-contained and
+    /// order-independent under cargo's parallel scheduler — no
+    /// `--test-threads=1` required, and no env state leaks to other tests.
     ///
     /// We boost `postflop_raise_cap`/`include_all_in` so the tree has
     /// genuine multi-action infosets (the default `tiny_river_rvr` tree
@@ -4283,17 +4370,19 @@ mod tests {
         cfg.include_all_in = true;
         let iters: u32 = 40;
 
-        // Step 1 — baseline with the flag UNSET (legacy cached path).
-        std::env::remove_var("CFR_TERMINAL_IE");
-        let out_off = solve_range_vs_range_postflop(&cfg, iters, 1.5, 0.0, 2.0)
-            .expect("flag-off solve must complete");
+        // Step 1 — baseline with the IE flag forced OFF (legacy cached path).
+        // The flag is threaded EXPLICITLY (no `set_var`/`remove_var`), so this
+        // test is deterministic regardless of cargo's parallel scheduler.
+        let out_off = solve_range_vs_range_postflop_with_opts(
+            &cfg, None, iters, 1.5, 0.0, 2.0, 0.0, 0, None, Some(false), Some(false),
+        )
+        .expect("flag-off solve must complete");
 
-        // Step 2 — same solve with the flag SET (inclusion-exclusion path).
-        std::env::set_var("CFR_TERMINAL_IE", "1");
-        let out_on = solve_range_vs_range_postflop(&cfg, iters, 1.5, 0.0, 2.0)
-            .expect("flag-on solve must complete");
-        // Restore clean environment regardless of the assertions below.
-        std::env::remove_var("CFR_TERMINAL_IE");
+        // Step 2 — same solve with the IE flag forced ON (inclusion-exclusion).
+        let out_on = solve_range_vs_range_postflop_with_opts(
+            &cfg, None, iters, 1.5, 0.0, 2.0, 0.0, 0, None, Some(true), Some(false),
+        )
+        .expect("flag-on solve must complete");
 
         assert_eq!(
             out_off.iterations, out_on.iterations,
@@ -4511,9 +4600,10 @@ mod tests {
     /// considering an IE default flip on the turn street.
     ///
     /// **Isolation contract** (identical to `ie_full_solve_matches_cached`):
-    /// `CFR_TERMINAL_IE` is process-global, so run with
-    /// `--test-threads=1 --exact`. The baseline (flag UNSET) solve runs
-    /// FIRST, then the var is set, then removed — leaving a clean env.
+    /// the IE flag is threaded EXPLICITLY via
+    /// [`solve_range_vs_range_postflop_with_opts`] (and rayon forced off),
+    /// not via the process-global `CFR_TERMINAL_IE`, so the test is
+    /// order-independent under parallel scheduling — no `--test-threads=1`.
     ///
     /// We boost `postflop_raise_cap`/`include_all_in` so the tree has
     /// genuine multi-action infosets (the default `tiny_turn_rvr` tree
@@ -4534,17 +4624,18 @@ mod tests {
         cfg.include_all_in = true;
         let iters: u32 = 24;
 
-        // Step 1 — baseline with the flag UNSET (legacy cached path).
-        std::env::remove_var("CFR_TERMINAL_IE");
-        let out_off = solve_range_vs_range_postflop(&cfg, iters, 1.5, 0.0, 2.0)
-            .expect("turn flag-off solve must complete");
+        // Step 1 — baseline with the IE flag forced OFF (legacy cached path).
+        // Flags threaded EXPLICITLY (no env mutation) for order-independence.
+        let out_off = solve_range_vs_range_postflop_with_opts(
+            &cfg, None, iters, 1.5, 0.0, 2.0, 0.0, 0, None, Some(false), Some(false),
+        )
+        .expect("turn flag-off solve must complete");
 
-        // Step 2 — same solve with the flag SET (inclusion-exclusion path).
-        std::env::set_var("CFR_TERMINAL_IE", "1");
-        let out_on = solve_range_vs_range_postflop(&cfg, iters, 1.5, 0.0, 2.0)
-            .expect("turn flag-on solve must complete");
-        // Restore clean environment regardless of the assertions below.
-        std::env::remove_var("CFR_TERMINAL_IE");
+        // Step 2 — same solve with the IE flag forced ON (inclusion-exclusion).
+        let out_on = solve_range_vs_range_postflop_with_opts(
+            &cfg, None, iters, 1.5, 0.0, 2.0, 0.0, 0, None, Some(true), Some(false),
+        )
+        .expect("turn flag-on solve must complete");
 
         assert_eq!(
             out_off.iterations, out_on.iterations,
@@ -5065,17 +5156,36 @@ mod tests {
         let placeholder = initial.clone_with_hole_cards([ctx.hole[0][0], ctx.hole[1][0]]);
         let tree = BettingTree::build_with_mode(&placeholder, BettingTreeMode::TemplateExtract);
 
-        // Drive the solve through the real env-flag path so the collapse fires
-        // inside `solve` exactly as production would.
+        // Drive the collapse via an EXPLICIT cache (not the `CFR_SUIT_ISO` env
+        // var) so this helper is deterministic under parallel scheduling. When
+        // `suit_iso` is requested we build the same value-collapse cache the
+        // env path would and hand it to the solve; otherwise we pass `None`
+        // (an inactive/empty cache => byte-identical to the flag-off path).
+        // IE and rayon are forced OFF explicitly for the same reason.
+        let reach0 = vec![1.0_f64; ctx.hand_count[0]];
+        let reach1 = vec![1.0_f64; ctx.hand_count[1]];
+        let solve_cache = if suit_iso {
+            Some(crate::suit_iso::build_suit_iso_cache(
+                &tree.nodes,
+                &tree.dealt_cards,
+                &tree.initial_board(),
+                &ctx.hole,
+                &[&reach0, &reach1],
+            ))
+        } else {
+            None
+        };
         let mut solver =
             VectorDCFR::with_init_noise(&tree, ctx.hand_count, 1.5, 0.0, 2.0, 0.0, 0);
-        if suit_iso {
-            std::env::set_var("CFR_SUIT_ISO", "1");
-        } else {
-            std::env::remove_var("CFR_SUIT_ISO");
-        }
-        solver.solve(&tree, &ctx, iters, None);
-        std::env::remove_var("CFR_SUIT_ISO");
+        solver.solve_with_opts(
+            &tree,
+            &ctx,
+            iters,
+            None,
+            solve_cache,
+            Some(false),
+            Some(false),
+        );
 
         let final_iter = solver.iteration;
         let (a, b, g) = (solver.alpha, solver.beta, solver.gamma);
@@ -5196,8 +5306,11 @@ mod tests {
             &skip_mask,
         );
         // Solve with the SAME cache so "skipped == never traversed" holds; no
-        // env toggling needed.
-        solver.solve_with_cache(&tree, &ctx, iters, None, Some(cache));
+        // env toggling needed. IE and rayon are forced OFF explicitly so this
+        // sparse solve is deterministic regardless of env state a concurrently
+        // running test may have leaked — matching the dense `solve_collapse_
+        // capture(.., false)` baseline this is compared against.
+        solver.solve_with_opts(&tree, &ctx, iters, None, Some(cache), Some(false), Some(false));
 
         let final_iter = solver.iteration;
         let (a, b, g) = (solver.alpha, solver.beta, solver.gamma);
@@ -5752,8 +5865,10 @@ mod tests {
         let tree = BettingTree::build_with_mode(&placeholder, BettingTreeMode::TemplateExtract);
 
         let mut solver = VectorDCFR::with_init_noise(&tree, ctx.hand_count, 1.5, 0.0, 2.0, 0.0, 0);
-        // Dense solve: no cache, all members converged.
-        solver.solve_with_cache(&tree, &ctx, iters, None, None);
+        // Dense reference solve: no cache (all members converged), IE and rayon
+        // forced OFF explicitly so the gate is deterministic regardless of any
+        // env state leaked by a concurrently-running test.
+        solver.solve_with_opts(&tree, &ctx, iters, None, None, Some(false), Some(false));
         let final_iter = solver.iteration;
         let (a, b, g) = (solver.alpha, solver.beta, solver.gamma);
         for info in solver.infosets.iter_mut().flatten() {
@@ -5768,10 +5883,17 @@ mod tests {
     /// `build_average_strategy`). Returns the map plus `members_expanded` — the
     /// number of skipped member decision nodes the expansion was responsible for
     /// (so the parity test can assert non-vacuity).
+    ///
+    /// `rayon` forces the chance-parallel path on/off EXPLICITLY (threaded
+    /// through [`VectorDCFR::solve_with_opts`]) instead of reading the
+    /// process-global `CFR_RAYON_CHANCE`, so callers select serial vs parallel
+    /// deterministically without racing other tests on env state. IE is always
+    /// forced off here.
     fn sparse_full_strategy(
         cfg: &HUNLConfig,
         holes: &[[u8; 2]],
         iters: u32,
+        rayon: bool,
     ) -> (HashMap<String, Vec<f64>>, usize) {
         let initial = HUNLState::initial(std::sync::Arc::new(cfg.clone()));
         let ctx = EvalContext::from_hand_lists(holes.to_vec(), holes.to_vec(), cfg.big_blind);
@@ -5806,7 +5928,15 @@ mod tests {
             0,
             &skip_mask,
         );
-        solver.solve_with_cache(&tree, &ctx, iters, None, Some(cache.clone()));
+        solver.solve_with_opts(
+            &tree,
+            &ctx,
+            iters,
+            None,
+            Some(cache.clone()),
+            Some(false),
+            Some(rayon),
+        );
         let final_iter = solver.iteration;
         let (a, b, g) = (solver.alpha, solver.beta, solver.gamma);
         for info in solver.infosets.iter_mut().flatten() {
@@ -5840,7 +5970,9 @@ mod tests {
             assert!(holes.len() >= 12, "{name}: range too small ({})", holes.len());
 
             let dense = dense_full_strategy(&cfg, &holes, iters);
-            let (sparse, members_expanded) = sparse_full_strategy(&cfg, &holes, iters);
+            // Serial (rayon OFF) sparse solve; IE/rayon are forced off inside
+            // the helpers, so this gate is bit-exact regardless of scheduling.
+            let (sparse, members_expanded) = sparse_full_strategy(&cfg, &holes, iters, false);
 
             // (1) IDENTICAL KEY SETS — the 3a omission must be fully recovered.
             let dense_keys: std::collections::HashSet<&String> = dense.keys().collect();
@@ -5915,10 +6047,11 @@ mod tests {
         // Dense reference WITHOUT rayon (serial, deterministic).
         let dense = dense_full_strategy(&cfg, &holes, iters);
 
-        // Sparse iso-ON WITH rayon. Set the env var around the solve only.
-        std::env::set_var("CFR_RAYON_CHANCE", "1");
-        let (sparse, members_expanded) = sparse_full_strategy(&cfg, &holes, iters);
-        std::env::remove_var("CFR_RAYON_CHANCE");
+        // Sparse iso-ON WITH rayon — forced ON explicitly via the helper's
+        // `rayon` flag (threaded through `solve_with_opts`), not by mutating
+        // the process-global `CFR_RAYON_CHANCE`. Deterministic under parallel
+        // scheduling and leaks no env state to other tests.
+        let (sparse, members_expanded) = sparse_full_strategy(&cfg, &holes, iters, true);
 
         let dense_keys: std::collections::HashSet<&String> = dense.keys().collect();
         let sparse_keys: std::collections::HashSet<&String> = sparse.keys().collect();
