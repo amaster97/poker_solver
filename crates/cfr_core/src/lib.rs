@@ -429,6 +429,71 @@ fn compute_exploitability(
     Ok(dict.into())
 }
 
+// ============================================================================
+// rung-2 postflop-EV restricted game value (self-contained region)
+// ============================================================================
+
+/// On-policy P0 game value over a RESTRICTED combo set, exposed to Python
+/// as `_rust.compute_restricted_game_value`.
+///
+/// Counterpart to `compute_exploitability`, but it (a) takes explicit
+/// per-player hole lists instead of enumerating the full residual deck and
+/// (b) runs the EV pass ONLY — no best-response passes. The rung-2 preflop
+/// postflop-EV pipeline (`scripts/build_postflop_ev_table.py`) uses it to
+/// recover hero EV over ONLY the solved class-vs-class hands; calling
+/// `compute_exploitability` there enumerates ~1.27M flop combos uniformly
+/// and dilutes every cell toward pot/2.
+///
+/// Arguments:
+///   - `config_json`: serialized `HUNLConfig` (same shape as
+///     `compute_exploitability`).
+///   - `strategy`: `dict[str, list[float]]` — infoset key → action prob
+///     vector (the solved per-history Nash strategy).
+///   - `p0_holes` / `p1_holes`: per-player two-card hole lists (each a
+///     `[u8; 2]`). The disjoint cross-product (collision-skipped) is the
+///     restricted combo set; supply hero combos as `p0_holes` when the
+///     solve used `hero_player == 0`.
+///
+/// Returns: `dict` with a single key `"game_value"` (float) — P0's
+/// on-policy EV in the Brown pot-share base, BB units.
+#[pyfunction]
+#[pyo3(signature = (config_json, strategy, p0_holes, p1_holes))]
+fn compute_restricted_game_value(
+    py: Python<'_>,
+    config_json: &str,
+    strategy: &Bound<'_, PyDict>,
+    p0_holes: Vec<[u8; 2]>,
+    p1_holes: Vec<[u8; 2]>,
+) -> PyResult<PyObject> {
+    let config: hunl::HUNLConfig = serde_json::from_str(config_json)
+        .map_err(|e| PyValueError::new_err(format!("invalid HUNLConfig JSON: {e}")))?;
+
+    // Marshal the Python `{infoset_key: [probs]}` dict into an owned Rust
+    // HashMap under the GIL before releasing it for the pure-Rust walk.
+    let mut strategy_map: std::collections::HashMap<String, Vec<f64>> =
+        std::collections::HashMap::with_capacity(strategy.len());
+    for (k, v) in strategy.iter() {
+        let key: String = k
+            .extract()
+            .map_err(|e| PyValueError::new_err(format!("strategy key must be str: {e}")))?;
+        let probs: Vec<f64> = v.extract().map_err(|e| {
+            PyValueError::new_err(format!(
+                "strategy value for key {key:?} must be list[float]: {e}"
+            ))
+        })?;
+        strategy_map.insert(key, probs);
+    }
+
+    // Release the GIL for the pure-Rust EV walk (CPU-bound, no callbacks).
+    let game_value = py.allow_threads(|| {
+        exploit::compute_restricted_game_value(&config, &strategy_map, &p0_holes, &p1_holes)
+    });
+
+    let dict = PyDict::new(py);
+    dict.set_item("game_value", game_value)?;
+    Ok(dict.into())
+}
+
 /// PR 23 — Vector-form DCFR for true range-vs-range Nash solves, exposed
 /// to Python as `_rust.solve_range_vs_range_rust`.
 ///
@@ -806,6 +871,7 @@ fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(solve_hunl_preflop, m)?)?;
     m.add_function(wrap_pyfunction!(compute_exploitability, m)?)?;
     m.add_function(wrap_pyfunction!(solve_range_vs_range_rust, m)?)?;
+    m.add_function(wrap_pyfunction!(compute_restricted_game_value, m)?)?;
     m.add_function(wrap_pyfunction!(solve_hunl_preflop_rvr, m)?)?;
     m.add_function(wrap_pyfunction!(solve_hunl_preflop_rvr_class169, m)?)?;
     Ok(())
