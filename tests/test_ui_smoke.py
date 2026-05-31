@@ -76,16 +76,21 @@ def isolated_state_dir(
     """
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("POKER_SOLVER_UI_STATE_DIR", str(tmp_path / ".poker_solver_ui"))
-    # PR 10b: stop any in-flight solver from a previous test before this
-    # one starts. With the real solver (vs PR 10a's near-zero-latency
-    # mock) tests can leave the worker thread alive past the test exit
-    # and the singleton SolveRunner refuses re-entrant `start()` while
-    # `is_alive()`. We do NOT reset the AppState singleton here because
-    # some smoke tests rely on cross-test singleton carryover for
-    # render-time state (the rendered matrix bakes in the spot.board at
-    # render time; resetting wipes the board between tests).
-    from ui.state import get_state
+    # Reset the AppState singleton at SETUP so each smoke test starts from a
+    # clean default Spot (PREFLOP, empty board). This mirrors the
+    # ``reset_state_for_testing()`` calls in every other UI test file's
+    # fixture (e.g. ``test_ui_pr24a.py`` / ``test_ui_pr24b.py`` /
+    # ``test_ui_solver_mode.py``) and fixes an order-dependent flake: a prior
+    # test file (notably ``test_ui_pr24a.py``, whose fixture only resets at
+    # setup) can leave the singleton holding a loaded postflop spot with a
+    # non-empty board. Because ``_toggle_board_card`` APPENDS to the existing
+    # board, ``test_board_picker_accepts_three_cards`` then clicked 3 cards
+    # onto a stale board and saw RIVER (5 cards) instead of FLOP (3 cards).
+    # Each smoke test that needs a board clicks its own preset right after
+    # ``user.open("/")``, so no test depends on cross-test board carryover.
+    from ui.state import get_state, reset_state_for_testing
 
+    reset_state_for_testing()
     try:
         current = get_state()
         if current.runner.is_alive():
