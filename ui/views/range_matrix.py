@@ -1244,6 +1244,18 @@ def _render_matrix_body(state: AppState, ui_mod: Any) -> None:
                 "color:var(--ps-text-muted);font-size:12px"
             )
 
+        # Empty-state hint: until a solve publishes a strategy the cells show
+        # only the input range (no action colors), so point the user at the
+        # Solve button rather than leaving an unexplained blank grid.
+        if not _has_solved_strategy(state):
+            ui_mod.label(
+                "No strategy yet — set a spot, then press Solve in the Run "
+                "Panel to color the grid with the GTO strategy."
+            ).mark("matrix-empty-hint").style(
+                "color:var(--ps-text-faint);font-style:italic;"
+                "font-size:12px;margin-bottom:6px"
+            )
+
         with ui_mod.element("div").style(
             f"display:grid;grid-template-columns:repeat(13, {_CELL_PX}px);"
             "gap:2px;justify-content:center"
@@ -1320,6 +1332,23 @@ def _render_matrix_body(state: AppState, ui_mod: Any) -> None:
 
         # Combo inspector strip (BELOW the matrix per Q5 locked).
         _inspector_slot()
+
+
+def _has_solved_strategy(state: AppState) -> bool:
+    """True when a finished solve has published a strategy for the matrix.
+
+    The 13x13 grid always paints something (the input range tinted by
+    whatever strategy mass exists), so before any solve has run it shows
+    in-range cells with no action colors and no obvious cue that the user
+    must press Solve to populate them. This mirrors the tree-browser's
+    "Solve to populate…" and the preflop-chart's "no chart computed yet"
+    empty states: we check for either a concrete strategy dict or a
+    finished range-vs-range result, and the renderer shows a one-line
+    guidance banner when neither is present.
+    """
+    if _current_rvr_result(state) is not None:
+        return True
+    return bool(_current_strategy(state))
 
 
 def _matrix_subtitle(state: AppState) -> str:

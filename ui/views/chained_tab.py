@@ -1268,10 +1268,12 @@ def _render_flop_step(
             )
             return
         except (RuntimeError, ImportError) as exc:
-            logger.exception("chained flop solve raised")
-            ui.label(f"Flop solve error: {exc}").style(
-                "color:var(--ps-text-error)"
-            )
+            logger.exception("chained flop solve raised: %s", exc)
+            ui.label(
+                "Couldn't solve this flop subgame right now. Try a different "
+                "flop or preflop line; if it keeps happening, check the "
+                "application logs for details."
+            ).style("color:var(--ps-text-error)")
             return
 
         # Update the postflop route badge (polling tick picks up the change).

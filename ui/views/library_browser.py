@@ -145,9 +145,17 @@ def render(state: AppState) -> Any:
 
         with ui.row().classes("w-full items-center"):
             filter_input = (
-                ui.input(label="Filter")
+                ui.input(
+                    label="Filter",
+                    placeholder="street (flop/turn/river) or part of a label",
+                )
                 .mark("library-filter-input")
                 .classes("flex-grow")
+            )
+            filter_input.tooltip(
+                "Type a street name (flop, turn, river, or preflop) to filter "
+                "by street, or any text to match a saved spot's label. Leave "
+                "blank to show everything."
             )
             entry_count_label = (
                 ui.label("(0 entries)")
@@ -212,16 +220,17 @@ def render(state: AppState) -> Any:
                     rows = lib.list(f, limit=_LIST_LIMIT)
                 finally:
                     lib.close()
-            except Exception as exc:  # noqa: BLE001 - surface errors as a banner
+            except Exception:  # noqa: BLE001 - surface errors as a banner
                 logger.exception("library_browser: list failed")
                 with rows_container:
                     # F04: semantic warning amber, themed via --ps-accent-warn
                     # so it darkens enough to read on the light dialog card
                     # (bare Quasar ``text-warning`` is a pale amber that
                     # washes out on white).
-                    ui.label(f"Library unavailable: {exc}").style(
-                        "color:var(--ps-accent-warn)"
-                    )
+                    ui.label(
+                        "Couldn't open the solve library right now. "
+                        "See the application logs for details."
+                    ).style("color:var(--ps-accent-warn)")
                 entry_count_label.set_text("(? entries)")
                 footer_label.set_text("library error — see logs")
                 return
@@ -282,8 +291,13 @@ def render(state: AppState) -> Any:
                 finally:
                     lib.close()
                 ui.notify(f"Deleted {sid[:8]}", type="positive")
-            except Exception as exc:  # noqa: BLE001
-                ui.notify(f"Delete failed: {exc}", type="negative")
+            except Exception:  # noqa: BLE001
+                logger.exception("library_browser: delete failed")
+                ui.notify(
+                    "Couldn't delete that saved spot. See the application "
+                    "logs for details.",
+                    type="negative",
+                )
             selection["spot_id"] = None
             load_btn.props("disable")
             delete_btn.props("disable")
