@@ -850,3 +850,116 @@ async def test_turn_river_render_pending_placeholder(
             "river step should render the pending-engine placeholder"
         )
         assert postflop_calls["count"] == 0, "river placeholder must not compute"
+
+
+# ---------------------------------------------------------------------------
+# Card-graphics dress-up: the picker chip strip + flop header render the
+# shared ``_cards.card_html`` / ``board_html`` colored suit-symbol spans
+# (``ps-card``) while preserving the canonical 2-char ``aria-label`` (e.g.
+# "As") so the text/marker/accessibility contract is intact.
+# ---------------------------------------------------------------------------
+
+
+def _ps_card_aria_labels(user: User) -> list[str]:
+    """All ``aria-label`` codes from rendered ``ps-card`` graphic spans."""
+    import re
+
+    labels: list[str] = []
+    for el in user.client.elements.values():
+        content = getattr(el, "content", None)
+        if not content or "ps-card" not in str(content):
+            continue
+        labels.extend(re.findall(r"aria-label='([^']+)'", str(content)))
+    return labels
+
+
+async def test_hole_picker_chip_strip_renders_card_graphics(
+    user: User, isolated_state_dir: pathlib.Path
+) -> None:
+    """Picking 2 hero hole cards renders them in the chip strip as colored
+    suit-symbol graphics (``ps-card`` spans) — NOT raw ``str(Card)`` text —
+    while keeping the canonical "As"/"Kh" aria-labels for accessibility.
+    """
+    from ui.state import get_state
+
+    await user.open("/")
+    state = get_state()
+    state.current_spot.stacks_bb = (50, 50)
+    state.current_spot.board = []
+
+    user.find(marker="chained-tab-hole-cell-As").click()
+    user.find(marker="chained-tab-hole-cell-Kh").click()
+    await user.open("/")
+
+    labels = _ps_card_aria_labels(user)
+    assert "As" in labels, f"hole chip 'As' graphic missing; got {labels}"
+    assert "Kh" in labels, f"hole chip 'Kh' graphic missing; got {labels}"
+    # The colored heart glyph proves it's the graphic span (not plain text).
+    hearts = [
+        c.content
+        for c in user.client.elements.values()
+        if getattr(c, "content", None) and "♥" in str(c.content)
+    ]
+    assert hearts, "expected a colored heart suit glyph in the chip strip"
+
+
+async def test_flop_header_renders_board_graphics(
+    user: User, isolated_state_dir: pathlib.Path
+) -> None:
+    """The flop-strategy header ("{class} on {board} after {line}") renders
+    the board as colored card graphics (``chained-tab-flop-header`` row with
+    ``ps-card`` spans carrying canonical aria-labels), not a raw "7c5d2h".
+    """
+    from poker_solver.card import Card
+    from ui.state import get_state
+
+    await user.open("/")
+    state = get_state()
+    state.current_spot.stacks_bb = (50, 50)
+    state.current_spot.board = []
+
+    result = _fake_chained_result(_tractable_flop_config())
+    state.runner.chained_result = result  # type: ignore[attr-defined]
+    state.runner._mode = "chained"  # type: ignore[attr-defined]
+    state.runner.status = "done"
+    state.runner._wt_hero_combo = (  # type: ignore[attr-defined]
+        Card.from_str("Ah"),
+        Card.from_str("As"),
+    )
+    state.runner._wt_tokens = ()  # type: ignore[attr-defined]
+    state.runner._wt_step = "preflop"  # type: ignore[attr-defined]
+    state.runner._wt_flop = []  # type: ignore[attr-defined]
+
+    def _fake_solve_postflop(action_sequence: Any, board: Any) -> Any:
+        postflop_result = _fake_postflop_result()
+        from poker_solver.chained import _canonicalize_board
+
+        result.postflop_cache[
+            (action_sequence, _canonicalize_board(board))
+        ] = postflop_result
+        return postflop_result
+
+    with patch.object(result, "solve_postflop", _fake_solve_postflop):
+        await user.open("/")
+        user.find(marker="chained-tab-legal-action-call").click()
+        await user.open("/")
+        user.find(marker="chained-tab-legal-action-check").click()
+        await user.open("/")
+        user.find(marker="chained-tab-legal-action-deal_flop").click()
+        await user.open("/")
+        user.find(marker="chained-tab-board-cell-7c").click()
+        user.find(marker="chained-tab-board-cell-5d").click()
+        user.find(marker="chained-tab-board-cell-2h").click()
+        await user.open("/")
+
+        # The dressed flop header row exists.
+        assert user.find(marker="chained-tab-flop-header").elements, (
+            "flop-strategy header row missing"
+        )
+        # And it (plus the board picker chips) emit ps-card graphics with
+        # the canonical board-card aria-labels.
+        labels = _ps_card_aria_labels(user)
+        for code in ("7c", "5d", "2h"):
+            assert code in labels, (
+                f"board card {code!r} graphic missing from header; got {labels}"
+            )
