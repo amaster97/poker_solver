@@ -180,6 +180,28 @@ run at convergence-grade iters to be trustworthy. Pairs with §3b (perf) + §3c
 
 ---
 
+## 4b. Editable-install pointer (`.venv`) — re-pointed 2026-05-31
+
+The `.venv` editable install is a **one-line `.pth`**
+(`.venv/lib/python3.13/site-packages/poker_solver.pth`) that puts ONE directory
+on `sys.path` for `import poker_solver` / `import ui`. It had been pointing at
+the `river-stream-resolve` worktree (`feat/exact-river-stream`), so bare
+`poker-solver ui` / `python -c "import poker_solver"` loaded **that worktree's
+code, not `main`** — GUI fixes committed to `main` were invisible to the running
+server (this cost real debugging). It is now **re-pointed to
+the main checkout (repo root) (main)** (old value backed up as `poker_solver.pth.bak`).
+
+**Rules:**
+- The `.venv` is **shared**. With the pointer on `main`, bare imports resolve to
+  `main`. **To run/test a feature worktree's code, prefix `PYTHONPATH=$PWD`** —
+  do NOT `pip install -e .` from a worktree unless you re-point back to `main`
+  afterward (it rewrites this shared `.pth` for everyone).
+- If the GUI ever shows stale code again, first
+  `cat .venv/lib/python3.13/site-packages/poker_solver.pth` — it should read
+  the main checkout (repo root).
+
+---
+
 ## 5. Open items / known issues
 
 - **AA limps 36% at the SB root** in the preflop blueprint. The UI **label is
