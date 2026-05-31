@@ -7,6 +7,11 @@ the detailed record of what happened. Branch: `fix/gui-audit-message-leaks` (UNM
 
 **Legend:** `[x]` done · `[~]` in progress · `[ ]` queued · `[E]` engine-gated · `[?]` needs user decision
 
+## ⚠️ VERIFICATION STATUS (as of 2026-05-30, branch tip `2009575`)
+- **Test-verified:** full UI suite green except the 2 pre-existing pr24b failures (rejected `SolveTooLargeError` guard; engine-merge-gated). Auto-range 11 / chain-solve 13 / etc. pass. ruff clean.
+- **Preview-browser verified (render + awaited-inline):** light mode, no-Python, hamburger, library, toggles, header/blinds, U13 message, F07 bar, U04 route badge, U06 deeper lines, the marquee Concrete solve (tree + mixed strat), P1 board picker, P5 reset, G1/G3 preset ranges, N5 chart label, clean boot of card-graphics + auto-range control + chain-solve walkthrough panel.
+- **PENDING a REAL browser (Claude-Preview synthetic clicks can't verify deferred-refresh / tab-switch behaviors):** (1) live preset/reset **repaint** (the `ui.timer` fix — mechanism-correct + test-covered but not real-browser-confirmed); (2) **auto-range Apply** live repaint (same `ui.timer` path); (3) **chain-solve walkthrough interactions** (hole-pick → advance → flop) + the **CHAIN-SOLVE tab layout/isolation** (a render smoke showed Solver content alongside the walkthrough — confirm it's the reused config block vs a tab-isolation issue). → open Chrome + the Claude extension for the definitive pass.
+
 ---
 
 ## DONE — committed (`6d5fbdc` → `1703de8` → `e0fe65a`); 102 UI tests green
