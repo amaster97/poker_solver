@@ -899,6 +899,56 @@ def _preflop_holes_from_range(range_with_freqs: Any) -> list[list[int]] | None:
     return holes
 
 
+def _full_1326_holes() -> list[list[int]]:
+    """Enumerate every ``C(52, 2)`` hole-card pair as ``[card_int, card_int]``.
+
+    Card-int encoding matches :func:`_preflop_holes_from_range` (both use
+    :func:`poker_solver.card.card_to_int`), so a full-deck side produced here is
+    interchangeable with a restricted side at the engine boundary. Mirrors the
+    full-1326 enumeration in
+    ``poker_solver.solver_router._holes_from_range_override``.
+    """
+    from poker_solver.card import card_to_int, full_deck
+
+    deck = full_deck()
+    holes: list[list[int]] = []
+    for i in range(len(deck)):
+        for j in range(i + 1, len(deck)):
+            holes.append([card_to_int(deck[i]), card_to_int(deck[j])])
+    return holes
+
+
+def _coerce_preflop_holes_both_or_neither(
+    hero_holes: list[list[int]] | None,
+    villain_holes: list[list[int]] | None,
+) -> tuple[list[list[int]] | None, list[list[int]] | None]:
+    """Enforce the engine's both-or-neither hole invariant.
+
+    ``_rust.solve_hunl_preflop_rvr`` requires ``p0_holes`` / ``p1_holes`` to be
+    BOTH supplied or BOTH omitted, raising ``ValueError`` otherwise. Each side's
+    holes are computed INDEPENDENTLY by :func:`_preflop_holes_from_range`
+    (full -> ``None``, restricted -> explicit), so restricting exactly one side
+    yields the illegal ``(holes, None)`` / ``(None, holes)`` shape.
+
+    This coerces the pair so the engine call is always legal:
+
+    - both full (``None``, ``None``) -> unchanged (blueprint/full live path).
+    - exactly one restricted -> the ``None`` (full) side is replaced with the
+      complete 1326-combo enumeration, so BOTH are supplied.
+    - both restricted -> unchanged (both explicit subsets).
+    """
+    if hero_holes is None and villain_holes is None:
+        return (None, None)
+    if hero_holes is not None and villain_holes is not None:
+        return (hero_holes, villain_holes)
+    # Exactly one side is restricted: expand the full (None) side to all 1326
+    # combos so the engine receives a legal both-supplied pair.
+    full = _full_1326_holes()
+    if hero_holes is None:
+        return (full, villain_holes)
+    return (hero_holes, full)
+
+
 def _on_preflop_chart_solve(state: AppState) -> None:
     """Solve button handler for the preflop chart widget (task #55).
 
@@ -934,6 +984,15 @@ def _on_preflop_chart_solve(state: AppState) -> None:
     # NOTE: per-combo weights are not sent (uniform-within-enumeration).
     hero_holes = _preflop_holes_from_range(spot.ranges[0])
     villain_holes = _preflop_holes_from_range(spot.ranges[1])
+    # The engine requires p0_holes/p1_holes to be BOTH supplied or BOTH omitted.
+    # Restricting exactly one side leaves the other as None (full) -> the illegal
+    # (holes, None) shape, which raises ValueError in the Rust binding. Expand the
+    # full side to the complete 1326-combo enumeration so the pair is always legal.
+    # NOTE: keep the bypass behavior — a restricted side still has non-None holes
+    # so ``_preflop_custom_range_bypass_blueprint`` forces the live path.
+    hero_holes, villain_holes = _coerce_preflop_holes_both_or_neither(
+        hero_holes, villain_holes
+    )
     state.runner._pending_preflop_chart_hero_holes = hero_holes  # type: ignore[attr-defined]
     state.runner._pending_preflop_chart_villain_holes = villain_holes  # type: ignore[attr-defined]
 

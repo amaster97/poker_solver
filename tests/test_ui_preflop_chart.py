@@ -677,8 +677,14 @@ async def test_restricted_range_forces_live_with_holes(
     assert kwargs["hero_holes"] is not None, "hero_holes not threaded through"
     # AA+KK+QQ = 18 combos.
     assert len(kwargs["hero_holes"]) == 18
-    # Villain was full -> no restriction.
-    assert kwargs["villain_holes"] is None
+    # Villain was full, but the engine requires BOTH holes supplied or BOTH
+    # omitted. Restricting only Hero coerces the full Villain side to the
+    # complete 1326-combo enumeration (NOT None) so the engine call is legal.
+    assert kwargs["villain_holes"] is not None, (
+        "one-sided restriction must coerce the full side to explicit holes "
+        "(both-or-neither invariant)"
+    )
+    assert len(kwargs["villain_holes"]) == 1326
 
 
 # ---------------------------------------------------------------------------
@@ -742,3 +748,168 @@ async def test_live_solve_notifies(
     assert user.notify.contains("750"), (
         f"live-solve toast missing iter count (messages: {user.notify.messages!r})"
     )
+
+
+# ---------------------------------------------------------------------------
+# Bug fix: one-sided range restriction must not produce the illegal
+# (holes, None) shape that the engine rejects with
+# "p0_holes and p1_holes must both be supplied or both omitted".
+# ---------------------------------------------------------------------------
+
+
+def test_coerce_holes_both_full_stays_none() -> None:
+    """Both sides full -> (None, None): blueprint/full live path, unchanged."""
+    from ui import app
+
+    assert app._coerce_preflop_holes_both_or_neither(None, None) == (None, None)
+
+
+def test_coerce_holes_one_sided_expands_full_side_to_1326() -> None:
+    """Exactly one restricted side -> the full (None) side is replaced with the
+    complete 1326-combo enumeration so BOTH are supplied. This is the bug fix:
+    the engine rejects (holes, None) / (None, holes)."""
+    from ui import app
+
+    villain = [[8, 9], [8, 10]]  # 2 explicit combos
+    # Hero full (None), Villain restricted.
+    hero_out, villain_out = app._coerce_preflop_holes_both_or_neither(None, villain)
+    assert hero_out is not None and villain_out is not None, (
+        "neither side may be None when exactly one is restricted"
+    )
+    assert len(hero_out) == 1326, f"full hero side must be 1326 combos, got {len(hero_out)}"
+    assert villain_out == villain, "restricted villain side must be preserved"
+    # Card-int encoding matches _preflop_holes_from_range (every entry is a
+    # 2-element list of ints in card_to_int's [8, 59] range).
+    assert all(
+        len(h) == 2 and all(isinstance(c, int) and 8 <= c <= 59 for c in h)
+        for h in hero_out
+    )
+    # No duplicate combos in the full enumeration.
+    assert len({tuple(h) for h in hero_out}) == 1326
+
+    # Symmetric: Hero restricted, Villain full.
+    hero = [[8, 9], [8, 10], [8, 11]]  # 3 explicit combos
+    hero_out2, villain_out2 = app._coerce_preflop_holes_both_or_neither(hero, None)
+    assert hero_out2 == hero
+    assert villain_out2 is not None and len(villain_out2) == 1326
+
+
+def test_coerce_holes_both_restricted_unchanged() -> None:
+    """Both restricted -> both explicit subsets, passed through verbatim."""
+    from ui import app
+
+    hero = [[8, 9]]
+    villain = [[10, 11], [12, 13]]
+    assert app._coerce_preflop_holes_both_or_neither(hero, villain) == (hero, villain)
+
+
+async def test_on_solve_one_sided_threads_both_holes(
+    user: User,
+    isolated_state_dir: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end through ``_on_preflop_chart_solve``: full Hero + restricted
+    Villain(AA) must thread hero_holes=1326 (NOT None) and villain_holes=2 into
+    ``start_preflop_chart`` — the exact shape the engine requires."""
+    from ui.state import RangeWithFreqs, SolveRunner, get_state
+
+    captured: dict[str, Any] = {"kwargs": None}
+
+    def _fake_start(self: Any, config: Any, **kwargs: Any) -> None:
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(SolveRunner, "start_preflop_chart", _fake_start)
+    # The full Hero side stays None pre-coercion, so the blueprint bypass check
+    # depends only on the restricted Villain side. Force a blueprint miss so we
+    # always reach the live dispatch where the holes are threaded.
+    monkeypatch.setattr(
+        SolveRunner, "try_blueprint_preflop_chart", lambda self, **kw: False
+    )
+
+    await user.open("/")
+
+    state = get_state()
+    # Hero full, Villain = AA only (2 ... actually 6 combos). This is the
+    # user's reported case: villain restricted, hero left full.
+    state.current_spot.ranges = (
+        RangeWithFreqs.full(),
+        RangeWithFreqs.from_string("AhAc, AdAc"),
+    )
+
+    from ui.app import _on_preflop_chart_solve
+
+    with user.client:
+        _on_preflop_chart_solve(state)
+
+    kwargs = captured["kwargs"]
+    assert kwargs is not None, "start_preflop_chart was not called"
+    assert kwargs["hero_holes"] is not None, "full hero side must be coerced, not None"
+    assert len(kwargs["hero_holes"]) == 1326
+    assert kwargs["villain_holes"] is not None
+    # AhAc, AdAc = 2 explicit combos.
+    assert len(kwargs["villain_holes"]) == 2
+
+
+def test_real_engine_one_sided_no_value_error() -> None:
+    """REAL ENGINE: reproduce the user's path. A full Hero + restricted Villain
+    range, after both-or-neither coercion, must call
+    ``_rust.solve_hunl_preflop_rvr`` WITHOUT raising the
+    'p0_holes and p1_holes must both be supplied or both omitted' ValueError.
+
+    This is the empirical proof against the real binding (the original bug
+    raised at ui/state.py:_run_preflop_chart_path). Runs at low iters
+    (preflop @30 is fast/light).
+    """
+    import poker_solver._rust as _rust
+    from poker_solver.hunl import HUNLConfig, Street, _serialize_hunl_config
+    from ui.app import _coerce_preflop_holes_both_or_neither, _preflop_holes_from_range
+    from ui.state import RangeWithFreqs
+
+    # Full Hero -> None; restricted Villain(AA) -> explicit holes.
+    hero_holes = _preflop_holes_from_range(RangeWithFreqs.full())
+    villain_holes = _preflop_holes_from_range(RangeWithFreqs.from_string("AhAc, AdAc"))
+    assert hero_holes is None, "full hero must convert to None pre-coercion"
+    assert villain_holes is not None and len(villain_holes) == 2
+
+    # The fix: coerce to the legal both-supplied shape.
+    hero_holes, villain_holes = _coerce_preflop_holes_both_or_neither(
+        hero_holes, villain_holes
+    )
+    assert hero_holes is not None and villain_holes is not None
+
+    # Build the same preflop config the live worker builds (100BB toy).
+    bb_cents = 100
+    config = HUNLConfig(
+        starting_stack=100 * bb_cents,
+        small_blind=max(1, bb_cents // 2),
+        big_blind=bb_cents,
+        ante=0,
+        starting_street=Street.PREFLOP,
+        initial_board=(),
+        initial_pot=0,
+        initial_contributions=(0, 0),
+        initial_hole_cards=(),
+        abstraction=None,
+    )
+    config_json = _serialize_hunl_config(config)
+
+    repo_root = pathlib.Path(__file__).resolve().parents[1]
+    equity_path = repo_root / "assets" / "preflop_equity_169x169.npz"
+    assert equity_path.exists(), f"equity table missing at {equity_path}"
+
+    # The exact call that raised at ui/state.py:1540 — now with coerced holes.
+    rust_out = _rust.solve_hunl_preflop_rvr(
+        config_json,
+        str(equity_path),
+        30,  # iterations — low/fast
+        1.5,  # alpha
+        0.0,  # beta
+        2.0,  # gamma
+        None,  # open_sizes_bb
+        None,  # reraise_multipliers
+        hero_holes,
+        villain_holes,
+    )
+    # The bug was a ValueError before reaching here; a returned result proves
+    # the one-sided case is accepted by the real binding.
+    assert rust_out is not None
