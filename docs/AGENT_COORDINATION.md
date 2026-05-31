@@ -131,6 +131,32 @@ axis beyond "it renders". It **needs the engine + real solves**. Plan:
 `docs/gui_audit/validation_gauntlet_plan.md` (currently on the unpushed
 branch `docs/validation-gauntlet-plan`; see §6).
 
+### 3d. Per-combo EV exposure — the GUI's EV column is structurally empty
+
+The combo inspector shows `EV +0 mBB` for **every** combo because `ev_mbb` is
+**hardcoded `0.0`** (`ui/views/range_matrix.py` `_build_combo_rows`, ~L1062:
+"Real EV plugs in when ... per-combo EV wired"). It has **never** displayed a
+real value — a likely root of the "EVs look degenerate / results just say
+fold/call" report (the fold/call *strategy* is real, from `per_class_strategy`;
+only the **EV** is stubbed). It **cannot** be fixed GUI-side: no result object
+the inspector reaches carries per-combo/class EV — `RangeVsRangeNashResult`
+exposes only a scalar `exploitability`, the concrete `SolveResult` only a scalar
+`game_value`. The RvR Rust path computes per-hand `node_values` each CFR
+iteration (`dcfr_vector.rs`) but discards them; `exploit::compute_restricted_game_value`
+(`exploit.rs`) computes the exact per-combo `flat_expected_value(...)[0]` the
+inspector wants, then **sums it to a scalar** and returns one `f64`.
+
+**Ask (engine track):** (1) Rust — return the per-combo `value[0]` vector
+instead of (or alongside) the scalar; the math already exists in `exploit.rs`,
+only the aggregation changes; key it by hole-string like `average_strategy`.
+(2) Python — add `per_history_ev` (and/or combo-averaged `per_class_ev`) to
+`RangeVsRangeNashResult`, keyed by the same infoset key as `per_history_strategy`.
+**Units: chips/hand in the Brown pot-share base (BB units)** — the GUI converts
+to mBB (×1000) and confirms the displayed-seat sign. **Caveat:** these are the
+dominated-hand EVs that pin at 0 / >pot under-convergence (§5), so they must be
+run at convergence-grade iters to be trustworthy. Pairs with §3b (perf) + §3c
+(validation).
+
 ---
 
 ## 4. GIT COORDINATION (important)
