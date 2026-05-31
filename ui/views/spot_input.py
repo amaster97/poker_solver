@@ -330,6 +330,10 @@ def _render_ranges_section(state: AppState) -> None:
     # PR 24b §3.1 — preset dropdown + save-as-preset.
     _render_chart_preset_row(state)
 
+    # Auto range generation — fill the active player's range from the
+    # preflop blueprint for a chosen standard position/line.
+    _render_auto_range_row(state)
+
     with ui.tabs() as tabs:
         tab_p0 = ui.tab("P0 (SB / BTN)")
         tab_p1 = ui.tab("P1 (BB)")
@@ -394,6 +398,139 @@ def _render_chart_preset_row(state: AppState) -> None:
             icon="save",
             on_click=_save_preset,
         ).props("flat dense").mark("save-preset-button")
+
+
+def _render_auto_range_row(state: AppState) -> None:
+    """Auto range generation control (engine-LIGHT blueprint projection).
+
+    Lets the user fill the ACTIVE player's (``hero_player``) range slot from the
+    precomputed preflop blueprint for a chosen standard position/line — e.g.
+    "BTN/SB open (RFI)" or "BB 3-bet vs open" — at the spot's CURRENT stack
+    depth (and ante). This is the same blueprint the Preflop Chart reads, so it
+    is instant (a lookup, not a solve); off-anchor depths interpolate exactly as
+    the chart does.
+
+    The standard line list comes from
+    :data:`ui.views._auto_range.STANDARD_LINES` (easy to extend). On apply we
+    derive the range string via
+    :func:`ui.views._auto_range.derive_range_string`, write it to
+    ``state.current_spot.ranges[hero_player]``, persist, and schedule the live
+    spot-views repaint via :func:`_schedule_spot_views_refresh` (a
+    ``ui.timer(0.01, …, once=True)`` so the refresh lands in the live client
+    context — matching the preset/reset repaint path, NOT a detached
+    ``background_tasks.create``).
+
+    Markers (auto-range tests assert on these):
+      ``auto-range-row``      the control container.
+      ``auto-range-select``   the position/line dropdown.
+      ``auto-range-apply``    the apply button.
+    """
+    from nicegui import ui
+
+    from ui.views._auto_range import line_options
+
+    options = line_options()
+    line_state: dict[str, str] = {"id": next(iter(options))}
+
+    with (
+        ui.row()
+        .classes("items-center gap-2 w-full")
+        .mark("auto-range-row")
+    ):
+        ui.label("Auto-fill:").classes("text-xs")
+        select = (
+            ui.select(
+                options=options,
+                value=line_state["id"],
+                label="position / line",
+            )
+            .classes("flex-grow")
+            .mark("auto-range-select")
+        )
+        ui.tooltip(
+            "Fill the active (hero) player's range from the preflop blueprint "
+            "for a standard position/line at the spot's current stack depth. "
+            "Instant lookup (not a solve); off-anchor depths are interpolated."
+        )
+
+        def _on_line_change(e: Any) -> None:
+            if e.value:
+                line_state["id"] = str(e.value)
+
+        select.on_value_change(_on_line_change)
+
+        def _apply(_e: Any = None) -> None:
+            _apply_auto_range(state, line_state["id"])
+
+        ui.button(
+            "Apply",
+            icon="auto_fix_high",
+            on_click=_apply,
+        ).props("flat dense").mark("auto-range-apply")
+
+
+def _apply_auto_range(state: AppState, line_id: str) -> None:
+    """Derive a blueprint range for ``line_id`` and fill the hero player's slot.
+
+    Reuses the same ``BlueprintRouter`` the Preflop Chart uses
+    (``ui.blueprint_router.BlueprintRouter.from_asset_dir``) and projects the
+    chosen line into a range string via
+    :func:`ui.views._auto_range.derive_range_string`. On success the active
+    player's range is replaced and the dependent views repaint; on a no-coverage
+    / no-bundle path we surface the helper's note rather than silently filling an
+    empty range.
+    """
+    from nicegui import ui
+
+    from ui.blueprint_router import BlueprintRouter, default_asset_dir
+    from ui.views._auto_range import derive_range_string, find_line
+
+    spot = state.current_spot
+    depth = int(spot.stacks_bb[spot.hero_player])
+    ante = float(getattr(spot, "ante", 0.0) or 0.0)
+
+    router = BlueprintRouter.from_asset_dir(default_asset_dir())
+    result = derive_range_string(
+        router, line_id=line_id, stack_bb=depth, ante=ante
+    )
+
+    if not result.range_string:
+        ui.notify(
+            result.note or "Could not derive a range for this line.",
+            type="warning",
+            position="top",
+            timeout=4000,
+        )
+        return
+
+    try:
+        new_range = RangeWithFreqs.from_string(result.range_string)
+    except ValueError as exc:
+        ui.notify(
+            f"Derived range failed to parse: {exc}",
+            type="negative",
+            position="top",
+        )
+        return
+
+    ranges = list(spot.ranges)
+    ranges[spot.hero_player] = new_range
+    spot.ranges = (ranges[0], ranges[1])
+    save_state()
+
+    line = find_line(line_id)
+    label = line.label if line is not None else line_id
+    src_note = "" if result.source == "blueprint" else f" ({result.source})"
+    ui.notify(
+        f"Auto-filled P{spot.hero_player} with {label}{src_note}: "
+        f"{result.combo_count} combos @ {depth} BB",
+        type="info",
+        position="top",
+        timeout=3500,
+    )
+    # Repaint the spot-input panel + range matrix in the live client context
+    # (same scheduler the preset/reset controls use).
+    _schedule_spot_views_refresh(state)
 
 
 def _enumerate_chart_presets() -> list[dict[str, Any]]:
