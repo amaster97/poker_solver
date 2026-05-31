@@ -305,6 +305,63 @@ def test_classify_action_and_dominant_color() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Root "call" == limp: the OPEN chart labels SB-complete as "L"/limp, while
+# facing-action charts keep "C"/call for a genuine call.
+# ---------------------------------------------------------------------------
+
+
+def test_root_call_renders_as_limp_facing_keeps_call() -> None:
+    """At the OPEN/root node the SB's "call" action is a *limp* (completing
+    the small blind), so the footer tag reads ``L`` and the tooltip says
+    "limp (complete the SB)". A facing-action / call-vs-open node keeps ``C``
+    and the raw "call" label.
+    """
+    from ui.views import preflop_chart
+
+    # AA on the OPEN chart, call-dominant at 36% (limp).
+    aa_root = preflop_chart.aggregate_actions(
+        {"call": 0.36, "fold": 0.30, "raise_4": 0.34}
+    )
+    assert aa_root.dominant_kind == "call"
+    # OPEN/root context -> "L" (limp), not "C".
+    assert preflop_chart._cell_tag(aa_root, is_open_root=True) == "L36"
+    # Facing-action context -> genuine "C" (call).
+    assert preflop_chart._cell_tag(aa_root, is_open_root=False) == "C36"
+
+    # Tooltip mirrors the relabel on the OPEN chart...
+    root_tip = preflop_chart._tooltip_text("AA", aa_root, is_open_root=True)
+    assert "limp (complete the SB)" in root_tip
+    assert "call" not in root_tip  # the raw label is suppressed at the root
+    # ...but a facing-action node still surfaces the raw "call" label.
+    facing_tip = preflop_chart._tooltip_text("AA", aa_root, is_open_root=False)
+    assert "call 36%" in facing_tip
+    assert "limp" not in facing_tip
+
+    # The non-call buckets are unaffected by the root relabel.
+    fold_cell = preflop_chart.aggregate_actions({"fold": 1.0})
+    assert preflop_chart._cell_tag(fold_cell, is_open_root=True) == "F100"
+    raise_cell = preflop_chart.aggregate_actions({"open_3": 1.0})
+    assert preflop_chart._cell_tag(raise_cell, is_open_root=True) == "R100"
+
+
+def test_is_open_root_line_detection() -> None:
+    """The root/open context is the SB's first decision (``"||p|"`` — no
+    action tokens). Any node carrying a limp/bet/raise token is a
+    facing-action line and must NOT be treated as the open root.
+    """
+    from ui.views import preflop_chart
+
+    # Root forms: bare marker, normalized variant, and "nothing selected".
+    assert preflop_chart._is_open_root_line("||p|") is True
+    assert preflop_chart._is_open_root_line("|p|") is True
+    assert preflop_chart._is_open_root_line(None) is True
+    # Facing-action lines (limped pot, BB-vs-open, 3-bet) are NOT the root.
+    assert preflop_chart._is_open_root_line("||p|c") is False  # limped pot
+    assert preflop_chart._is_open_root_line("||p|b200") is False  # BB vs open
+    assert preflop_chart._is_open_root_line("||p|b200r400") is False  # 3-bet
+
+
+# ---------------------------------------------------------------------------
 # Smoke 7: parse_size_list rejects garbage with ValueError
 # ---------------------------------------------------------------------------
 

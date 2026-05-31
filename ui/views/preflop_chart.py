@@ -484,6 +484,28 @@ def _set_selected_line(state: AppState, line: str | None) -> None:
     prefs.preflop_chart_selected_line = line  # type: ignore[attr-defined]
 
 
+def _is_open_root_line(suffix: str | None) -> bool:
+    """True when ``suffix`` is the OPEN/root context (SB's first decision).
+
+    The engine emits the root node as ``"||p|"`` (no action tokens after the
+    constant ``||p|`` marker). At this node the SB has the option to *complete*
+    the small blind — the engine labels that action ``"call"``, but in poker
+    terms it is a **limp**, not a call. We use this to relabel ``call`` -> ``L``
+    on the open chart while leaving genuine calls (facing a raise) as ``C``.
+
+    ``None`` (nothing selected yet) is treated as the root, matching
+    ``_selected_line``'s root-first default.
+    """
+    if suffix is None:
+        return True
+    body = suffix
+    if body.startswith("||p|"):
+        body = body[len("||p|") :]
+    elif body.startswith("|p|"):  # defensive: tolerate a normalized variant
+        body = body[len("|p|") :]
+    return body == ""
+
+
 def _line_chart_result(state: AppState) -> dict[str, Any] | None:
     """Return a chart_result-shaped dict for the SELECTED line.
 
@@ -874,6 +896,10 @@ def _render_grid(state: AppState) -> None:
     """Render the 13x13 cell grid (for the selected preflop line)."""
     ui = _import_nicegui()
     summaries = project_chart(_line_chart_result(state))
+    # At the OPEN/root node the engine's "call" action is a *limp* (completing
+    # the small blind), so the footer tag + tooltip read "L"/"Limp" there;
+    # facing-action charts keep "C"/"Call" for a genuine call.
+    is_open_root = _is_open_root_line(_selected_line(state))
 
     with ui.element("div").style(
         f"display:grid;grid-template-columns:repeat(13, {_CELL_PX}px);"
@@ -883,10 +909,16 @@ def _render_grid(state: AppState) -> None:
             for col in range(13):
                 cls = hand_class_at(row, col)
                 summary = summaries.get(cls, CellSummary(label=cls, empty=True))
-                _render_cell(state, cls, summary)
+                _render_cell(state, cls, summary, is_open_root=is_open_root)
 
 
-def _render_cell(state: AppState, hand_class: str, summary: CellSummary) -> None:
+def _render_cell(
+    state: AppState,
+    hand_class: str,
+    summary: CellSummary,
+    *,
+    is_open_root: bool = False,
+) -> None:
     """Render a single matrix cell."""
     ui = _import_nicegui()
     color = cell_color_css(summary)
@@ -896,7 +928,7 @@ def _render_cell(state: AppState, hand_class: str, summary: CellSummary) -> None
     # blend (``cell_color_rgb`` is unit-tested).
     if summary.empty:
         color = "var(--ps-faded)"
-    tag = _cell_tag(summary)
+    tag = _cell_tag(summary, is_open_root=is_open_root)
     selected = _selected_cell_label(state) == hand_class
     border = "var(--ps-cell-border-sel)" if selected else "var(--ps-cell-border)"
     cell_marker = f"preflop-chart-cell preflop-chart-cell-{hand_class}"
@@ -935,28 +967,47 @@ def _render_cell(state: AppState, hand_class: str, summary: CellSummary) -> None
                 "font-family:Menlo,Consolas,monospace;font-size:9px;"
                 "align-self:flex-end;color:var(--ps-cell-tag)"
             )
-        ui.tooltip(_tooltip_text(hand_class, summary))
+        ui.tooltip(_tooltip_text(hand_class, summary, is_open_root=is_open_root))
 
 
-def _cell_tag(summary: CellSummary) -> str:
-    """Return the per-cell 1-letter+pct footer tag."""
+def _cell_tag(summary: CellSummary, *, is_open_root: bool = False) -> str:
+    """Return the per-cell 1-letter+pct footer tag.
+
+    On the OPEN/root chart (``is_open_root=True``) the engine's "call" action
+    is a *limp* (completing the small blind), so it is tagged ``L`` rather than
+    ``C``. Facing-action charts keep ``C`` for a genuine call.
+    """
     if summary.empty:
         return ""
     kind = summary.dominant_kind
     pct = int(round(summary.dominant_prob * 100))
-    letter = {"fold": "F", "call": "C", "raise": "R", "jam": "J"}.get(kind, "")
+    call_letter = "L" if is_open_root else "C"
+    letter = {"fold": "F", "call": call_letter, "raise": "R", "jam": "J"}.get(
+        kind, ""
+    )
     if not letter:
         return ""
     return f"{letter}{pct}"
 
 
-def _tooltip_text(hand_class: str, summary: CellSummary) -> str:
-    """Build the hover tooltip for one cell."""
+def _tooltip_text(
+    hand_class: str, summary: CellSummary, *, is_open_root: bool = False
+) -> str:
+    """Build the hover tooltip for one cell.
+
+    On the OPEN/root chart the engine's "call" action is relabeled to
+    "limp (complete the SB)" since completing the small blind is a limp, not a
+    call; facing-action charts leave the raw "call" label untouched.
+    """
     if summary.empty:
         return f"{hand_class}: no chart data"
     parts = [hand_class]
     for label, prob in sorted(summary.actions.items(), key=lambda kv: -kv[1]):
-        parts.append(f"{label} {int(round(prob * 100))}%")
+        pct = int(round(prob * 100))
+        if is_open_root and label == "call":
+            parts.append(f"limp (complete the SB) {pct}%")
+        else:
+            parts.append(f"{label} {pct}%")
     return " · ".join(parts)
 
 
