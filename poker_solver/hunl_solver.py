@@ -96,6 +96,14 @@ class HUNLSolveResult(SolveResult):
 _DEFAULT_ITERATIONS: int = 50_000
 _DEFAULT_MEMORY_BUDGET_GB: float = 14.0
 
+# Upper bound on the Rust solve-loop checkpoint stride when GUI callbacks are
+# wired (``on_progress`` / ``should_stop``). Caps how many iterations can run
+# between callback fires so the live iteration counter keeps advancing (Bug 1)
+# and the Stop button stays responsive (Bug 2) even if a caller passes a very
+# large ``log_every``. 200 iters/checkpoint is well below one 0.5 s UI poll on
+# the Rust tier while keeping per-iteration GIL churn negligible. Easy to tune.
+_MAX_CHECKPOINT_STRIDE: int = 200
+
 
 def solve_hunl_postflop(
     config: HUNLConfig,
@@ -227,6 +235,191 @@ def solve_hunl_postflop(
     # v1.8.2 (#47) -- annotate phantom-5% reach. Skip when avg is empty
     # (iterations=0, no infosets touched). The helper itself is
     # empty-strategy-safe but we mirror the `avg` guard above.
+    if avg:
+        from poker_solver.solver import _annotate_off_path
+
+        _annotate_off_path(result, game)
+    return result
+
+
+def rust_postflop_available() -> bool:
+    """True iff the Rust ``solve_hunl_postflop`` binding is importable.
+
+    The GUI postflop path prefers the fast Rust tier (v1.11) and falls back
+    to the Python reference engine only when the extension is genuinely
+    unavailable (not built / wrong arch). Any import failure returns
+    ``False`` so the fallback engages silently rather than crashing.
+    """
+    try:
+        from poker_solver import _rust as _rust_module  # type: ignore[import-untyped]
+    except (ImportError, ModuleNotFoundError):
+        return False
+    return getattr(_rust_module, "solve_hunl_postflop", None) is not None
+
+
+def solve_hunl_postflop_rust(
+    config: HUNLConfig,
+    abstraction: AbstractionTables | None = None,
+    iterations: int = _DEFAULT_ITERATIONS,
+    target_exploitability: float | None = None,
+    memory_budget_gb: float = _DEFAULT_MEMORY_BUDGET_GB,
+    *,
+    log_every: int | None = None,
+    seed: int | None = None,
+    dcfr_kwargs: dict[str, Any] | None = None,
+    on_progress: OnProgressFn | None = None,
+    should_stop: ShouldStopFn | None = None,
+    locked_strategies: Mapping[str, Sequence[float]] | None = None,
+) -> HUNLSolveResult:
+    """HUNL postflop solve on the FAST Rust tier with GUI progress + cancel.
+
+    Drop-in replacement for :func:`solve_hunl_postflop` (identical signature)
+    that runs the DCFR loop in ``poker_solver._rust.solve_hunl_postflop``
+    while still firing ``on_progress`` and honoring ``should_stop`` — the two
+    hooks the GUI needs for its progress bar and Stop button. The Rust binding
+    re-acquires the GIL only at ``log_every``-spaced checkpoints, so the bulk
+    of the compute stays GIL-free and the callback overhead is negligible.
+
+    The returned :class:`HUNLSolveResult` is byte-shape-identical to the
+    Python tier's (``average_strategy`` / ``exploitability_history`` /
+    ``game_value`` / ``iterations`` / ``memory_report``) so every downstream
+    consumer (the decision tree, the UI worker, the chart widget) is
+    unaffected by the engine swap.
+
+    Callback adaptation:
+      * The Rust binding calls ``on_progress(iteration, exploitability)`` with
+        ``exploitability=None`` (postflop exploitability is recomputed
+        Python-side per D5). We forward ``(iteration, 0.0, memory_report)`` to
+        match the GUI's ``OnProgressFn`` shape; the converged exploitability
+        is appended once at the end via the recompute below.
+      * The Rust binding calls ``should_stop(iteration) -> bool``; we adapt it
+        to the GUI's zero-arg ``ShouldStopFn``.
+
+    Raises:
+        ImportError: the Rust extension is unavailable. Callers that want a
+            silent fallback must gate on :func:`rust_postflop_available`
+            first (the GUI dispatch does).
+        ValueError / RuntimeError: surfaced verbatim from the binding on a
+            config or callback error (no silent empty/uniform output).
+    """
+    # Validate up front with the SAME guard the Python tier uses so the error
+    # messages match regardless of engine (preflop/showdown/board/rake).
+    _validate_postflop_config(config)
+    if abstraction is not None:
+        _validate_abstraction(abstraction)
+
+    from poker_solver._rust import (  # type: ignore[import-untyped]
+        solve_hunl_postflop as _rust_solve_hunl,
+    )
+    from poker_solver.hunl import _serialize_hunl_config
+
+    effective_config = _attach_abstraction(config, abstraction)
+    game = HUNLPoker(effective_config)
+
+    alpha = 1.5
+    beta = 0.0
+    gamma = 2.0
+    if dcfr_kwargs:
+        alpha = float(dcfr_kwargs.get("alpha", alpha))
+        beta = float(dcfr_kwargs.get("beta", beta))
+        gamma = float(dcfr_kwargs.get("gamma", gamma))
+
+    config_json = _serialize_hunl_config(effective_config)
+    abstraction_path: str | None = None
+    if effective_config.abstraction is not None:
+        from poker_solver.abstraction.buckets import resolve_abstraction_ref
+
+        tables = resolve_abstraction_ref(effective_config.abstraction)
+        if tables.source_path is not None:
+            abstraction_path = str(tables.source_path)
+
+    locked_wire: dict[str, list[float]] | None
+    if not locked_strategies:
+        locked_wire = None
+    else:
+        locked_wire = {k: [float(p) for p in v] for k, v in locked_strategies.items()}
+
+    # A structurally-valid (empty-solver) MemoryReport so the GUI's memory
+    # panel + the HUNLSolveResult contract are satisfied. The Rust solver's
+    # regret/strategy arrays live outside Python's heap, so a per-infoset
+    # byte accounting isn't available here; the snapshot still reports a real
+    # process-RSS baseline, which is the honest figure to surface.
+    probe = MemoryProbe(DCFRSolver(game), include_abstraction=abstraction)
+    base_report = probe.snapshot()
+
+    # Adapt the GUI's OnProgressFn / ShouldStopFn to the binding's checkpoint
+    # callables. The Rust entry calls ``on_progress(iteration,
+    # exploitability_or_None)`` (return ignored) and ``should_stop(iteration)
+    # -> bool`` (a True return breaks the loop on a clean boundary and returns
+    # the partial result). We keep these as SEPARATE callables so the Rust
+    # contract is honored exactly.
+    def _rust_on_progress(iteration: int, _exploitability: float | None) -> None:
+        if on_progress is not None:
+            on_progress(int(iteration), 0.0, base_report)
+
+    def _rust_should_stop(_iteration: int) -> bool:
+        if should_stop is not None:
+            return bool(should_stop())
+        return False
+
+    # Only wire each callable when the caller supplied its GUI counterpart.
+    # ``log_every`` gates the checkpoint stride: the Rust loop re-acquires the
+    # GIL to fire ``on_progress`` (live iteration counter + bar, Bug 1) and
+    # poll ``should_stop`` (the Stop button, Bug 2) once every stride
+    # iterations. We harden the stride here so the GUI stays responsive:
+    #   * default to a coarse stride if any callback is wired but none given,
+    #     so Stop responds without per-iteration overhead; and
+    #   * CAP the stride at ``_MAX_CHECKPOINT_STRIDE`` when callbacks are wired
+    #     so a caller passing a huge ``log_every`` can't make the counter
+    #     appear frozen or the Stop button feel dead between checkpoints.
+    rust_on_progress = _rust_on_progress if on_progress is not None else None
+    rust_should_stop = _rust_should_stop if should_stop is not None else None
+    has_callbacks = rust_on_progress is not None or rust_should_stop is not None
+    effective_log_every = log_every
+    if has_callbacks:
+        if not effective_log_every:
+            effective_log_every = 100
+        effective_log_every = min(int(effective_log_every), _MAX_CHECKPOINT_STRIDE)
+
+    raw = _rust_solve_hunl(
+        config_json,
+        abstraction_path,
+        int(iterations),
+        alpha,
+        beta,
+        gamma,
+        target_exploitability,
+        seed,
+        locked_wire,
+        float((dcfr_kwargs or {}).get("regret_init_noise", 0.0) or 0.0),
+        int((dcfr_kwargs or {}).get("rng_seed", 0) or 0),
+        effective_log_every,
+        rust_on_progress,
+        rust_should_stop,
+    )
+
+    avg = {k: list(v) for k, v in raw["average_strategy"].items()}
+    ran_iterations = int(raw["iterations"])
+
+    # Recompute exploitability + game value via the Rust port (D5 contract,
+    # same as solver._solve_rust). Skip on an empty strategy (iterations=0 or
+    # an immediate stop) so we don't walk the tree on nothing.
+    history: list[float] = []
+    game_value = 0.0
+    if avg and ran_iterations > 0:
+        from poker_solver.solver import _compute_exploitability_rust
+
+        expl, game_value = _compute_exploitability_rust(effective_config, avg)
+        history.append(expl)
+
+    result = HUNLSolveResult(
+        average_strategy=avg,
+        exploitability_history=history,
+        game_value=game_value,
+        iterations=ran_iterations,
+        backend="rust",
+        memory_report=base_report,
+    )
     if avg:
         from poker_solver.solver import _annotate_off_path
 

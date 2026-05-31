@@ -155,9 +155,18 @@ async def test_solve_button_dispatches_rust_binding(
     isolated_state_dir: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Clicking Solve invokes ``_rust.solve_hunl_preflop_rvr`` (mocked
-    here) with the iteration count + action menu the input panel
-    populates."""
+    """Clicking Solve with CUSTOM action sizes invokes
+    ``_rust.solve_hunl_preflop_rvr`` (mocked here) with the iteration count
+    + the edited action menu.
+
+    The default ``(100BB, no-ante)`` spot is covered by the Premium-A
+    blueprint asset, so a *default*-sizes click is correctly served from the
+    blueprint and never touches Rust (the blueprint-vs-live fast path). To
+    assert the LIVE dispatch this test edits the open sizes to a non-default
+    value (``2.5,3.5,4.5``), which diverges from the FIXED menu the blueprint
+    was solved against. Per U05 that divergence MUST bypass the blueprint and
+    route to a live ``solve_hunl_preflop_rvr`` solve — which is exactly what
+    we verify here."""
     calls: dict[str, Any] = {"count": 0, "args": None}
 
     def _fake_solve(
@@ -216,6 +225,13 @@ async def test_solve_button_dispatches_rust_binding(
     )
 
     await user.open("/")
+    # Edit the open sizes to a NON-default value so the click diverges from
+    # the blueprint's fixed menu (2/3/4/5bb) and is forced down the live Rust
+    # path (U05). Without this the default-100BB spot is blueprint-covered and
+    # Solve would (correctly) serve from the asset without touching Rust.
+    opens_field = user.find(marker="preflop-chart-open-sizes")
+    opens_field.clear()
+    opens_field.type("2.5,3.5,4.5")
     # Click Solve directly (no need to navigate the tab — the button is
     # in the page DOM regardless of which tab is visible).
     user.find(marker="preflop-chart-solve-button").click()
@@ -229,11 +245,12 @@ async def test_solve_button_dispatches_rust_binding(
     )
     # Iteration count was forwarded.
     assert calls["args"]["iterations"] >= 1
-    # Action menu defaults made it through (None means engine defaults).
-    # The input panel pre-fills both fields with comma-separated lists, so
-    # they should be parsed lists, not None.
+    # The edited action menu made it through as parsed lists (not None).
+    # ``opens`` reflects the custom value we typed; ``mults`` keeps the
+    # pre-filled default list. Both arrive as lists, not None.
     assert isinstance(calls["args"]["opens"], list)
     assert isinstance(calls["args"]["mults"], list)
+    assert calls["args"]["opens"] == [2.5, 3.5, 4.5]
 
 
 # ---------------------------------------------------------------------------
@@ -303,3 +320,83 @@ def test_parse_size_list_rejects_garbage() -> None:
     assert preflop_chart.parse_size_list("2.0, 2.5, 3") == [2.0, 2.5, 3.0]
     with pytest.raises(ValueError):
         preflop_chart.parse_size_list("2, garbage, 4")
+
+
+# ---------------------------------------------------------------------------
+# N5: header subtitle must agree with the grid + source badge
+# ---------------------------------------------------------------------------
+
+
+def _fake_chart_state(
+    chart_result: dict[str, Any] | None,
+    *,
+    route_source: str | None = None,
+    status: str = "idle",
+    mode: str = "preflop_chart",
+) -> Any:
+    """Build a minimal AppState-shaped fake for ``_chart_subtitle``.
+
+    ``available_preflop_lines() -> []`` keeps ``_line_chart_result`` on its
+    root early-return so it hands back ``chart_result`` unchanged (which is what
+    a single-node blueprint root looks like to the grid).
+    """
+    from types import SimpleNamespace
+
+    route_info = None
+    if route_source is not None:
+        route_info = SimpleNamespace(source=SimpleNamespace(value=route_source))
+    runner = SimpleNamespace(
+        preflop_chart_result=chart_result,
+        preflop_route_info=route_info,
+        status=status,
+        _mode=mode,
+        available_preflop_lines=lambda: [],
+    )
+    return SimpleNamespace(runner=runner)
+
+
+def test_chart_subtitle_empty_state_only_when_no_chart() -> None:
+    """N5: "no chart computed yet" appears ONLY when the grid is empty.
+
+    The subtitle's empty-state must be keyed on the SAME source of truth the
+    grid paints from (``project_chart(_line_chart_result(state))``). Before the
+    fix the subtitle was a one-shot label that never re-rendered, so it stayed
+    on the empty-state text even after a blueprint solve populated the grid.
+    """
+    from ui.views import preflop_chart
+
+    # No result at all -> genuine empty state.
+    empty_state = _fake_chart_state(None, route_source=None, status="idle")
+    assert preflop_chart._chart_subtitle(empty_state) == "no chart computed yet"
+
+    # Running, still no result -> the "solving..." caption (not empty state).
+    running_state = _fake_chart_state(None, route_source="live", status="running")
+    sub = preflop_chart._chart_subtitle(running_state)
+    assert "solving" in sub and "no chart computed yet" not in sub
+
+    # Blueprint route: grid IS populated, iters/wall == 0 -> describe the route,
+    # NEVER the empty-state text.
+    blueprint_result = {
+        "per_class": {"AA": {"all_in": 1.0}, "AKs": {"open_3": 1.0}},
+        "iterations": 0,
+        "wallclock_seconds": 0.0,
+    }
+    bp_state = _fake_chart_state(
+        blueprint_result, route_source="blueprint", status="done"
+    )
+    bp_sub = preflop_chart._chart_subtitle(bp_state)
+    assert "no chart computed yet" not in bp_sub, (
+        f"N5 regression: blueprint chart still shows empty-state subtitle: {bp_sub!r}"
+    )
+    assert "Blueprint" in bp_sub, bp_sub
+
+    # Live route with real iterations -> the iters/wallclock summary survives.
+    live_result = {
+        "per_class": {"AA": {"all_in": 1.0}},
+        "iterations": 500,
+        "wallclock_seconds": 12.3,
+    }
+    live_state = _fake_chart_state(live_result, route_source="live", status="done")
+    live_sub = preflop_chart._chart_subtitle(live_state)
+    assert "500 iters" in live_sub and "12.3s" in live_sub, live_sub
+    assert "no chart computed yet" not in live_sub

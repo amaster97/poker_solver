@@ -29,6 +29,7 @@ the ``@ui.refreshable`` pattern follows the v2.x docs.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable
@@ -37,6 +38,7 @@ import numpy as np
 
 from poker_solver.card import RANKS, Card
 from poker_solver.hunl import HUNLState
+from ui.views._cards import board_html
 
 if TYPE_CHECKING:
     # Agent A owns ``ui.state``; we consume the contract documented in
@@ -185,6 +187,14 @@ def _snapshot_state(snapshot: object) -> HUNLState | None:
     state = getattr(snapshot, "state", None)
     if isinstance(state, HUNLState):
         return state
+    # ``tree_browser.TreeNode`` carries the per-node game state under
+    # ``state_snapshot`` (not ``state``). Selecting a decision-tree node
+    # hands one of those nodes through ``_current_tree_snapshot`` so the
+    # matrix can project that node's infoset — without this branch the
+    # off-/on-path projection would silently fall back to the root state.
+    node_snapshot = getattr(snapshot, "state_snapshot", None)
+    if isinstance(node_snapshot, HUNLState):
+        return node_snapshot
     return None
 
 
@@ -576,37 +586,99 @@ def _current_board(state: AppState) -> Sequence[Card]:
 
 
 def _current_strategy(state: AppState) -> dict[str, np.ndarray]:
+    # Resolve the finished solve's strategy. A ``SolveSession`` carries no
+    # ``result`` of its own (the result lives on the runner it references),
+    # so we look on the session first (future-proof) then fall back to the
+    # runner directly — including when ``current_solve`` is None, so the
+    # matrix still projects whenever the runner holds a finished result
+    # (mirrors how ``_resolve_tree`` builds the tree straight off the
+    # runner). Without the unconditional runner fallback the node->matrix
+    # projection went blank whenever ``current_solve`` wasn't set.
     solve = _safe_state_field(state, "current_solve", None)
-    if solve is None:
-        return {}
-    result = getattr(solve, "result", None) or getattr(
-        _safe_state_field(state, "runner", None), "result", None
-    )
+    runner = _safe_state_field(state, "runner", None)
+    result = getattr(solve, "result", None) if solve is not None else None
+    if result is None:
+        result = getattr(runner, "result", None)
     if result is None:
         return {}
     raw = getattr(result, "average_strategy", {})
     return {str(k): np.asarray(v, dtype=float) for k, v in raw.items()}
 
 
-def _current_tree_snapshot(state: AppState) -> object:
-    """Return the game-state snapshot at the currently selected tree
-    node. Falls back to the spot's starting state when no tree is
-    materialized yet (PR 10a renders the matrix at the root by default)."""
+def _resolve_tree(state: AppState) -> object | None:
+    """Best-effort retrieval of the live ``SolveTree`` for the current solve.
 
-    tree = _safe_state_field(state, "current_tree", None)
+    Resolution order mirrors ``tree_browser._resolve_tree`` (the canonical
+    builder): a pre-built tree parked on ``state.current_tree`` /
+    ``state.current_solve.tree`` wins, otherwise we build (and reuse the
+    runner-cached) tree from the finished solve result. We import the
+    tree_browser resolver lazily so the matrix module stays importable in
+    isolation (and to avoid a hard import cycle).
+    """
+
+    direct = _safe_state_field(state, "current_tree", None)
+    if direct is not None:
+        return direct
+    solve = _safe_state_field(state, "current_solve", None)
+    if solve is not None:
+        embedded = getattr(solve, "tree", None) or getattr(
+            solve, "current_tree", None
+        )
+        if embedded is not None:
+            return embedded
+    try:
+        from ui.views.tree_browser import _build_tree_from_runner
+    except Exception:  # noqa: BLE001 -- tree_browser optional in isolation
+        return None
+    try:
+        return _build_tree_from_runner(state)
+    except Exception:  # noqa: BLE001 -- never let resolution crash the matrix
+        return None
+
+
+def _current_tree_snapshot(state: AppState) -> object:
+    """Return the game-state snapshot at the currently selected tree node.
+
+    Selecting a decision-tree node sets ``state.current_tree_node_id``; this
+    resolves that id against the live ``SolveTree`` and returns the matching
+    :class:`tree_browser.TreeNode` (which carries ``state_snapshot`` /
+    ``player_to_act`` / ``legal_actions`` — exactly the fields the snapshot
+    helpers read). On-path and off-path (counterfactual) nodes resolve the
+    same way: the tree materializes any node on its slash-path on demand.
+
+    Falls back to the spot's starting state when no tree is materialized yet
+    (PR 10a renders the matrix at the root by default)."""
+
+    tree = _resolve_tree(state)
     node_id = _safe_state_field(state, "current_tree_node_id", "root")
     if tree is not None:
         try:
-            node = tree.get_node(str(node_id))
-            return node
+            return tree.get_node(str(node_id))
         except (KeyError, AttributeError, ValueError):
-            pass
+            # Stale node id (e.g. selected node from a previous solve) —
+            # fall back to the root node so the matrix still projects
+            # something coherent rather than going blank.
+            try:
+                return tree.get_node("root")
+            except (KeyError, AttributeError, ValueError):
+                pass
     spot = _safe_state_field(state, "current_spot", None)
     if spot is None:
         return None
     from poker_solver.hunl import HUNLPoker
 
     config = getattr(spot, "config", None) or getattr(spot, "hunl_config", None)
+    if config is None:
+        # ``Spot`` exposes the canonical builder as ``to_hunl_config()``;
+        # the bare ``config`` / ``hunl_config`` attribute names never
+        # existed, so without this the no-tree fallback always returned
+        # ``None`` and the matrix rendered combo-count-only cells.
+        to_config = getattr(spot, "to_hunl_config", None)
+        if callable(to_config):
+            try:
+                config = to_config()
+            except Exception:  # noqa: BLE001 -- malformed spot; bail out
+                return None
     if config is None:
         return None
     return HUNLPoker(config).initial_state()
@@ -640,6 +712,28 @@ def _selected_player(state: AppState) -> int:
     return selected
 
 
+def _matrix_player(state: AppState, snapshot: object | None) -> int:
+    """Return the seat whose range + strategy the matrix projects.
+
+    The matrix shows *whose decision it is*: the player TO ACT at the
+    currently-selected tree node (``snapshot.player_to_act``). The combo
+    inspector, the 13x13 grid, and the header subtitle must ALL agree on
+    this seat — otherwise the grid lights up the acting player's hand
+    (e.g. P1's QQ) while the inspector reports the hero's combos (P0's
+    AhKc), so the lit cell reads "QQ (0 combos)" (P3). Falling back to
+    the input-tab selection (``_selected_player``) only when no node
+    snapshot resolves keeps the pre-solve / chance-node view coherent.
+
+    This is the single source of truth for the "matrix seat" so the three
+    render paths can never drift apart again.
+    """
+
+    node_player = _snapshot_player(snapshot) if snapshot is not None else None
+    if node_player is not None and node_player in (0, 1):
+        return node_player
+    return _selected_player(state)
+
+
 def _show_frequencies(state: AppState) -> bool:
     prefs = _safe_state_field(state, "prefs", None)
     if prefs is None:
@@ -660,7 +754,6 @@ class _CellRender:
 def _build_grid_summaries(
     state: AppState,
 ) -> list[_CellRender]:
-    range_ = _current_range(state, _selected_player(state))
     board = _current_board(state)
 
     # PR 24a §3.2: range-vs-range overlay. When the active solve produced
@@ -670,11 +763,23 @@ def _build_grid_summaries(
     # hero's slot so the front-tab view stays "hero's strategy."
     rvr_result = _current_rvr_result(state)
     if rvr_result is not None:
+        range_ = _current_range(state, _selected_player(state))
         return _build_grid_summaries_rvr(state, rvr_result, range_, board)
 
     strategy = _current_strategy(state)
     snapshot = _current_tree_snapshot(state)
     tree_node_id = str(_safe_state_field(state, "current_tree_node_id", "root"))
+
+    # Project the strategy of the player who acts AT THE SELECTED NODE.
+    # ``cell_strategy_summary`` already builds infoset keys for the
+    # snapshot's ``player_to_act``; the displayed range must match that
+    # same player or the per-combo strategy lookup queries one player's
+    # range with the other player's infoset (incoherent cells when the
+    # navigated node belongs to the opponent). ``_matrix_player`` is the
+    # shared seat resolver used by the grid, the combo inspector, and the
+    # header subtitle so the three never disagree (P3).
+    grid_player = _matrix_player(state, snapshot)
+    range_ = _current_range(state, grid_player)
 
     rendered: list[_CellRender] = []
     for row in range(13):
@@ -807,12 +912,35 @@ def _build_grid_summaries_rvr(
 
 # Cell visual constants — single source of truth.
 _CELL_PX: int = 54  # 13*54 ~= 700 px, meets 24px floor (spec anti-pattern §3.3)
-_LABEL_COLOR: str = "#f5f5f5"
-_FADED_COLOR: str = "#3a3a3a"
+# Theme-aware neutrals (F04): the cell LABEL/faded text reads via CSS vars
+# (defined in ``ui/app.py``) so it stays legible in both light + dark. The
+# CELL BACKGROUND blend (``cell_color``) is a semantic RYG/grey value locked
+# by smoke tests and is intentionally left as-is.
+_LABEL_COLOR: str = "var(--ps-cell-label)"
+_FADED_COLOR: str = "var(--ps-faded)"
 
 
 def _cell_style(summary: CellSummary) -> str:
     color = cell_color(summary)
+    # F04: blocked / out-of-range / empty cells return the neutral grey
+    # sentinel from ``cell_color`` (``#3a3a3a``, test-locked). That value is
+    # a NEUTRAL, not a strategy color, so re-route it through the theme var
+    # here — the only place it reaches the DOM — so the faded cell tracks the
+    # active theme (light-grey on light, near-black on dark) and its tag text
+    # stays legible. ``cell_color`` itself is untouched (unit-tested).
+    if summary.blocked or summary.out_of_range or summary.empty:
+        color = "var(--ps-faded)"
+    elif summary.fold + summary.call + summary.raise_ <= 0.0:
+        # F04 round 2: an IN-RANGE cell with no strategy mass (no solve yet,
+        # or no strategy entry for this infoset) blends to rgb(0,0,0) in
+        # ``cell_color`` — pure black, the default-range "MIX" look. That is
+        # a NEUTRAL base fill, not a semantic strategy color, so re-route it
+        # through ``--ps-cell-bg`` here (the only place it reaches the DOM):
+        # black on dark (pixel-identical to before), pale on light so the
+        # cell + its dark label/tag stay legible. SOLVED cells (any action
+        # mass, incl. faded fractional ranges) keep their RYG blend untouched
+        # — ``cell_color`` is still authoritative for those and unit-tested.
+        color = "var(--ps-cell-bg)"
     text_color = _LABEL_COLOR
     extras = ""
     if summary.blocked:
@@ -823,12 +951,12 @@ def _cell_style(summary: CellSummary) -> str:
             "; background-image: repeating-linear-gradient(45deg, "
             "rgba(255,255,255,0.18) 0 4px, transparent 4px 8px)"
         )
-        text_color = "#dadada"
+        text_color = "var(--ps-cell-tag-blocked)"
     elif summary.out_of_range or summary.empty:
-        text_color = "#7a7a7a"
+        text_color = "var(--ps-text-fainter)"
     return (
         f"width:{_CELL_PX}px;height:{_CELL_PX}px;background:{color};"
-        f"color:{text_color};border:1px solid #1f1f1f;"
+        f"color:{text_color};border:1px solid var(--ps-cell-border);"
         f"display:flex;flex-direction:column;justify-content:space-between;"
         f"padding:3px 4px;font-size:11px;cursor:pointer{extras}"
     )
@@ -857,17 +985,25 @@ class _ComboRow:
     ev_mbb: float
     reach: float
     infoset_key: str
+    cards: tuple[Card, Card] | None = None
 
 
 def _build_combo_rows(state: AppState, hand_class: str) -> list[_ComboRow]:
-    range_ = _current_range(state, _selected_player(state))
+    # P3: the inspector must describe the SAME seat the grid lights up —
+    # the player to act at the selected node — not always the input-tab
+    # hero. Resolving the range against ``_selected_player`` while the
+    # snapshot's strategy lookup used the node's ``player_to_act`` is what
+    # produced the "QQ (0 combos)" mismatch (grid showed P1's QQ; inspector
+    # queried P0's range, which holds AhKc not QQ). ``_matrix_player`` ties
+    # the range, the strategy player, and the legal actions to one seat.
+    snapshot = _current_tree_snapshot(state)
+    player = _matrix_player(state, snapshot)
+    range_ = _current_range(state, player)
     if range_ is None:
         return []
     board_cards = set(_current_board(state))
     strategy = _current_strategy(state)
-    snapshot = _current_tree_snapshot(state)
     state_obj = _snapshot_state(snapshot)
-    player = _snapshot_player(snapshot)
     legal_actions = _snapshot_legal_actions(snapshot)
 
     rows: list[_ComboRow] = []
@@ -888,6 +1024,7 @@ def _build_combo_rows(state: AppState, hand_class: str) -> list[_ComboRow]:
                     ev_mbb=0.0,
                     reach=0.0,
                     infoset_key="",
+                    cards=combo,
                 )
             )
             continue
@@ -902,6 +1039,7 @@ def _build_combo_rows(state: AppState, hand_class: str) -> list[_ComboRow]:
                     ev_mbb=0.0,
                     reach=weight,
                     infoset_key="",
+                    cards=combo,
                 )
             )
             continue
@@ -924,6 +1062,7 @@ def _build_combo_rows(state: AppState, hand_class: str) -> list[_ComboRow]:
                 ev_mbb=0.0,  # Real EV plugs in when Agent A wires per-combo EV.
                 reach=weight,
                 infoset_key=key,
+                cards=combo,
             )
         )
     return rows
@@ -943,13 +1082,16 @@ def inspect_panel(state: AppState, hand_class: str) -> None:
     with (
         ui_mod.element("div")
         .mark("combo-inspector-strip")
-        .style("padding:8px 12px;background:#1b1b1b;border-top:1px solid #303030")
+        .style(
+            "padding:8px 12px;background:var(--ps-strip-bg);"
+            "border-top:1px solid var(--ps-border-strong)"
+        )
     ):
         ui_mod.label(f"Combo inspector — {hand_class} ({len(rows)} combos)").style(
-            "font-weight:600;color:#f0f0f0;margin-bottom:6px"
+            "font-weight:600;color:var(--ps-text);margin-bottom:6px"
         )
         if not rows:
-            ui_mod.label("No combos in range").style("color:#9a9a9a")
+            ui_mod.label("No combos in range").style("color:var(--ps-text-faint)")
             return
         for row in rows:
             marker = f"combo-inspector-row-{row.label}"
@@ -958,12 +1100,18 @@ def inspect_panel(state: AppState, hand_class: str) -> None:
                 .mark(marker)
                 .style("align-items:center;gap:10px;padding:2px 0")
             ):
-                ui_mod.label(row.label).style(
-                    "font-family:Menlo,Consolas,monospace;width:64px;color:#e8e8e8"
-                )
+                if row.cards is not None:
+                    ui_mod.html(board_html(list(row.cards), sep="")).style(
+                        "width:64px"
+                    )
+                else:
+                    ui_mod.label(row.label).style(
+                        "font-family:Menlo,Consolas,monospace;width:64px;"
+                        "color:var(--ps-text-dim)"
+                    )
                 if row.blocked:
                     ui_mod.label("BLOCKED — card on board").style(
-                        "color:#c0c0c0;font-style:italic"
+                        "color:var(--ps-text-muted);font-style:italic"
                     )
                     continue
                 # Horizontal stacked bar: red (fold) / yellow (call) /
@@ -974,7 +1122,7 @@ def inspect_panel(state: AppState, hand_class: str) -> None:
                 fw = max(0, bar_width - rw - cw)
                 with ui_mod.element("div").style(
                     f"display:flex;width:{bar_width}px;height:12px;"
-                    "border:1px solid #2a2a2a"
+                    "border:1px solid var(--ps-border-soft)"
                 ):
                     ui_mod.element("div").style(
                         f"width:{rw}px;background:rgb(40,180,60)"
@@ -989,16 +1137,17 @@ def inspect_panel(state: AppState, hand_class: str) -> None:
                     f"R {int(round(row.raise_ * 100))}% · "
                     f"C {int(round(row.call * 100))}% · "
                     f"F {int(round(row.fold * 100))}%"
-                ).style("color:#cccccc;font-family:Menlo,Consolas,monospace")
+                ).style("color:var(--ps-text-mono);font-family:Menlo,Consolas,monospace")
                 ui_mod.label(f"EV {row.ev_mbb:+.0f} mBB").style(
-                    "color:#9ad29a;font-family:Menlo,Consolas,monospace"
+                    "color:var(--ps-accent-ev);font-family:Menlo,Consolas,monospace"
                 )
                 ui_mod.label(f"reach {row.reach:.3f}").style(
-                    "color:#a8c8e8;font-family:Menlo,Consolas,monospace"
+                    "color:var(--ps-accent-reach);font-family:Menlo,Consolas,monospace"
                 )
                 if row.infoset_key:
                     ui_mod.label(row.infoset_key).style(
-                        "color:#8a8a8a;font-family:Menlo,Consolas,monospace;"
+                        "color:var(--ps-text-fainter);"
+                        "font-family:Menlo,Consolas,monospace;"
                         "font-size:10px"
                     ).tooltip("infoset key — click to copy from devtools")
 
@@ -1021,6 +1170,42 @@ def render(state: AppState) -> None:
 
     ui_mod = _import_nicegui()
 
+    # Whole-matrix refreshable wrapper. Selecting a decision-tree node
+    # (``tree_browser.on_tree_node_selected``) or loading an example spot
+    # (``spot_input._on_load_preset``) mutates ``state`` then calls the
+    # refresh hook registered below; re-running this body repaints the
+    # grid + header against the new ``current_tree_node_id`` /
+    # ``current_spot``. Without this the matrix only ever drew once at
+    # page build (the on/off-path navigation + spot-load desync bugs).
+    @ui_mod.refreshable  # type: ignore[untyped-decorator]
+    def _matrix_body() -> None:
+        _render_matrix_body(state, ui_mod)
+
+    # Register the refresh callable on BOTH the runner (mirrors the
+    # ``_tree_browser_refresh`` / ``_preflop_chart_refresh`` hook
+    # convention) and ``state.matrix_refresh`` (the exact attribute name
+    # ``tree_browser.on_tree_node_selected`` already looks up to drive the
+    # matrix after a node click). Best-effort: never let hook registration
+    # break the first render.
+    refresh_callable = _matrix_body.refresh
+    runner = _safe_state_field(state, "runner", None)
+    if runner is not None:
+        with contextlib.suppress(Exception):
+            runner._range_matrix_refresh = refresh_callable  # noqa: SLF001
+    with contextlib.suppress(Exception):
+        state.matrix_refresh = refresh_callable  # type: ignore[attr-defined]
+
+    _matrix_body()
+
+
+def _render_matrix_body(state: AppState, ui_mod: Any) -> None:
+    """Render the matrix body (refreshable inner pass of :func:`render`).
+
+    Split out of :func:`render` so the ``@ui.refreshable`` wrapper re-runs
+    JUST the grid + header + inspector when a node is selected or a spot is
+    loaded, without re-registering the refresh hooks.
+    """
+
     # Inner refreshable for the combo inspector so cell clicks can
     # re-render the strip without touching the matrix. Pattern from
     # the in-repo NiceGUI guide (mental model 8 — refreshable elements).
@@ -1033,8 +1218,9 @@ def render(state: AppState) -> None:
                 ui_mod.element("div")
                 .mark("combo-inspector-strip")
                 .style(
-                    "padding:8px 12px;background:#1b1b1b;"
-                    "border-top:1px solid #303030;color:#909090"
+                    "padding:8px 12px;background:var(--ps-strip-bg);"
+                    "border-top:1px solid var(--ps-border-strong);"
+                    "color:var(--ps-text-faint)"
                 )
             ):
                 ui_mod.label("Click a cell to inspect its combos").style(
@@ -1046,15 +1232,17 @@ def render(state: AppState) -> None:
     with (
         ui_mod.element("div")
         .mark("range-matrix-display")
-        .style("background:#0f0f0f;padding:12px;border-radius:6px")
+        .style("background:var(--ps-panel-bg);padding:12px;border-radius:6px")
     ):
         with ui_mod.row().style(
             "align-items:center;justify-content:space-between;margin-bottom:6px"
         ):
             ui_mod.label("RANGE MATRIX").style(
-                "font-weight:700;letter-spacing:0.05em;color:#f5f5f5"
+                "font-weight:700;letter-spacing:0.05em;color:var(--ps-text-strong)"
             )
-            ui_mod.label(_matrix_subtitle(state)).style("color:#aaaaaa;font-size:12px")
+            ui_mod.label(_matrix_subtitle(state)).style(
+                "color:var(--ps-text-muted);font-size:12px"
+            )
 
         with ui_mod.element("div").style(
             f"display:grid;grid-template-columns:repeat(13, {_CELL_PX}px);"
@@ -1086,7 +1274,8 @@ def render(state: AppState) -> None:
                     )
                     if cell.summary.out_of_range:
                         ui_mod.label("—").style(
-                            "align-self:center;font-size:18px;color:#7a7a7a"
+                            "align-self:center;font-size:18px;"
+                            "color:var(--ps-text-fainter)"
                         )
                     else:
                         tag = _cell_tag(cell.summary)
@@ -1094,11 +1283,11 @@ def render(state: AppState) -> None:
                             ui_mod.label(tag).style(
                                 "font-family:Menlo,Consolas,monospace;"
                                 "font-size:10px;align-self:flex-end;"
-                                "color:#1a1a1a"
+                                "color:var(--ps-cell-tag)"
                                 if not (cell.summary.blocked)
                                 else "font-family:Menlo,Consolas,monospace;"
                                 "font-size:10px;align-self:flex-end;"
-                                "color:#dadada"
+                                "color:var(--ps-cell-tag-blocked)"
                             )
                     ui_mod.tooltip(_tooltip_text(cell.hand_class, cell.summary))
                     cell_el.on(
@@ -1108,13 +1297,26 @@ def render(state: AppState) -> None:
 
         # Legend (single line under the matrix). Locked principle 4:
         # strategy palette is RYG; input-matrix palette is white->blue
-        # (rendered in Agent A's spot input view).
-        with ui_mod.row().style("gap:14px;margin-top:6px;color:#a8a8a8;font-size:11px"):
-            ui_mod.html("<span style='color:rgb(40,180,60)'>&#9632;</span> raise/bet")
-            ui_mod.html("<span style='color:rgb(220,200,40)'>&#9632;</span> call/check")
-            ui_mod.html("<span style='color:rgb(220,40,40)'>&#9632;</span> fold")
-            ui_mod.html("<span style='color:#3a3a3a'>&#9632;</span> out of range")
-            ui_mod.html("<span style='color:#a0a0a0'>&#9740;</span> blocked by board")
+        # (rendered in Agent A's spot input view). The RYG swatches are
+        # semantic (kept verbatim); the row text + neutral swatches read
+        # via theme vars so the legend is legible on light backgrounds too.
+        with ui_mod.row().style(
+            "gap:14px;margin-top:6px;color:var(--ps-text-muted);font-size:11px"
+        ):
+            ui_mod.html(
+                "<span style='color:var(--ps-act-raise)'>&#9632;</span> raise/bet"
+            )
+            ui_mod.html(
+                "<span style='color:var(--ps-act-call)'>&#9632;</span> call/check"
+            )
+            ui_mod.html("<span style='color:var(--ps-act-fold)'>&#9632;</span> fold")
+            ui_mod.html(
+                "<span style='color:var(--ps-faded)'>&#9632;</span> out of range"
+            )
+            ui_mod.html(
+                "<span style='color:var(--ps-text-muted)'>&#9740;</span> "
+                "blocked by board"
+            )
 
         # Combo inspector strip (BELOW the matrix per Q5 locked).
         _inspector_slot()
@@ -1130,9 +1332,14 @@ def _matrix_subtitle(state: AppState) -> str:
     """
 
     node_id = _safe_state_field(state, "current_tree_node_id", "root")
-    player = _selected_player(state)
     spot = _safe_state_field(state, "current_spot", None)
     hero_player = int(getattr(spot, "hero_player", 0)) if spot is not None else 0
+    # When a decision-tree node is selected, the "to act" player is the
+    # node's ``player_to_act`` (so the header tracks the navigated node,
+    # not just the input-tab selection). ``_matrix_player`` is the shared
+    # seat resolver — header, grid, and inspector all read it (P3).
+    snapshot = _current_tree_snapshot(state)
+    player = _matrix_player(state, snapshot)
     if spot is not None and getattr(spot, "rvr_mode", False):
         position = "aggressor" if hero_player == 0 else "defender"
         return (

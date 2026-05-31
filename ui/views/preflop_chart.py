@@ -47,6 +47,7 @@ The widget is engine-driven via PR #122; the dispatch path lives in
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -308,6 +309,96 @@ def parse_size_list(value: str) -> list[float]:
 
 
 # -----------------------------------------------------------------------------
+# Preflop line (node) labels
+# -----------------------------------------------------------------------------
+#
+# The engine emits strategy keys shaped ``"{hole_str}||p|<tokens>"``; the
+# ``ui.state.SolveRunner.available_preflop_lines`` accessor returns the
+# ``"||p|<tokens>"`` history suffix per reachable node. Token grammar
+# (verified empirically against ``_rust.solve_hunl_preflop_rvr``):
+#
+#   ``||p|``                 root — SB's first decision           -> Open (RFI)
+#   ``c``                    SB limps (call)
+#   ``b<amt>``               a bet/open to <amt> (amt = BB * 100)
+#   ``r<amt>``               a raise/re-raise to <amt>
+#   ``A``                    facing an all-in (next actor folds/calls)
+#
+# The number of bet/raise tokens (``b``/``r``) is the "raise depth" and
+# drives the poker line name. Standard HUNL counting: the open is the 1st
+# bet, a re-raise is the 3-bet (3rd bet of the pot), the next is the 4-bet:
+#
+#   0 raises, no limp  -> Open (RFI)        (SB first-in decision)
+#   leading ``c``      -> limped-pot variant (prefix "Limp:")
+#   1 raise (``b``)    -> BB vs open        (BB facing the open)
+#   2 raises (``r``)   -> 3-bet             (opener facing the re-raise)
+#   3 raises (``r r``) -> 4-bet             (facing the 4-bet)
+#   4+ raises          -> 5-bet+            (deep raise war)
+#   trailing ``A``     -> append " (vs all-in)"
+#
+# If a suffix doesn't parse, we fall back to the raw suffix so the user can
+# still select it rather than seeing nothing.
+
+_LINE_TOKEN_RE = re.compile(r"c|b\d+|r\d+|A")
+_ROOT_DEPTH_LABELS: dict[int, str] = {
+    0: "Open (RFI)",
+    1: "BB vs open",
+    2: "3-bet",
+    3: "4-bet",
+}
+
+
+def preflop_line_label(suffix: str | None) -> str:
+    """Map a raw Rust history suffix to a human-readable poker line name.
+
+    ``suffix`` is an entry from
+    ``ui.state.SolveRunner.available_preflop_lines`` (e.g. ``"||p|"`` for the
+    root open, ``"||p|b200"`` for BB facing a 2bb open, ``"||p|b200r400"``
+    for the opener facing a 3-bet). ``None`` or the bare root maps to
+    "Open (RFI)".
+
+    Falls back to the raw suffix (wrapped) when the grammar can't be decoded
+    so an unrecognized node is still selectable.
+    """
+    if suffix is None:
+        return _ROOT_DEPTH_LABELS[0]
+    body = suffix
+    # Strip the constant root marker prefix if present.
+    if body.startswith("||p|"):
+        body = body[len("||p|") :]
+    elif body.startswith("|p|"):  # defensive: tolerate a normalized variant
+        body = body[len("|p|") :]
+    if body == "":
+        return _ROOT_DEPTH_LABELS[0]
+
+    tokens = _LINE_TOKEN_RE.findall(body)
+    # Reject if the tokens don't reconstruct the body (unknown grammar).
+    if "".join(tokens) != body:
+        return f"Line: {suffix}"
+
+    limp = bool(tokens) and tokens[0] == "c"
+    facing_allin = bool(tokens) and tokens[-1] == "A"
+    raise_depth = sum(1 for t in tokens if t and t[0] in "br")
+
+    base = _ROOT_DEPTH_LABELS.get(raise_depth)
+    if base is None:
+        # 4+ raises: 4 raises -> 5-bet, 5 -> 6-bet, ...
+        base = f"{raise_depth + 1}-bet"
+
+    if limp and raise_depth == 0:
+        # SB limped, no one has raised yet (BB's check/raise decision after
+        # a limp), or SB's own decision facing nothing further.
+        label = "Limped pot"
+    elif limp:
+        label = f"Limp: {base}"
+    else:
+        label = base
+
+    if facing_allin:
+        label = f"{label} (vs all-in)"
+    return label
+
+
+# -----------------------------------------------------------------------------
 # NiceGUI rendering
 # -----------------------------------------------------------------------------
 
@@ -349,6 +440,90 @@ def _current_chart_result(state: AppState) -> dict[str, Any] | None:
     return getattr(runner, "preflop_chart_result", None)
 
 
+def _available_lines(state: AppState) -> list[str]:
+    """Return the available preflop action lines for the current result.
+
+    Reads ``state.runner.available_preflop_lines()`` (sorted root-first).
+    Returns ``[]`` when no result / no runner.
+    """
+    runner = getattr(state, "runner", None)
+    if runner is None:
+        return []
+    getter = getattr(runner, "available_preflop_lines", None)
+    if not callable(getter):
+        return []
+    try:
+        lines = getter()
+    except Exception:  # noqa: BLE001
+        logger.exception("available_preflop_lines() raised")
+        return []
+    return list(lines) if isinstance(lines, list) else []
+
+
+def _selected_line(state: AppState) -> str | None:
+    """Return the currently-selected preflop line suffix (None = root).
+
+    Stashed on ``state.prefs.preflop_chart_selected_line`` (non-persisted
+    convenience slot, same pattern as the selected cell). Clamps to the root
+    when the stored line is no longer available (e.g. after a re-solve with a
+    different tree)."""
+    prefs = getattr(state, "prefs", None)
+    sel = getattr(prefs, "preflop_chart_selected_line", None) if prefs else None
+    lines = _available_lines(state)
+    if not lines:
+        return sel  # nothing solved yet; keep whatever was stored
+    if sel in lines:
+        return sel
+    return lines[0]  # default to root (sorted root-first)
+
+
+def _set_selected_line(state: AppState, line: str | None) -> None:
+    prefs = getattr(state, "prefs", None)
+    if prefs is None:
+        return
+    prefs.preflop_chart_selected_line = line  # type: ignore[attr-defined]
+
+
+def _line_chart_result(state: AppState) -> dict[str, Any] | None:
+    """Return a chart_result-shaped dict for the SELECTED line.
+
+    The grid + detail panel consume ``{"per_class": {...}, ...}``. The root
+    line is already in ``preflop_chart_result["per_class"]``; for deeper
+    lines we pull the per-class map via
+    ``state.runner.preflop_chart_summary_for_line(line)`` and splice it onto
+    a shallow copy so iteration/wallclock metadata still renders.
+
+    Returns the unmodified root result when the selected line is the root or
+    unavailable, ``None`` when there is no result at all.
+    """
+    result = _current_chart_result(state)
+    if result is None:
+        return None
+    lines = _available_lines(state)
+    sel = _selected_line(state)
+    # Root (or single-line / unavailable) -> unchanged result.
+    if not lines or sel is None or (lines and sel == lines[0]):
+        return result
+    runner = getattr(state, "runner", None)
+    getter = getattr(runner, "preflop_chart_summary_for_line", None)
+    if not callable(getter):
+        return result
+    try:
+        per_class = getter(sel)
+    except Exception:  # noqa: BLE001
+        logger.exception("preflop_chart_summary_for_line(%r) raised", sel)
+        return result
+    if not isinstance(per_class, dict) or not per_class:
+        # No data for this line — return a per_class-empty copy so the grid
+        # paints neutral rather than silently showing the root range.
+        spliced = dict(result)
+        spliced["per_class"] = {}
+        return spliced
+    spliced = dict(result)
+    spliced["per_class"] = per_class
+    return spliced
+
+
 def _chart_status(state: AppState) -> str:
     runner = getattr(state, "runner", None)
     if runner is None:
@@ -386,6 +561,20 @@ def render(state: AppState, on_solve: Callable[[], None] | None = None) -> None:
     def _detail_slot() -> None:
         _render_detail_panel(state)
 
+    # N5: the header subtitle ("12 iters · 1.3s · done" / "Blueprint route" /
+    # "no chart computed yet") must re-render on every solve, exactly like the
+    # grid + source badge. It was previously a plain ``ui.label`` built once at
+    # page-build time and never refreshed, so after a blueprint/interpolated
+    # solve populated the grid and flipped the badge to "Blueprint · 100BB",
+    # the subtitle stayed frozen on the stale empty-state text. Making it a
+    # refreshable slot (driven by the same ``_refresh_all`` the grid/badge use)
+    # ties it to the same source of truth.
+    @ui.refreshable  # type: ignore[untyped-decorator]
+    def _subtitle_slot() -> None:
+        ui.label(_chart_subtitle(state)).mark("preflop-chart-subtitle").style(
+            "color:var(--ps-text-muted);font-size:12px"
+        )
+
     # Task #68 Phase 6: source-indicator badge slot. The badge text is
     # rebuilt from ``state.runner.preflop_route_info`` on each refresh
     # tick; we expose it as a separate refreshable so the polling timer
@@ -401,7 +590,26 @@ def render(state: AppState, on_solve: Callable[[], None] | None = None) -> None:
             "font-size:11px;padding:4px 0"
         )
 
+    # Line/node selector: lets the user view deeper lines (BB vs open /
+    # 3-bet / 4-bet) instead of only the open range. Refreshable so it
+    # repopulates after a solve produces new lines.
+    def _on_line_change(line: str | None) -> None:
+        _set_selected_line(state, line)
+        _refresh_all()
+
+    @ui.refreshable  # type: ignore[untyped-decorator]
+    def _line_selector_slot() -> None:
+        _render_line_selector(state, _on_line_change)
+
     def _refresh_all() -> None:
+        try:
+            _subtitle_slot.refresh()
+        except Exception:  # noqa: BLE001
+            logger.exception("preflop chart subtitle refresh failed")
+        try:
+            _line_selector_slot.refresh()
+        except Exception:  # noqa: BLE001
+            logger.exception("preflop chart line selector refresh failed")
         try:
             _grid_slot.refresh()
         except Exception:  # noqa: BLE001
@@ -418,21 +626,25 @@ def render(state: AppState, on_solve: Callable[[], None] | None = None) -> None:
     with (
         ui.element("div")
         .mark("preflop-chart-display")
-        .style("background:#0f0f0f;padding:12px;border-radius:6px;width:100%")
+        .style(
+            "background:var(--ps-panel-bg);padding:12px;"
+            "border-radius:6px;width:100%"
+        )
     ):
         with ui.row().style(
             "align-items:center;justify-content:space-between;margin-bottom:8px"
         ):
             ui.label("PREFLOP CHART").style(
-                "font-weight:700;letter-spacing:0.05em;color:#f5f5f5"
+                "font-weight:700;letter-spacing:0.05em;color:var(--ps-text-strong)"
             )
-            ui.label(_chart_subtitle(state)).mark("preflop-chart-subtitle").style(
-                "color:#aaaaaa;font-size:12px"
-            )
+            _subtitle_slot()
         with ui.row().style("align-items:flex-start;gap:14px;flex-wrap:nowrap"):
             with ui.element("div").style(
                 f"min-width:{_CELL_PX * 13 + 30}px;flex:0 0 auto"
             ):
+                # Line/node selector sits above the grid so the user picks
+                # which node (open / BB vs open / 3-bet / 4-bet) to view.
+                _line_selector_slot()
                 _grid_slot()
                 # Source badge sits directly under the chart grid so the
                 # user sees the route on the same eye-line as the data.
@@ -450,15 +662,41 @@ def render(state: AppState, on_solve: Callable[[], None] | None = None) -> None:
 
 
 def _chart_subtitle(state: AppState) -> str:
-    """Compose the small caption to the right of the chart heading."""
+    """Compose the small caption to the right of the chart heading.
+
+    N5: the empty-state ("no chart computed yet") MUST agree with what the grid
+    and source badge show. The grid paints from
+    ``project_chart(_line_chart_result(state))`` and the badge from
+    ``runner.preflop_route_info``; so we treat a chart as "present" exactly when
+    that same projection is non-empty (covers blueprint, interpolated, AND live
+    routes — every path that populates the grid sets ``preflop_chart_result``).
+    Only when nothing has been computed do we show the genuine empty-state text.
+
+    For a blueprint / interpolated route the engine reports ``iterations == 0``
+    and ``wallclock_seconds == 0.0`` (no CFR was run), so the bare
+    "0 iters · 0.0s" caption is misleading; surface the route source instead.
+    The live path keeps the iters/wallclock summary.
+    """
     chart_result = _current_chart_result(state)
     status = _chart_status(state)
-    if chart_result is None:
+    # Source of truth: does the grid actually have cells to paint?
+    has_chart = bool(project_chart(_line_chart_result(state)))
+    if not has_chart:
         if status == "running":
             return "solving... (chart will appear on completion)"
         return "no chart computed yet"
-    iters = int(chart_result.get("iterations", 0))
-    wall = float(chart_result.get("wallclock_seconds", 0.0))
+    iters = int((chart_result or {}).get("iterations", 0))
+    wall = float((chart_result or {}).get("wallclock_seconds", 0.0))
+    if iters <= 0:
+        # Blueprint / interpolated route (no live CFR iterations) — describe the
+        # route rather than report a misleading "0 iters · 0.0s".
+        runner = getattr(state, "runner", None)
+        info = getattr(runner, "preflop_route_info", None)
+        source = getattr(info, "source", None)
+        label = getattr(source, "value", None)
+        if label:
+            return f"{str(label).capitalize()} route"
+        return "precomputed route"
     return f"{iters} iters · {wall:.1f}s · {status}"
 
 
@@ -475,13 +713,72 @@ def _route_info_badge(state: AppState) -> str:
     """
     runner = getattr(state, "runner", None)
     if runner is None:
-        return "[unavailable] no runner"
-    info = getattr(runner, "preflop_route_info", None)
-    if info is None:
-        return "[unrouted] click Solve to populate"
-    from ui.blueprint_router import describe_route
+        return "Unavailable · no runner"
+    from ui.blueprint_router import SourceLabel, describe_route_badge
 
-    return describe_route(info)
+    info = getattr(runner, "preflop_route_info", None)
+    badge = describe_route_badge(info)
+
+    # Surface the custom-sizes consequence explicitly. The blueprint asset is
+    # solved against the FIXED engine action menu (opens 2/3/4/5bb, reraise
+    # ×2/3/4/5). The current dispatch keys the blueprint lookup on
+    # (stack_bb, ante) ONLY — it does NOT pass the user's edited sizes — so:
+    #   * if a LIVE solve is serving, the custom sizes ARE honored (good);
+    #   * if a Blueprint/Interpolated route is serving, those custom sizes are
+    #     being IGNORED — the chart reflects the default menu, not what the
+    #     user typed. We must not let that be silent.
+    bypass = _custom_sizes_bypass_label(state)
+    if bypass is not None:
+        source = getattr(info, "source", None)
+        if source in (SourceLabel.BLUEPRINT, SourceLabel.INTERPOLATED):
+            badge = f"{badge} · {bypass} ignored by blueprint (showing default menu)"
+        else:
+            # Live (or no route yet) — the live solve uses the custom sizes.
+            badge = f"{badge} · {bypass} → live solve (blueprint bypassed)"
+    return badge
+
+
+def _custom_sizes_bypass_label(state: AppState) -> str | None:
+    """Return a short label of WHICH sizes diverge from the engine defaults.
+
+    e.g. ``"Custom open sizes"`` / ``"Custom reraise multipliers"`` /
+    ``"Custom open sizes + reraise multipliers"``; ``None`` when defaults are
+    in use. Reads the live open-size / reraise-multiplier input widgets
+    stashed on ``state.current_spot`` at render time, falling back to the
+    parsed pending lists on the runner when widgets aren't available.
+    """
+    from ui.blueprint_router import custom_sizes_bypass_note
+
+    spot = getattr(state, "current_spot", None)
+    runner = getattr(state, "runner", None)
+
+    def _read(widget_attr: str, pending_attr: str) -> list[float] | None:
+        widget = getattr(spot, widget_attr, None) if spot is not None else None
+        raw = getattr(widget, "value", None) if widget is not None else None
+        if isinstance(raw, str):
+            try:
+                return parse_size_list(raw)
+            except ValueError:
+                return None  # invalid input: don't claim a bypass
+        pending = getattr(runner, pending_attr, None) if runner is not None else None
+        if isinstance(pending, list):
+            return [float(x) for x in pending]
+        return None
+
+    opens = _read("preflop_chart_opens", "_pending_preflop_chart_opens")
+    mults = _read("preflop_chart_mults", "_pending_preflop_chart_mults")
+    note = custom_sizes_bypass_note(
+        open_sizes=opens,
+        reraise_multipliers=mults,
+        default_open_sizes=_DEFAULT_OPEN_SIZES_BB,
+        default_reraise_multipliers=_DEFAULT_RERAISE_MULTIPLIERS,
+    )
+    if note is None:
+        return None
+    # custom_sizes_bypass_note returns "Custom <what> → live solve (...)";
+    # strip the trailing clause so we can recompose the message with the
+    # correct consequence for the actually-served route.
+    return note.split(" → ", 1)[0]
 
 
 def _badge_color(info: Any) -> str:
@@ -492,23 +789,91 @@ def _badge_color(info: Any) -> str:
     route has been chosen yet.
     """
     if info is None:
-        return "#7a7a7a"
+        return "var(--ps-text-fainter)"
     from ui.blueprint_router import SourceLabel
 
     label = getattr(info, "source", None)
     if label == SourceLabel.BLUEPRINT:
-        return "#9ad29a"
+        return "var(--ps-accent-ev)"
     if label == SourceLabel.INTERPOLATED:
-        return "#e0d27c"
+        return "var(--ps-accent-warn)"
     if label == SourceLabel.LIVE:
-        return "#e8e8e8"
-    return "#7a7a7a"
+        return "var(--ps-text-dim)"
+    return "var(--ps-text-fainter)"
+
+
+def _line_options(state: AppState) -> dict[str, str]:
+    """Build the {suffix -> human label} option map for the line selector.
+
+    Disambiguates collisions (two suffixes mapping to the same human label —
+    e.g. multiple 3-bet sub-nodes) by appending the raw suffix so every
+    option stays distinct and addressable.
+    """
+    lines = _available_lines(state)
+    raw: list[tuple[str, str]] = [(ln, preflop_line_label(ln)) for ln in lines]
+    label_counts: dict[str, int] = {}
+    for _, lab in raw:
+        label_counts[lab] = label_counts.get(lab, 0) + 1
+    options: dict[str, str] = {}
+    for suffix, lab in raw:
+        if label_counts[lab] > 1:
+            # Show the distinguishing token tail so duplicates are unique.
+            tail = suffix[len("||p|") :] if suffix.startswith("||p|") else suffix
+            options[suffix] = f"{lab}  ({tail or 'root'})"
+        else:
+            options[suffix] = lab
+    return options
+
+
+def _render_line_selector(
+    state: AppState, on_change: Callable[[str | None], None]
+) -> None:
+    """Render the preflop line/node selector (dropdown).
+
+    Lets the user switch the chart between the open range and deeper nodes
+    (BB vs open / 3-bet / 4-bet / limped pots). Only renders meaningfully
+    once a solve has produced more than the root line; before then it shows
+    a quiet hint so the control's purpose is discoverable.
+    """
+    ui = _import_nicegui()
+    options = _line_options(state)
+    with (
+        ui.element("div")
+        .mark("preflop-chart-line-selector")
+        .style("margin-bottom:8px;display:flex;align-items:center;gap:8px")
+    ):
+        ui.label("Line").style(
+            "color:var(--ps-text-label);font-size:12px;font-weight:600;"
+            "letter-spacing:0.03em"
+        )
+        if not options:
+            ui.label("open only — solve to reveal deeper lines").style(
+                "color:var(--ps-text-fainter);font-size:11px;font-style:italic"
+            )
+            return
+        sel = _selected_line(state)
+        if sel not in options:
+            sel = next(iter(options))
+
+        def _handle(e: Any) -> None:
+            on_change(e.value)
+
+        (
+            ui.select(options=options, value=sel, on_change=_handle)
+            .props("dense outlined options-dense")
+            .style("min-width:220px;font-size:12px")
+            .mark("preflop-chart-line-select")
+        )
+        if len(options) == 1:
+            ui.label("(open only at this depth)").style(
+                "color:var(--ps-text-fainter);font-size:11px;font-style:italic"
+            )
 
 
 def _render_grid(state: AppState) -> None:
-    """Render the 13x13 cell grid."""
+    """Render the 13x13 cell grid (for the selected preflop line)."""
     ui = _import_nicegui()
-    summaries = project_chart(_current_chart_result(state))
+    summaries = project_chart(_line_chart_result(state))
 
     with ui.element("div").style(
         f"display:grid;grid-template-columns:repeat(13, {_CELL_PX}px);"
@@ -525,9 +890,15 @@ def _render_cell(state: AppState, hand_class: str, summary: CellSummary) -> None
     """Render a single matrix cell."""
     ui = _import_nicegui()
     color = cell_color_css(summary)
+    # F04: empty cells fall back to a NEUTRAL grey anchor (``_COLOR_EMPTY``)
+    # — re-route that to the theme var so an unsolved chart isn't dark-on-dark
+    # in light mode. Non-empty cells keep their semantic fold/call/raise/jam
+    # blend (``cell_color_rgb`` is unit-tested).
+    if summary.empty:
+        color = "var(--ps-faded)"
     tag = _cell_tag(summary)
     selected = _selected_cell_label(state) == hand_class
-    border = "#ffffff" if selected else "#1f1f1f"
+    border = "var(--ps-cell-border-sel)" if selected else "var(--ps-cell-border)"
     cell_marker = f"preflop-chart-cell preflop-chart-cell-{hand_class}"
 
     def _on_click(_event: object = None, cls: str = hand_class) -> None:
@@ -544,7 +915,7 @@ def _render_cell(state: AppState, hand_class: str, summary: CellSummary) -> None
 
     style = (
         f"width:{_CELL_PX}px;height:{_CELL_PX}px;"
-        f"background:{color};color:#f5f5f5;"
+        f"background:{color};color:var(--ps-cell-label);"
         f"border:1px solid {border};"
         f"display:flex;flex-direction:column;justify-content:space-between;"
         f"padding:2px 3px;font-size:10px;cursor:pointer;"
@@ -557,12 +928,12 @@ def _render_cell(state: AppState, hand_class: str, summary: CellSummary) -> None
         .on("click", _on_click)
     ):
         ui.label(hand_class).style(
-            "font-weight:600;line-height:1;color:#f5f5f5"
+            "font-weight:600;line-height:1;color:var(--ps-cell-label)"
         )
         if tag:
             ui.label(tag).style(
                 "font-family:Menlo,Consolas,monospace;font-size:9px;"
-                "align-self:flex-end;color:#1a1a1a"
+                "align-self:flex-end;color:var(--ps-cell-tag)"
             )
         ui.tooltip(_tooltip_text(hand_class, summary))
 
@@ -606,12 +977,12 @@ def _render_input_panel(
         ui.element("div")
         .mark("preflop-chart-input-panel")
         .style(
-            "background:#181818;padding:10px;border-radius:4px;"
-            "border:1px solid #2a2a2a;margin-bottom:10px"
+            "background:var(--ps-input-bg);padding:10px;border-radius:4px;"
+            "border:1px solid var(--ps-border-soft);margin-bottom:10px"
         )
     ):
         ui.label("Configure preflop solve").style(
-            "font-weight:600;color:#f0f0f0;margin-bottom:8px"
+            "font-weight:600;color:var(--ps-text);margin-bottom:8px"
         )
 
         spot = state.current_spot
@@ -814,7 +1185,7 @@ def _render_detail_panel(state: AppState) -> None:
     currently-selected cell."""
     ui = _import_nicegui()
     selected = _selected_cell_label(state)
-    chart_result = _current_chart_result(state)
+    chart_result = _line_chart_result(state)
     summaries = project_chart(chart_result)
     summary = summaries.get(selected or "") if selected else None
 
@@ -822,21 +1193,21 @@ def _render_detail_panel(state: AppState) -> None:
         ui.element("div")
         .mark("preflop-chart-detail")
         .style(
-            "background:#1b1b1b;padding:10px;border-radius:4px;"
-            "border:1px solid #303030"
+            "background:var(--ps-strip-bg);padding:10px;border-radius:4px;"
+            "border:1px solid var(--ps-border-strong)"
         )
     ):
         if selected is None:
             ui.label("Click a cell to see per-action breakdown").style(
-                "color:#9a9a9a;font-style:italic"
+                "color:var(--ps-text-faint);font-style:italic"
             )
             return
         ui.label(f"Hand class: {selected}").style(
-            "font-weight:600;color:#f0f0f0;margin-bottom:6px"
+            "font-weight:600;color:var(--ps-text);margin-bottom:6px"
         )
         if summary is None or summary.empty:
             ui.label("No chart data for this class yet — run Solve.").style(
-                "color:#a8a8a8;font-style:italic"
+                "color:var(--ps-text-muted);font-style:italic"
             )
             return
         rows = build_detail_rows(summary)
@@ -846,7 +1217,8 @@ def _render_detail_panel(state: AppState) -> None:
             ).mark(f"preflop-chart-detail-row-{r.label}"):
                 # Action label
                 ui.label(r.label).style(
-                    "width:90px;color:#e8e8e8;font-family:Menlo,Consolas,monospace"
+                    "width:90px;color:var(--ps-text-dim);"
+                    "font-family:Menlo,Consolas,monospace"
                 )
                 # Bar
                 bar_width = 160
@@ -862,14 +1234,15 @@ def _render_detail_panel(state: AppState) -> None:
                 )
                 with ui.element("div").style(
                     f"width:{bar_width}px;height:12px;"
-                    f"background:#0a0a0a;border:1px solid #2a2a2a;"
+                    f"background:var(--ps-track-bg);"
+                    f"border:1px solid var(--ps-border-soft);"
                     f"position:relative"
                 ):
                     ui.element("div").style(
                         f"width:{fill_px}px;height:100%;background:{anchor_css}"
                     )
                 ui.label(f"{r.probability * 100:.1f}%").style(
-                    "color:#cccccc;font-family:Menlo,Consolas,monospace;"
+                    "color:var(--ps-text-mono);font-family:Menlo,Consolas,monospace;"
                     "width:60px;text-align:right"
                 )
 
@@ -879,12 +1252,13 @@ def _render_detail_panel(state: AppState) -> None:
         if isinstance(ev_map, dict) and selected in ev_map:
             ev_val = float(ev_map[selected])
             ui.label(f"EV: {ev_val:+.2f} mBB").style(
-                "color:#9ad29a;font-family:Menlo,Consolas,monospace;"
+                "color:var(--ps-accent-ev);font-family:Menlo,Consolas,monospace;"
                 "margin-top:6px"
             ).mark(f"preflop-chart-detail-ev-{selected}")
         else:
             ui.label("EV: (not exported by engine in v1.x)").style(
-                "color:#7a7a7a;font-style:italic;font-size:11px;margin-top:6px"
+                "color:var(--ps-text-fainter);font-style:italic;"
+                "font-size:11px;margin-top:6px"
             )
 
 

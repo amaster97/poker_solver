@@ -9,8 +9,11 @@ Implements ``pr10a_spec.md`` §4.3 mockup:
 - Target-exploitability toggle (opt-in; when active, iterations field
   becomes the max-iterations cap and a "target expl mBB/pot" field
   appears).
-- Backend toggle (Python / Rust; default Python per spec §13 decision 6).
-- Solve / Pause / Stop buttons.
+- Solve / Pause / Stop buttons. The engine is always Rust (the
+  Python path is a silent test-only fallback inside the dispatch); the
+  user never picks a backend.
+- A determinate/indeterminate progress bar driven by the
+  ``SolveRunner`` progress accessors.
 - Live exploitability chart (``ui.echart``, log Y-axis by default per
   spec §13 decision 8). Linear toggle exists.
 - Progress readouts (iteration N/M, wall-clock, current expl, backend,
@@ -23,19 +26,29 @@ the timer calls.
 
 ElementFilter markers (Agent C asserts on these):
   ``run-panel``, ``bet-size-checkbox-{pct}``, ``custom-bet-size-input``,
-  ``iterations-input``, ``backend-toggle``, ``solve-button``, ``pause-button``,
+  ``iterations-input``, ``solve-button``, ``pause-button``,
   ``stop-button``, ``expl-chart``, ``progress-iteration``, ``progress-status``,
-  ``target-exploitability-toggle``, ``target-exploitability-input``.
+  ``progress-bar``, ``target-exploitability-toggle``,
+  ``target-exploitability-input``.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import time
 from collections.abc import Callable
 from typing import Any
 
-from ui.state import AppState, SolveSession, save_state
+from ui.state import (
+    AppState,
+    SolveInFlightError,
+    SolveSession,
+    SolveTooLargeError,
+    estimate_postflop_tree_cost,
+    exceeds_tree_budget,
+    save_state,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +101,27 @@ _TIER_INDEX: dict[str, tuple[int, float]] = {
     label: (iters, target_mBB) for label, iters, target_mBB in _TIER_DEFAULTS
 }
 _DEFAULT_TIER: str = "Standard"
+
+# Dev-only Concrete/Range-vs-range method toggle gate.
+#
+# Product decision (2026-05-30): "Concrete" = point-pair (fixes both
+# players to one hole-card combo) is a dev/test artifact, NOT a real
+# study mode. Production postflop is **Range-vs-range only**, so the
+# Concrete/RvR toggle is hidden and ``rvr_mode`` is forced True. The
+# toggle stays reachable behind this env var for developer / UI
+# debugging (RvR is currently slow on this branch's engine), where it
+# defaults to Concrete for fast iteration.
+_CONCRETE_DEV_ENV_VAR: str = "POKER_SOLVER_DEV_CONCRETE"
+
+
+def _concrete_dev_enabled() -> bool:
+    """Return True when the dev-only Concrete/RvR method toggle is enabled.
+
+    Reads ``POKER_SOLVER_DEV_CONCRETE`` from the environment at call time
+    (page-build time, not import time) so tests can flip it per-case with
+    ``monkeypatch.setenv`` / ``delenv``. Any non-empty value enables it.
+    """
+    return bool(os.environ.get(_CONCRETE_DEV_ENV_VAR, "").strip())
 
 
 def render(
@@ -237,13 +271,11 @@ def render(
             )
             tier_slider.mark("tier-slider")
             ui.tooltip(
-                "Measured against the 12 PR 10a preset fixtures plus 3 "
-                "turn-anchor subgames (see "
-                "docs/v1_5_slider_tier_defaults_measured.md). Each tier "
-                "sets both an iteration ceiling and a target "
-                "exploitability (mBB/pot). Empirically each tier "
-                "converges to well below its mBB/pot label on every "
-                "measured spot; wall-clock is the operative differentiator."
+                "Each tier sets both an iteration ceiling and a target "
+                "exploitability (mBB/pot). Higher tiers solve more "
+                "precisely but take longer; in practice every tier "
+                "converges to well below its mBB/pot label, so wall-clock "
+                "time is the main trade-off."
             )
             handles["tier_slider"] = tier_slider
 
@@ -320,13 +352,12 @@ def render(
             _redraw_locks()
 
         ui.separator()
-        # ----- Backend toggle (Python default) -----
-        backend_toggle = ui.toggle(
-            ["Python", "Rust"],
-            value="Python",
-        )
-        backend_toggle.mark("backend-toggle")
-        handles["backend_toggle"] = backend_toggle
+        # ----- Backend: always Rust (v1.11 UI) -----
+        # The Python engine was test-only; the user never chooses it. The
+        # backend select control was removed here. The engine defaults to
+        # Rust in state.py/solver.py (Python survives only as a silent
+        # in-dispatch fallback when the Rust binding is unavailable). We do
+        # NOT write ``backend="python"`` anywhere from this panel.
 
         # ----- Solve-mode toggle (RvR vs Concrete) (PR 24a §3.2) -----
         # Routes through ``poker_solver.range_aggregator.solve_range_vs_range_nash``
@@ -334,21 +365,42 @@ def render(
         # to ``Range-vs-range``. The legacy blueprint path is available
         # via the opt-in checkbox below. See chart subtitle for the
         # method actually used.
-        with ui.row().classes("gap-2 items-center"):
-            ui.label("Solve mode:").classes("text-xs")
-            rvr_toggle = ui.toggle(
-                ["Concrete", "Range-vs-range"],
-                value="Concrete",
-            )
-            rvr_toggle.mark("rvr-mode-toggle")
-            ui.tooltip("Slower aggregator pass; honest framing — see Plan C Stage C1.")
-            handles["rvr_toggle"] = rvr_toggle
+        #
+        # Product decision (2026-05-30): "Concrete" (point-pair) is a
+        # dev/test artifact, not a real study mode. Production postflop is
+        # **Range-vs-range only**, so the toggle is hidden in production
+        # and ``rvr_mode`` is forced True (no "Concrete"/"point-pair" text
+        # reaches the production DOM). The toggle is restored — defaulting
+        # to Concrete for fast dev iteration — only when the dev env var
+        # ``POKER_SOLVER_DEV_CONCRETE`` is set (see ``_concrete_dev_enabled``).
+        if _concrete_dev_enabled():
+            # Dev path: show the toggle, default selection = Concrete so
+            # debugging is fast (RvR is slow on this branch's engine).
+            state.current_spot.rvr_mode = False
+            with ui.row().classes("gap-2 items-center"):
+                ui.label("Solve mode:").classes("text-xs")
+                rvr_toggle = ui.toggle(
+                    ["Concrete", "Range-vs-range"],
+                    value="Concrete",
+                )
+                rvr_toggle.mark("rvr-mode-toggle")
+                ui.tooltip(
+                    "Slower aggregator pass; honest framing — see Plan C Stage C1."
+                )
+                handles["rvr_toggle"] = rvr_toggle
 
-            def _on_rvr_toggle(e: Any) -> None:
-                state.current_spot.rvr_mode = str(e.value) == "Range-vs-range"
-                save_state()
+                def _on_rvr_toggle(e: Any) -> None:
+                    state.current_spot.rvr_mode = str(e.value) == "Range-vs-range"
+                    save_state()
 
-            rvr_toggle.on_value_change(_on_rvr_toggle)
+                rvr_toggle.on_value_change(_on_rvr_toggle)
+        else:
+            # Production path: no toggle. Postflop is Range-vs-range only;
+            # force the effective default so the existing solve dispatch
+            # (``Spot.to_rvr_call_args`` / ``solve_range_vs_range_nash``)
+            # routes through RvR and never falls into the point-pair path.
+            state.current_spot.rvr_mode = True
+        save_state()
 
         # ----- Pluribus-blueprint opt-in checkbox (task #61) -----
         # True-Nash vector-form CFR is the default since 2026-05-27 (per
@@ -392,15 +444,23 @@ def render(
 
         ui.separator()
         # ----- Solve / Pause / Stop -----
-        with ui.row().classes("gap-2"):
-            solve_btn = ui.button(
-                "Solve",
-                icon="play_arrow",
-                on_click=lambda: _wrap_solve(state, handles, on_solve),
-            ).props("color=positive")
-            solve_btn.mark("solve-button")
-            handles["solve_btn"] = solve_btn
+        # Discoverability (v1.11 UI): the Run Panel lives in a collapsed
+        # footer accordion and the Solve button tested hard to find. Make
+        # Solve the unmistakable primary action — large, full-width, raised
+        # — while Pause/Stop stay compact and secondary. Light touch: only
+        # the button emphasis changes, not the panel layout.
+        ui.label("Primary action").classes(
+            "text-xs font-medium uppercase tracking-wide text-gray-500"
+        )
+        solve_btn = ui.button(
+            "Solve",
+            icon="play_arrow",
+            on_click=lambda: _wrap_solve(state, handles, on_solve),
+        ).props("color=positive size=lg unelevated").classes("w-full font-bold")
+        solve_btn.mark("solve-button")
+        handles["solve_btn"] = solve_btn
 
+        with ui.row().classes("gap-2 w-full"):
             pause_btn = ui.button(
                 "Pause",
                 icon="pause",
@@ -418,6 +478,35 @@ def render(
             stop_btn.mark("stop-button")
             stop_btn.disable()
             handles["stop_btn"] = stop_btn
+
+        ui.separator()
+        # ----- Progress bar + running indicator (v1.11 UI) -----
+        # Driven by ``refresh_progress`` via the 0.5 s poll. Determinate
+        # when ``runner.progress_fraction`` is not None; indeterminate
+        # "solving…" when ``is_running`` but the fraction is unknown
+        # (e.g. target-exploitability run with no iteration cap); hidden
+        # otherwise. ETA (mm:ss) appears beside it when derivable.
+        with ui.column().classes("w-full gap-1").mark("progress-bar-container") as (
+            progress_container
+        ):
+            progress_bar = ui.linear_progress(
+                value=0.0,
+                show_value=False,
+            ).props("instant-feedback rounded").classes("w-full")
+            progress_bar.mark("progress-bar")
+            handles["progress_bar"] = progress_bar
+
+            with ui.row().classes("items-center justify-between w-full"):
+                progress_caption = ui.label("").classes("text-xs text-gray-600")
+                progress_caption.mark("progress-caption")
+                handles["progress_caption"] = progress_caption
+
+                progress_eta = ui.label("").classes("text-xs font-mono text-gray-500")
+                progress_eta.mark("progress-bar-eta")
+                handles["progress_eta"] = progress_eta
+        handles["progress_container"] = progress_container
+        # Start hidden; ``refresh_progress`` reveals it while a solve runs.
+        progress_container.set_visibility(False)
 
         ui.separator()
         # ----- Live exploitability chart (log Y by default) -----
@@ -452,26 +541,28 @@ def render(
 
         ui.separator()
         # ----- Progress readouts -----
+        # Clean, readable Iter / Wall / Expl / Status lines. The numeric
+        # ETA lives next to the progress bar above; ``eta_label`` is kept
+        # (empty) so the ``progress-eta`` conformance marker still resolves.
         with ui.column().classes("gap-1"):
-            iter_label = ui.label("Iter: 0").classes("text-xs font-mono")
+            iter_label = ui.label("Iterations: 0").classes("text-xs font-mono")
             iter_label.mark("progress-iteration")
             handles["iter_label"] = iter_label
 
-            wall_label = ui.label("Wall: 0.0 s").classes("text-xs font-mono")
+            wall_label = ui.label("Elapsed: 0.0 s").classes("text-xs font-mono")
             handles["wall_label"] = wall_label
 
-            expl_label = ui.label("Expl: --").classes("text-xs font-mono")
+            expl_label = ui.label("Exploitability: --").classes("text-xs font-mono")
             handles["expl_label"] = expl_label
-
-            backend_label = ui.label("Backend: python").classes("text-xs font-mono")
-            handles["backend_label"] = backend_label
 
             status_label = ui.label("Status: idle").classes("text-xs font-mono")
             status_label.mark("progress-status")
             handles["status_label"] = status_label
 
             eta_label = ui.label("").classes("text-xs font-mono italic text-gray-500")
-            # Smoke 20 (X7): conformance marker for the long-solve ETA.
+            # Smoke 20 (X7): conformance marker retained for the long-solve
+            # ETA. The live ETA now renders next to the progress bar; this
+            # element stays present (empty) so the marker still resolves.
             eta_label.mark("progress-eta")
             handles["eta_label"] = eta_label
 
@@ -492,10 +583,21 @@ def render(
 def refresh_progress(state: AppState) -> None:
     """Called by the ``ui.timer(0.5, ...)`` tick.
 
-    Reads ``state.runner.iteration``, ``state.runner.status``,
-    ``state.runner.expl_history``; updates the chart + readouts; sets
-    the solve/pause/stop button enabled-states. Per-tick fast path:
-    if status is "idle" we only refresh the disabled-state.
+    Reads the ``SolveRunner`` progress accessors (``is_running``,
+    ``current_iteration``, ``total_iterations``, ``progress_fraction``,
+    ``elapsed_seconds``, ``eta_seconds``) plus ``status`` /
+    ``expl_history``; drives the progress bar + readouts + chart and sets
+    the solve/pause/stop button enabled-states.
+
+    Progress bar policy (v1.11 UI):
+      * ``progress_fraction`` is not None -> DETERMINATE bar at that value.
+      * ``is_running`` but ``progress_fraction`` is None -> INDETERMINATE
+        "solving…" bar (handles ``total_iterations is None`` with no
+        divide-by-zero).
+      * otherwise -> bar hidden.
+
+    Per-tick fast path: if status is "idle" we only refresh the
+    disabled-state + hide the bar.
     """
     handles = _handles.get(id(state))
     if handles is None:
@@ -518,29 +620,19 @@ def refresh_progress(state: AppState) -> None:
         handles["pause_btn"].disable()
         handles["stop_btn"].disable()
 
+    # Progress bar (drive on every non-idle tick; hide when idle).
+    _update_progress_bar(handles, runner, status)
+
     if status == "idle":
         return  # no readouts to update
 
-    # Readouts.
-    handles["iter_label"].set_text(f"Iter: {runner.iteration:,}")
-    wall = time.time() - runner.started_at if runner.started_at else 0.0
-    handles["wall_label"].set_text(f"Wall: {wall:.1f} s")
+    # Readouts (clean, human-readable labels).
+    handles["iter_label"].set_text(f"Iterations: {runner.current_iteration:,}")
+    handles["wall_label"].set_text(f"Elapsed: {runner.elapsed_seconds:.1f} s")
     if runner.expl_history:
         last_expl = runner.expl_history[-1][1]
-        handles["expl_label"].set_text(f"Expl: {last_expl:.3f} mBB/pot")
-    handles["status_label"].set_text(f"Status: {status}")
-
-    # Long-solve ETA (edge case §6.1): after 30 s, extrapolate from decay slope.
-    if wall > 30.0 and len(runner.expl_history) >= 3:
-        eta_text = _compute_eta(runner.expl_history, wall)
-        if wall > 300.0:  # 5 min
-            handles["eta_label"].set_text(
-                f"\N{HOURGLASS} {eta_text} (large spots may take 30+ min)"
-            )
-        else:
-            handles["eta_label"].set_text(eta_text)
-    else:
-        handles["eta_label"].set_text("")
+        handles["expl_label"].set_text(f"Exploitability: {last_expl:.3f} mBB/pot")
+    handles["status_label"].set_text(f"Status: {_status_text(status)}")
 
     # Chart update.
     if runner.expl_history:
@@ -575,10 +667,7 @@ def refresh_progress(state: AppState) -> None:
             method_label.set_text("Method: Pluribus blueprint aggregator (legacy)")
             nash_expl_label.set_text("")
         elif status in ("done", "stopped") and not rvr_mode_on:
-            backend_str = (
-                state.current_solve.backend if state.current_solve else "python"
-            )
-            method_label.set_text(f"Method: concrete ({backend_str})")
+            method_label.set_text("Method: concrete")
             nash_expl_label.set_text("")
         elif status == "running":
             # Surface "would use true-Nash" while still solving so the
@@ -606,12 +695,97 @@ def refresh_progress(state: AppState) -> None:
         handles["_error_shown"] = False
 
 
+def _update_progress_bar(handles: dict[str, Any], runner: Any, status: str) -> None:
+    """Drive the linear progress bar from the ``SolveRunner`` accessors.
+
+    Policy (v1.11 UI):
+      * ``progress_fraction`` is not None -> DETERMINATE bar at that value.
+      * ``is_running`` and ``progress_fraction`` is None -> INDETERMINATE
+        "solving…" bar (``total_iterations is None`` lands here; no
+        divide-by-zero — ``progress_fraction`` returns None in that case).
+      * otherwise (idle, or terminal with nothing to show) -> hidden.
+
+    ETA (mm:ss) is shown beside the bar when ``runner.eta_seconds`` is
+    available; the caption names the current phase.
+    """
+    container = handles.get("progress_container")
+    bar = handles.get("progress_bar")
+    caption = handles.get("progress_caption")
+    eta_label = handles.get("progress_eta")
+    if container is None or bar is None:
+        return
+
+    fraction = runner.progress_fraction  # float in [0,1] or None
+    running = bool(runner.is_running)
+
+    if fraction is not None:
+        # DETERMINATE.
+        container.set_visibility(True)
+        bar.props(remove="indeterminate")
+        bar.set_value(max(0.0, min(1.0, float(fraction))))
+        if caption is not None:
+            if status in ("done", "stopped"):
+                caption.set_text("Complete")
+            else:
+                total = runner.total_iterations
+                done = runner.current_iteration
+                pct = int(round(fraction * 100))
+                if total:
+                    caption.set_text(f"Solving… {done:,}/{total:,} iters ({pct}%)")
+                else:
+                    caption.set_text(f"Solving… {pct}%")
+    elif running:
+        # INDETERMINATE — running but no known target (e.g. target-expl
+        # early-exit with no iteration cap, or total_iterations is None).
+        container.set_visibility(True)
+        bar.props(add="indeterminate")
+        bar.set_value(0.0)
+        if caption is not None:
+            caption.set_text("Solving…")
+    else:
+        # Idle / nothing to show.
+        container.set_visibility(False)
+        bar.props(remove="indeterminate")
+        bar.set_value(0.0)
+        if caption is not None:
+            caption.set_text("")
+        if eta_label is not None:
+            eta_label.set_text("")
+        return
+
+    # ETA (mm:ss) when derivable; blank otherwise.
+    if eta_label is not None:
+        eta = runner.eta_seconds if status not in ("done", "stopped") else None
+        eta_label.set_text(f"ETA {_format_mmss(eta)}" if eta is not None else "")
+
+
+def _status_text(status: str) -> str:
+    """Map a raw runner status to a clean, human-readable label."""
+    return {
+        "idle": "Idle",
+        "running": "Running",
+        "paused": "Paused",
+        "done": "Done",
+        "stopped": "Stopped",
+        "error": "Error",
+    }.get(status, status)
+
+
+def _format_mmss(seconds: float | None) -> str:
+    """Format a seconds count as ``mm:ss`` (e.g. ``2:05``); ``--:--`` if None."""
+    if seconds is None or seconds < 0:
+        return "--:--"
+    total = int(round(seconds))
+    minutes, secs = divmod(total, 60)
+    return f"{minutes:d}:{secs:02d}"
+
+
 def _wrap_solve(
     state: AppState,
     handles: dict[str, Any],
     on_solve: Callable[[], None],
 ) -> None:
-    """Read the tier slider / backend toggles into state then invoke on_solve.
+    """Read the tier slider / iteration inputs into state then invoke on_solve.
 
     PR 24a §3.7: the tier slider is the primary control; the ``Custom
     (advanced)`` expansion's ``iters_input`` + ``target_input`` are
@@ -619,10 +793,21 @@ def _wrap_solve(
     pushes the tier-recommended values into those inputs, so reading
     ``iters_input.value`` alone correctly captures both the tier default
     and any user override. The same logic applies to ``target_input``.
+
+    v1.11 UI: the backend is always Rust — the user no longer picks an
+    engine, so there is no toggle to read. ``SolveSession.backend`` is set
+    to ``"rust"`` so ``ui/app.py`` forwards Rust to ``SolveRunner.start``
+    (whose own default is already ``"rust"``). The Python path remains a
+    silent in-dispatch fallback only.
+
+    ``SolveInFlightError`` (a ``RuntimeError`` subclass) is caught around
+    ``on_solve()`` so a genuine in-flight solve surfaces the friendly
+    ``.message`` as a warning rather than a raw traceback string.
     """
+    from nicegui import ui
+
     iters_input = handles.get("iters_input")
     target_input = handles.get("target_input")
-    backend_toggle = handles.get("backend_toggle")
     tier_slider = handles.get("tier_slider")
     # Resolve tier (for downstream logging only — the tier's iter +
     # target values are mirrored to the custom inputs).
@@ -652,9 +837,11 @@ def _wrap_solve(
         except (TypeError, ValueError):
             target_mBB = tier_target_mBB
     target_expl = target_mBB / 1000.0
-    backend = (
-        str(backend_toggle.value).lower() if backend_toggle is not None else "python"
-    )
+    # Engine is always Rust now (v1.11 UI). We never write "python" here —
+    # the Python path is a silent in-dispatch fallback only. ``ui/app.py``
+    # reads ``state.current_solve.backend`` and forwards it to
+    # ``SolveRunner.start`` (default also "rust").
+    backend = "rust"
     state.current_solve = SolveSession(
         spot=state.current_spot,
         iterations=iters,
@@ -671,8 +858,52 @@ def _wrap_solve(
     # through to existing behaviour.
     state.runner._pending_target_expl = target_expl
     state.runner._pending_tier_label = tier
-    handles["backend_label"].set_text(f"Backend: {backend}")
-    on_solve()
+
+    # Bug 3: pre-solve tree-size guard. A wide-range FLOP solve hangs for
+    # minutes inside the engine's tree-build (before the iteration loop even
+    # starts) and is uncancellable — the UI would show "Iterations: 0 /
+    # Running" forever and Stop would do nothing. Estimate the cost here,
+    # BEFORE invoking ``on_solve`` (which spawns the worker), and refuse with
+    # a clear, actionable message if it's too large. Only the concrete
+    # postflop path is gated; the range-vs-range aggregator runs its own
+    # bounded subgames. ``SolveRunner.start`` re-checks as defense-in-depth.
+    spot = state.current_spot
+    if not bool(getattr(spot, "rvr_mode", False)):
+        try:
+            guard_config = spot.to_hunl_config()
+        except Exception:  # noqa: BLE001
+            # Config can't be built yet (e.g. empty/invalid spot) — let the
+            # normal solve path surface that error; don't block on the guard.
+            guard_config = None
+        if guard_config is not None and exceeds_tree_budget(guard_config):
+            cost = estimate_postflop_tree_cost(guard_config)
+            logger.info(
+                "Refusing oversized postflop solve (estimated cost %.3g > "
+                "budget); prompting user to narrow the spot.",
+                cost,
+            )
+            ui.notify(
+                "This flop solve is too large to finish in reasonable "
+                "time/memory. Narrow the ranges, uncheck some bet sizes, or "
+                "solve a turn/river subgame instead of the flop.",
+                type="negative",
+                position="top",
+                timeout=10000,
+                multi_line=True,
+            )
+            return
+
+    # Invoke the caller's solve trigger. ``on_solve`` (ui/app.py) starts the
+    # worker via ``SolveRunner.start``, which raises ``SolveInFlightError``
+    # ONLY when a solve is genuinely running and ``SolveTooLargeError`` (Bug 3
+    # defense-in-depth) when the tree is too large. Surface their friendly
+    # messages rather than any raw exception text.
+    try:
+        on_solve()
+    except SolveTooLargeError as err:
+        ui.notify(err.message, type="negative", position="top", timeout=10000)
+    except SolveInFlightError as err:
+        ui.notify(err.message, type="warning")
 
 
 def _on_bet_size_toggle(state: AppState, size: float, checked: bool) -> None:
@@ -857,8 +1088,8 @@ def _chart_quality_label(state: AppState) -> str:
     """Return the chart subtitle for the current solve mode + backend.
 
     Per PR 24a §3.4 + task #61 (default flipped 2026-05-27):
-      * concrete + Rust  -> "true Nash (Rust best-response walk, v1.3.2)"
-      * concrete + Python -> "true Nash (Python best-response walk, slow)"
+      * concrete + Rust  -> "true Nash (best-response walk)"
+      * concrete + Python -> "true Nash (best-response walk (slow))"
       * RvR + ``solver_mode == "true_nash"`` (default) -> "true Nash RvR
                               (vector-form CFR, default; v1.7.0+; post-PR-114)"
       * RvR + ``solver_mode == "blueprint"`` (legacy opt-in) -> "blueprint
@@ -885,8 +1116,8 @@ def _chart_quality_label(state: AppState) -> str:
     if solve is not None:
         backend = str(getattr(solve, "backend", "python")).lower()
     if backend == "rust":
-        return "true Nash (Rust best-response walk, v1.3.2)"
-    return "true Nash (Python best-response walk, slow)"
+        return "true Nash (best-response walk)"
+    return "true Nash (best-response walk (slow))"
 
 
 def _format_tier_label(tier: str, iterations: int, target_mBB: float) -> str:
@@ -932,43 +1163,6 @@ def _redraw_chart(
         chart.update()
     except Exception:  # noqa: BLE001
         logger.debug("chart.update raised (NiceGUI 2.x compat)")
-
-
-def _compute_eta(history: list[tuple[int, float]], wall: float) -> str:
-    """Extrapolate ETA from the exploitability decay slope.
-
-    Edge case §6.1: after 30 s, fit a line in log-expl vs iter space; the
-    extrapolated iter at target=0.5 mBB/pot gives the remaining iters,
-    which multiplied by wall/iter gives the remaining seconds.
-    """
-    if len(history) < 3:
-        return ""
-    try:
-        import math
-
-        last_iter = history[-1][0]
-        last_expl = history[-1][1]
-        first_iter = history[0][0]
-        first_expl = history[0][1]
-        if last_expl <= 0 or first_expl <= 0 or last_iter == first_iter:
-            return ""
-        # Slope in log-space (per iter).
-        slope = (math.log(last_expl) - math.log(first_expl)) / (last_iter - first_iter)
-        if slope >= 0:
-            return ""  # not converging; can't extrapolate
-        target = 0.5
-        iters_to_target = (math.log(target) - math.log(last_expl)) / slope
-        if iters_to_target <= 0:
-            return "ETA: <1 s (target reached)"
-        wall_per_iter = wall / last_iter if last_iter else 0.0
-        eta_sec = wall_per_iter * iters_to_target
-        if eta_sec < 60:
-            return f"ETA: ~{int(eta_sec)} s to 0.5 mBB/pot"
-        if eta_sec < 3600:
-            return f"ETA: ~{int(eta_sec / 60)} min to 0.5 mBB/pot"
-        return f"ETA: ~{eta_sec / 3600:.1f} h to 0.5 mBB/pot"
-    except (ValueError, ZeroDivisionError):
-        return ""
 
 
 def _render_lock_list(state: AppState, container: Any) -> None:
@@ -1033,7 +1227,11 @@ def _show_error(state: AppState, handles: dict[str, Any]) -> None:
     err = state.runner.error
     if err is None:
         return
-    name = type(err).__name__
+    if isinstance(err, SolveInFlightError):
+        # Genuine in-flight collision — show the friendly ``.message``, never
+        # the raw internal exception text.
+        ui.notify(err.message, type="warning", position="top")
+        return
     if isinstance(err, MemoryError):
         # Edge §6.5: dark-red status + system-protective framing + concrete
         # remediations + quick-action button.
@@ -1081,8 +1279,9 @@ def _show_error(state: AppState, handles: dict[str, Any]) -> None:
         # remediation button that flips force_tree_solve=True and
         # retries on the next solve click.
         ui.notify(
-            f"Node-locking is incompatible with the push/fold chart "
-            f"short-circuit (≤15 BB HUNL preflop): {err}",
+            "Locked strategies aren't supported with the short-stack "
+            "push/fold preflop chart (≤15 BB). Switch to tree-builder mode "
+            "to keep your locks.",
             type="negative",
             position="top",
             timeout=10000,
@@ -1092,7 +1291,8 @@ def _show_error(state: AppState, handles: dict[str, Any]) -> None:
         def _retry_with_force_tree(_e: Any = None) -> None:
             state.runner._pending_force_tree_solve = True
             ui.notify(
-                "force_tree_solve=True set; click Solve again to retry.",
+                "Tree-builder mode enabled. Click Solve again to retry with "
+                "your locked strategies.",
                 type="info",
                 position="top",
                 timeout=5000,
@@ -1104,8 +1304,12 @@ def _show_error(state: AppState, handles: dict[str, Any]) -> None:
             on_click=_retry_with_force_tree,
         ).props("flat dense").mark("force-tree-solve-button")
     else:
+        # Generic fallback: keep it user-facing. Don't leak the internal
+        # exception class name; a short, plain-language line plus the
+        # underlying message is enough for the user to act on.
         ui.notify(
-            f"Solve failed ({name}): {err}",
+            f"The solve could not complete: {err}. "
+            "Adjust the spot or iterations and try again.",
             type="negative",
             position="top",
             timeout=8000,

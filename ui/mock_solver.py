@@ -44,6 +44,7 @@ from ui.mock_solver_fixtures import (
     FIXTURE_PRESETS,
     FixturePreset,
     build_fixture,
+    fixture_default_ranges,
     fixture_ids,
 )
 
@@ -550,6 +551,19 @@ def fixture_strategy(preset_id: str) -> dict[str, list[float]]:
     return strategy
 
 
+def load_fixture_default_ranges(preset_id: str) -> tuple[str, str] | None:
+    """Return the explicit ``(oop_range_str, ip_range_str)`` for a preset.
+
+    Delegates to :func:`ui.mock_solver_fixtures.fixture_default_ranges`. The
+    UI load path (``ui.state.fixture_default_ranges`` ->
+    ``views/spot_input._on_load_preset``) uses this to build deterministic,
+    tractable ranges for the range-vs-range example spots that carry no
+    ``initial_hole_cards``. Returns ``None`` for hole-card-anchored
+    fixtures (river subgames).
+    """
+    return fixture_default_ranges(preset_id)
+
+
 __all__ = [
     "ACTION_LABELS",
     "FIXTURE_PRESETS",
@@ -558,6 +572,7 @@ __all__ = [
     "fixture_strategy",
     "list_fixture_presets",
     "load_fixture",
+    "load_fixture_default_ranges",
     "mock_solve",
     "read_latest_progress",
     "reset_progress_buffer",

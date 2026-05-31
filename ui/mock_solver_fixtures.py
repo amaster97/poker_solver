@@ -36,6 +36,17 @@ class FixturePreset:
     label: str
     description: str
     starting_street: str  # 'PREFLOP' | 'FLOP' | 'TURN' | 'RIVER'
+    # Explicit per-player range strings ``(oop_range_str, ip_range_str)`` for
+    # fixtures whose ``HUNLConfig`` carries no ``initial_hole_cards``. The
+    # FLOP/TURN/PREFLOP example spots are range-vs-range scenarios, not
+    # concrete subgames, so they have no anchor hole cards; without explicit
+    # ranges the UI's ``_ranges_from_config`` would inherit whatever the
+    # previous spot had (a 1-combo subgame or the full 1326-combo default,
+    # the memory wall). Supplying tractable, archetype-appropriate ranges
+    # here makes every such load deterministic and solvable. ``None`` for
+    # hole-card-anchored fixtures (rivers/subgames), which keep the existing
+    # concrete-combo behavior.
+    default_ranges: tuple[str, str] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -529,6 +540,48 @@ def _make_deepstack_200bb() -> tuple[HUNLConfig, dict[str, list[float]]]:
 
 
 # ---------------------------------------------------------------------------
+# Default range strings for the hole-card-less (range-vs-range) fixtures.
+#
+# Each entry is ``(oop_range_str, ip_range_str)`` parseable by
+# ``poker_solver.range.parse_range``. They are hand-tuned to be:
+#   * archetype-appropriate for the board texture,
+#   * roughly 15-40% wide per player (NOT full 1326, NOT 1 combo),
+#   * tractable on a 16GB machine (measured ~55-230 combos each).
+# The flush-heavy boards (monotone hearts, KhQhJh9h 4-flush) enumerate the
+# relevant suited heart combos explicitly because ``parse_range`` has no
+# board-suit wildcard.
+# ---------------------------------------------------------------------------
+
+_K72R_DRY_RANGES: tuple[str, str] = (
+    "22+, ATs+, KTs+, QTs+, JTs, AQo+, KQo",
+    "55+, A8s+, KTs+, QJs, JTs, T9s, AJo+, KQo",
+)
+_T87_WET_RANGES: tuple[str, str] = (
+    "22+, A2s+, K9s+, Q9s+, J9s+, T9s, 98s, 87s, 76s, ATo+, KJo+",
+    "33+, A5s+, K9s+, QTs+, JTs, T9s, 98s, 87s, AJo+, KQo",
+)
+_MONOTONE_HHH_RANGES: tuple[str, str] = (
+    "99+, AhKh, AhQh, AhJh, AhTh, KhQh, KhJh, KhTh, QhJh, QhTh, JhTh, "
+    "Th9h, 9h8h, AKo, AQo, AJo, KQo",
+    "TT+, AhTh, KhTh, QhTh, Qh9h, Jh9h, Th8h, 9h7h, 8h7h, 7h6h, "
+    "AQs+, AQo+, KQs",
+)
+_PAIRED_Q9Q_RANGES: tuple[str, str] = (
+    "77+, AQs, KQs, QJs, QTs, AQo, AJs, KJs, KTs, JTs, T9s, AKo",
+    "66+, AQo, KQs, QJs, QTs, JTs, T9s, AJs, KQo, AhKh, AsKs",
+)
+_TURN_KQJ9_RANGES: tuple[str, str] = (
+    "AA, KK, QQ, JJ, TT, AhTh, AhQh, AhJh, Ah9h, Th9h, 9h8h, 8h7h, "
+    "AKo, AQo, KQs, KhTh",
+    "AA, AhKh, KK, QQ, JJ, TT, AhTh, Th8h, Ah9h, AQs, AKo, KQs, QhTh",
+)
+_TURN_T872_RANGES: tuple[str, str] = (
+    "88+, A8s+, KTs+, QTs+, J9s+, T9s, 98s, AJo+, KQo",
+    "99+, ATs+, KTs+, QJs, JTs, T9s, AJo+, KQo",
+)
+
+
+# ---------------------------------------------------------------------------
 # Public surface: preset metadata + builder registry.
 # ---------------------------------------------------------------------------
 
@@ -544,36 +597,42 @@ FIXTURE_PRESETS: tuple[FixturePreset, ...] = (
         "Flop K72r, 100bb",
         "Dry rainbow flop, deep postflop spot.",
         "FLOP",
+        default_ranges=_K72R_DRY_RANGES,
     ),
     FixturePreset(
         "flop_t87s_100bb",
         "Flop T87 two-tone, 100bb",
         "Wet flop with combo draws + flush draws.",
         "FLOP",
+        default_ranges=_T87_WET_RANGES,
     ),
     FixturePreset(
         "flop_monotone_hhh",
         "Flop AhKh4h monotone, 100bb",
         "Three-flush flop; flush-draw-rich ranges.",
         "FLOP",
+        default_ranges=_MONOTONE_HHH_RANGES,
     ),
     FixturePreset(
         "flop_paired_q9q",
         "Flop Q9Q paired, 100bb",
         "Paired board; trips and slowplay candidates.",
         "FLOP",
+        default_ranges=_PAIRED_Q9Q_RANGES,
     ),
     FixturePreset(
         "turn_kqj9_4_flush",
         "Turn KhQhJh9h 4-flush, 100bb",
         "Turn brings 4-flush; polarized ranges.",
         "TURN",
+        default_ranges=_TURN_KQJ9_RANGES,
     ),
     FixturePreset(
         "turn_t872_brick",
         "Turn T872r brick, 100bb",
         "Turn brick; ranges stay similar to flop.",
         "TURN",
+        default_ranges=_TURN_T872_RANGES,
     ),
     FixturePreset(
         "river_axxs_polar",
@@ -586,6 +645,7 @@ FIXTURE_PRESETS: tuple[FixturePreset, ...] = (
         "Preflop BTN vs BB (PR 9 stub)",
         "BTN open vs BB defend; mock-only until PR 9 ships.",
         "PREFLOP",
+        default_ranges=_K72R_DRY_RANGES,
     ),
     FixturePreset(
         "river_blocker_heavy",
@@ -598,12 +658,14 @@ FIXTURE_PRESETS: tuple[FixturePreset, ...] = (
         "Short stack 25bb postflop",
         "Short-stack postflop on dry K72r.",
         "FLOP",
+        default_ranges=_K72R_DRY_RANGES,
     ),
     FixturePreset(
         "deepstack_200bb",
         "Deep stack 200bb postflop",
         "Deep-stack postflop on T87 wet.",
         "FLOP",
+        default_ranges=_T87_WET_RANGES,
     ),
 )
 
@@ -643,11 +705,35 @@ def build_fixture(preset_id: str) -> tuple[HUNLConfig, dict[str, list[float]]]:
     return builder()  # type: ignore[operator,no-any-return]
 
 
+_PRESETS_BY_ID: dict[str, FixturePreset] = {p.id: p for p in FIXTURE_PRESETS}
+
+
+def fixture_default_ranges(preset_id: str) -> tuple[str, str] | None:
+    """Return the explicit ``(oop_range_str, ip_range_str)`` for a preset.
+
+    These are the deterministic per-player ranges attached to the
+    range-vs-range (hole-card-less) FLOP/TURN/PREFLOP example spots, so the
+    UI load path can build concrete, tractable ranges instead of inheriting
+    the previous spot's ranges. Returns ``None`` for hole-card-anchored
+    fixtures (river subgames) — those keep their concrete-combo ranges.
+
+    Raises ``KeyError`` if ``preset_id`` is not one of the known IDs.
+    """
+    preset = _PRESETS_BY_ID.get(preset_id)
+    if preset is None:
+        raise KeyError(
+            f"unknown fixture preset {preset_id!r}; "
+            f"valid IDs: {', '.join(fixture_ids())}"
+        )
+    return preset.default_ranges
+
+
 __all__ = [
     "ACTION_LABELS",
     "FIXTURE_PRESETS",
     "FixturePreset",
     "build_fixture",
+    "fixture_default_ranges",
     "fixture_ids",
 ]
 

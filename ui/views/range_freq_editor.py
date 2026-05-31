@@ -66,12 +66,13 @@ def open_range_freq_dialog(
     combo_pcts: list[float] = [rw.frequency_of(c) * 100.0 for c in combos]
 
     with ui.dialog().mark("range-freq-dialog") as dialog, ui.card().classes("min-w-96"):
-        ui.label(f"Per-combo frequency: {hand_class} (P{player})").classes(
+        ui.label(f"Exact-suit frequency: {hand_class} (P{player})").classes(
             "text-base font-semibold"
         )
-        ui.label(f"{len(combos)} combos. Sliders are 0-100% per combo.").classes(
-            "text-xs text-gray-500"
-        )
+        ui.label(
+            f"{len(combos)} exact-suit combos. Set each individually, or use "
+            f"'Set all' for the whole class. Sliders are 0-100%."
+        ).classes("text-xs text-gray-500")
         ui.separator()
 
         slider_handles: list[Any] = []

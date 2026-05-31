@@ -62,7 +62,8 @@ import logging
 import os
 import threading
 import time
-from dataclasses import dataclass, field
+from collections.abc import Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -231,6 +232,15 @@ def classify_combo(card1: Card, card2: Card) -> str:
 
 _RANKS_RUST_ORDER: str = "23456789TJQKA"
 _SUITS_RUST_ORDER: str = "shdc"
+
+# Engine-default preflop action menu (opens 2/3/4/5bb, reraise ×2/3/4/5).
+# These mirror ``ui.views.preflop_chart._DEFAULT_OPEN_SIZES_BB`` /
+# ``_DEFAULT_RERAISE_MULTIPLIERS`` and the FIXED menu the Premium-A blueprint
+# asset was solved against. They are the bypass reference for U05: a click
+# whose parsed sizes match these can be served from the blueprint; a click
+# that diverges must route to a live ``solve_hunl_preflop_rvr`` solve.
+_DEFAULT_PREFLOP_OPEN_SIZES_BB: tuple[float, ...] = (2.0, 3.0, 4.0, 5.0)
+_DEFAULT_PREFLOP_RERAISE_MULTIPLIERS: tuple[float, ...] = (2.0, 3.0, 4.0, 5.0)
 
 
 def _split_preflop_key(key: str) -> tuple[str | None, str]:
@@ -480,6 +490,16 @@ class Spot:
     # warning at ``_pick_point_pair_hole_cards`` is suppressed in RvR
     # mode because hole-card selection is handled per-class by the
     # aggregator itself.
+    #
+    # The dataclass default stays ``False`` (point-pair) for backward
+    # compatibility with code/tests that construct a bare ``Spot()``. The
+    # *effective* production default is Range-vs-range: the run panel
+    # forces ``rvr_mode = True`` at page-build time whenever the dev-only
+    # Concrete toggle is hidden (the production case — see
+    # ``ui/views/run_panel.py:_concrete_dev_enabled`` /
+    # ``POKER_SOLVER_DEV_CONCRETE``). Setting it at render time rather than
+    # flipping this constant avoids surprising the many call sites that
+    # build ``Spot()`` / ``SimpleNamespace(rvr_mode=...)`` directly.
     rvr_mode: bool = False
     # Task #61: RvR solver-mode selector (post-PR-114 true-Nash unlock).
     # When ``rvr_mode`` is True, this field picks which engine entry the
@@ -815,6 +835,202 @@ class UIPrefs:
 # --------------------------------------------------------------------------- #
 
 
+# Terminal lifecycle states: the logical solve is finished and a new one may
+# start (the worker thread may linger for a few ms before the OS reaps it,
+# which is why the start() guard must NOT key off raw thread liveness alone).
+_TERMINAL_STATUSES: frozenset[str] = frozenset({"idle", "done", "stopped", "error"})
+
+
+class SolveInFlightError(RuntimeError):
+    """Raised by ``SolveRunner.start*`` when a solve is *genuinely* running.
+
+    Subclasses :class:`RuntimeError` so existing ``except RuntimeError``
+    call sites in ``ui/app.py`` keep working unchanged. Carries a clean,
+    user-presentable ``.message`` so the UI can surface a friendly banner
+    instead of the raw internal "call stop() and wait..." string.
+    """
+
+    def __init__(self, message: str | None = None) -> None:
+        self.message = message or (
+            "A solve is already running. Stop it before starting a new one."
+        )
+        super().__init__(self.message)
+
+
+# --------------------------------------------------------------------------- #
+# Bug 3 — pre-solve tree-size guard (postflop memory wall)
+# --------------------------------------------------------------------------- #
+#
+# A wide-range flop solve is uncancellable: the Rust engine builds the full
+# postflop game tree (``HUNLTree::build``) BEFORE the iteration loop starts,
+# and that build can run for many minutes on a flop (two remaining board cards
+# => ~47 * 46 runouts, each carrying a full betting subtree across three
+# streets). During the build ``iteration`` is legitimately 0 and ``should_stop``
+# is never polled, so the UI shows "Iterations: 0 / Running" indefinitely and
+# the Stop button does nothing. The memory wall here is fundamental (see the
+# postflop-memory-wall memory note): we do NOT try to make wide flop solves
+# converge. Instead we fail fast with an actionable message.
+#
+# The cost estimate below is intentionally a SIMPLE, CONSERVATIVE heuristic —
+# its only job is to cleanly separate "interactive subgame" (river/turn, or a
+# flop with very few bet sizes) from "will hang for minutes" (a flop with the
+# default bet menu). It is deliberately easy to read and tune:
+#
+#   cost ~= board_runouts * (actions_per_node ** betting_plies)
+#
+# where ``board_runouts`` is the product of remaining-card choices across the
+# remaining streets (the dominant multiplier), ``actions_per_node`` is the
+# branching factor at a decision node, and ``betting_plies`` is a coarse proxy
+# for how deep the per-runout betting subtree goes.
+#
+# TUNING: bump ``TREE_SIZE_BUDGET`` up to allow larger solves, or down to be
+# stricter. The measured separation on an M-series mac: a flop with 3 bet
+# sizes + all-in took >130 s just to BUILD the tree (loop never started),
+# while a turn/river point-pair subgame is interactive (sub-second to a few
+# seconds). The default budget is set comfortably below the flop cost and
+# comfortably above the turn cost.
+
+# Maximum estimated tree cost (unitless heuristic score) the UI will launch.
+# Above this, ``SolveRunner.start`` refuses with :class:`SolveTooLargeError`.
+TREE_SIZE_BUDGET: float = 5.0e6
+
+# Approximate count of distinct next-card choices when a street's board card
+# is dealt (52 - cards already on board/in hands). A coarse constant keeps the
+# heuristic simple; the exact value (47 vs 45) does not change the verdict.
+_CARDS_PER_BOARD_DEAL: int = 47
+
+# Remaining board-card layers to enumerate from each starting street. Flop has
+# two (turn + river), turn has one (river), river has none. This is THE
+# dominant cost driver — each extra layer multiplies the tree by ~47x.
+_REMAINING_BOARD_DEALS: dict[Street, int] = {
+    Street.FLOP: 2,
+    Street.TURN: 1,
+    Street.RIVER: 0,
+}
+
+# Coarse betting-subtree depth proxy per remaining street (fold/call + raises
+# up to the cap). Multiplied across streets-with-betting to get total plies.
+_BETTING_PLIES_PER_STREET: int = 2
+
+
+class SolveTooLargeError(RuntimeError):
+    """Raised by ``SolveRunner.start`` when the estimated tree is too large.
+
+    Subclasses :class:`RuntimeError` so the existing ``except RuntimeError``
+    handlers in ``ui/app.py`` catch it without code changes. Carries a clean,
+    user-presentable ``.message`` (Bug 3): the postflop tree-build for a wide
+    flop spot hangs for minutes before the iteration loop even starts and is
+    uncancellable, so we refuse it up front with concrete remediations.
+    """
+
+    def __init__(self, message: str | None = None, *, estimated_cost: float = 0.0):
+        self.estimated_cost = estimated_cost
+        self.message = message or (
+            "This solve is too large to finish in reasonable time/memory. "
+            "Narrow the ranges, reduce the bet sizes, or solve a turn/river "
+            "subgame instead of the flop."
+        )
+        super().__init__(self.message)
+
+
+def estimate_postflop_tree_cost(config: HUNLConfig) -> float:
+    """Return a conservative, unitless cost estimate for a postflop solve.
+
+    Heuristic (see the module comment above ``TREE_SIZE_BUDGET``):
+
+        cost = board_runouts * (actions_per_node ** betting_plies)
+
+    * ``board_runouts`` = ``_CARDS_PER_BOARD_DEAL ** remaining_board_deals`` —
+      the product of next-card choices across the remaining streets. This is
+      the dominant term: a flop (2 deals) is ~47x bigger than a turn, ~2200x
+      bigger than a river.
+    * ``actions_per_node`` = number of bet sizes + all-in + {fold, call} — the
+      branching factor at a betting decision node.
+    * ``betting_plies`` = ``_BETTING_PLIES_PER_STREET`` times the number of
+      streets that still have a betting round (remaining_board_deals + 1).
+
+    Preflop configs return ``0.0`` (the UI never routes preflop through this
+    guard; the preflop chart path is a separate, bounded engine).
+
+    The estimate is intentionally coarse and pessimistic for the flop — its
+    only job is to separate "interactive subgame" from "uncancellable hang".
+    """
+    street = config.starting_street
+    remaining_deals = _REMAINING_BOARD_DEALS.get(street)
+    if remaining_deals is None:
+        # Preflop / showdown / anything not in the postflop map: not our guard.
+        return 0.0
+
+    # Branching factor at a decision node: each checked bet size, optionally
+    # all-in, plus fold and call/check.
+    num_bet_sizes = len(getattr(config, "bet_size_fractions", ()) or ())
+    actions_per_node = num_bet_sizes + (1 if config.include_all_in else 0) + 2
+
+    # Number of streets that still have a betting round (current + each future
+    # street reached by a board deal).
+    betting_streets = remaining_deals + 1
+    betting_plies = _BETTING_PLIES_PER_STREET * betting_streets
+
+    board_runouts = float(_CARDS_PER_BOARD_DEAL) ** remaining_deals
+    betting_subtree = float(actions_per_node) ** betting_plies
+    return board_runouts * betting_subtree
+
+
+def exceeds_tree_budget(
+    config: HUNLConfig, *, budget: float = TREE_SIZE_BUDGET
+) -> bool:
+    """Return True iff the estimated postflop tree cost exceeds ``budget``.
+
+    Thin predicate over :func:`estimate_postflop_tree_cost` so callers (and
+    tests) can check the verdict without re-deriving the threshold.
+    """
+    return estimate_postflop_tree_cost(config) > budget
+
+
+def chained_flop_too_large(
+    config_template: HUNLConfig,
+    board: Sequence[Card],
+    *,
+    budget: float = TREE_SIZE_BUDGET,
+) -> bool:
+    """Return True iff an interactive chained flop solve would be too large.
+
+    MANDATORY guard for the chained-tab walkthrough (chain-solve "b" plan
+    §"Flop solve can HANG"). ``ChainedSolveResult.solve_postflop`` runs
+    ``solve_range_vs_range_nash`` synchronously on the UI thread, and the
+    flop tree-build for the default bet menu hangs for minutes before the
+    iteration loop even starts. The generic ``exceeds_tree_budget`` guard in
+    :meth:`SolveRunner.start` deliberately excludes ``solver_mode=="chained"``
+    (the chained dispatch is a preflop-shaped solve), so the flop subgame is
+    NOT covered there. This helper closes that gap: synthesize the flop
+    ``HUNLConfig`` the orchestrator would build (``starting_street=FLOP`` +
+    the 3-card board, same bet abstraction as the template) and run it
+    through :func:`exceeds_tree_budget`.
+
+    Args:
+        config_template: the preflop config the chained solve ran against
+            (carries the bet-size abstraction the flop subgame inherits).
+        board: the 3 flop cards the user picked.
+        budget: tree-cost ceiling (defaults to :data:`TREE_SIZE_BUDGET`).
+
+    Returns:
+        ``True`` when the synthesized flop solve exceeds ``budget`` (block,
+        show "narrow ranges"); ``False`` when it is tractable.
+    """
+    if len(board) != 3:
+        # Not yet a full flop — nothing to guard against.
+        return False
+    flop_cfg = replace(
+        config_template,
+        starting_street=Street.FLOP,
+        initial_board=tuple(board),
+        initial_pot=0,
+        initial_contributions=(0, 0),
+        initial_hole_cards=(),
+    )
+    return exceeds_tree_budget(flop_cfg, budget=budget)
+
+
 class SolveRunner:
     """Owns one background worker thread + cancellation flags + progress snapshot.
 
@@ -835,6 +1051,12 @@ class SolveRunner:
         self._stop_event: threading.Event = threading.Event()
         self._lock: threading.Lock = threading.Lock()
         self.result: SolveResult | None = None
+        # P2: the exact ``HUNLConfig`` the current/last solve ran against.
+        # Set by ``start(...)``; read by ``tree_browser._build_tree_from_runner``
+        # so the browse/matrix tree shares the SOLVED action abstraction (the
+        # spot round-trip can otherwise drop a postflop subgame's pot and
+        # produce a mismatched legal-action count). ``None`` until first solve.
+        self._solved_config: Any | None = None
         self.iteration: int = 0
         self.expl_history: list[tuple[int, float]] = []  # (iter, expl_mBB_per_pot)
         self.status: str = "idle"  # idle | running | paused | done | stopped | error
@@ -915,6 +1137,87 @@ class SolveRunner:
         self.chained_preflop_route_info: Any | None = None
         self.chained_postflop_route_info: Any | None = None
 
+    def clear_results(self) -> None:
+        """Invalidate the previous solve. Called when the spot changes
+        (reset / preset load) so the status chip + result panes don't show a
+        stale 'Done'/strategy for a spot that hasn't been solved.
+
+        Mirrors the canonical result/route-info reset list used at solve-start
+        (see ``start`` ~L1152 and ``start_preflop_chart`` ~L1399): every
+        result holder ``_has_result`` (``ui/app.py``) inspects plus the three
+        source-badge route-info fields, so the preflop / chained badges don't
+        linger on a fresh spot either.
+
+        W2 (concurrency hazard fix): RESET SPOT / preset-load may fire while a
+        solve is still in flight (the buttons are not disabled during a solve,
+        and an *async* preset-load handler can land its synchronous core AFTER
+        the worker has already started — see ``views/spot_input._load_preset_core``).
+        The previous version unconditionally set ``status="idle"`` and nulled
+        the result fields even with a live worker thread, which produced the
+        toxic ``(status="idle", thread alive)`` state:
+
+          * ``is_running`` (``status in ('running','paused')``) goes False
+            while the worker is still alive, so ``start()``'s in-flight guard
+            (``if self.is_running: raise SolveInFlightError``) is bypassed and a
+            SECOND worker can spawn alongside the orphaned first; and
+          * ``'idle'`` is in ``_TERMINAL_STATUSES``, so the next
+            ``_reap_finished_worker()`` would ``thread.join(timeout=2.0)`` a
+            LIVE worker — violating its "never join a running worker"
+            invariant and stalling the caller up to 2 s.
+
+        Fix: if a solve is in flight, cancel it FIRST and reap the worker so it
+        is truly finished BEFORE we touch any fields — this matches the
+        user-intended semantics (loading a preset / resetting the spot during a
+        solve abandons that solve). We reuse the existing ``stop()`` +
+        ``_reap_finished_worker()`` machinery rather than hand-rolling.
+
+        Locking note: the cancel + join MUST happen OUTSIDE ``self._lock``.
+        The worker's terminal-status write (``_worker`` ~L2154:
+        ``with self._lock: ... self.status = "stopped"``) also takes
+        ``self._lock``; joining the worker while holding the lock would
+        dead-lock. So we (1) signal stop and reap outside the lock, letting the
+        worker run its normal exit path and set its own terminal status, then
+        (2) take the lock to null the result/route-info fields and set
+        ``status="idle"``. By the time we set ``'idle'`` the worker thread has
+        been joined and dropped (``self._thread is None``), so the
+        ``(idle + live-thread)`` state can never be observed and the
+        ``start()`` guard / ``_reap`` invariant are never violated.
+        """
+        # Step 1 (outside the lock): cancel + reap any in-flight worker so we
+        # never clear out from under a live solve. ``stop()`` only sets the
+        # stop/cancel events (no lock); the worker observes it at its next
+        # ``log_every`` chunk boundary (mock: per-snapshot), runs its normal
+        # exit path — which acquires ``self._lock`` to set a terminal status —
+        # and we then join it. ``is_running`` covers the logical
+        # running/paused window; ``is_alive`` covers the finished-but-unreaped
+        # tail so a just-terminated worker is still collected.
+        if self.is_running or self.is_alive():
+            self.stop()
+            # Let the worker reach a terminal status and join it. Reaping only
+            # joins once the *logical* status is terminal (its own invariant),
+            # which the worker sets on its way out after observing the stop
+            # event; we then collect the OS thread handle. A short, bounded
+            # join keeps the UI thread responsive even in the unlikely event
+            # the worker is wedged — but the cooperative stop contract means
+            # it exits within one chunk.
+            self.join(timeout=5.0)
+            self._reap_finished_worker()
+
+        # Step 2 (under the lock): null the result/route-info holders and set
+        # the terminal 'idle' status. At this point the worker has been joined
+        # and dropped (or was never alive), so there is no live thread to
+        # orphan and no (idle + alive) window for the guards to trip on.
+        with self._lock:
+            self.result = None
+            self.rvr_result = None
+            self.nash_result = None
+            self.chained_result = None
+            self.preflop_chart_result = None
+            self.preflop_route_info = None
+            self.chained_preflop_route_info = None
+            self.chained_postflop_route_info = None
+            self.status = "idle"
+
     def start(
         self,
         game: HUNLPoker,
@@ -922,7 +1225,13 @@ class SolveRunner:
         *,
         log_every: int,
         dcfr_kwargs: dict[str, Any] | None = None,
-        backend: str = "python",
+        # v1.11 UI: default to the Rust production tier. ``"python"`` is no
+        # longer a user-visible choice — it survives only as a SILENT
+        # fallback inside the dispatch when the Rust binding is genuinely
+        # unavailable (see ``_dispatch_solve`` / ``poker_solver.solver.solve``).
+        # Callers may still pass ``backend="python"`` for tests; production
+        # postflop solves are forced onto Rust regardless of this value.
+        backend: str = "rust",
         memory_budget_gb: float = 14.0,
         target_exploitability: float | None = None,
         seed: int | None = None,
@@ -962,14 +1271,22 @@ class SolveRunner:
     ) -> None:
         """Spawn the worker thread.
 
-        Raises ``RuntimeError`` if a previous solve is still alive (call
-        ``stop()`` + ``join()`` first).
+        Raises :class:`SolveInFlightError` (a ``RuntimeError`` subclass with
+        a friendly ``.message``) if a solve is *genuinely* running. A
+        finished-but-not-yet-reaped worker thread is joined first and does
+        NOT block a new start (see :meth:`_reap_finished_worker`).
+
+        Raises :class:`SolveTooLargeError` (Bug 3) when the estimated postflop
+        tree is too large to build in reasonable time/memory. The check runs
+        BEFORE the worker thread is spawned (and before any tree-building) so
+        an oversized flop fails fast with an actionable message instead of
+        hanging uncancellably inside ``HUNLTree::build``. Only the concrete
+        postflop path is guarded; the RvR aggregator and chained orchestrator
+        manage their own subgame budgets.
         """
-        if self.is_alive():
-            raise RuntimeError(
-                "SolveRunner.start() called while a solve is in flight; "
-                "call stop() and wait until is_alive() is False first."
-            )
+        self._reap_finished_worker()
+        if self.is_running:
+            raise SolveInFlightError()
         if rvr_mode and (rvr_hero_range is None or rvr_villain_range is None):
             raise ValueError(
                 "rvr_mode=True requires rvr_hero_range and rvr_villain_range "
@@ -980,7 +1297,31 @@ class SolveRunner:
                 f"solver_mode must be 'blueprint', 'true_nash', or 'chained'; "
                 f"got {solver_mode!r}."
             )
-        # Reset state for the new run.
+        # Bug 3: refuse an oversized concrete postflop solve up front. The
+        # flop tree-build hangs for minutes before the iteration loop starts
+        # and is uncancellable; estimate the cost and bail with a clear,
+        # actionable message rather than freezing the UI. The RvR / chained
+        # paths run their own bounded subgames, and the mock path (smoke-test
+        # injection via ``mock_latency_ms`` / ``mock_failure_mode``) never
+        # builds a real tree — so we only gate the concrete, real-engine
+        # postflop dispatch here.
+        is_mock = mock_latency_ms is not None or mock_failure_mode is not None
+        is_concrete_postflop = (
+            not rvr_mode and solver_mode != "chained" and not is_mock
+        )
+        if is_concrete_postflop and exceeds_tree_budget(game.config):
+            cost = estimate_postflop_tree_cost(game.config)
+            raise SolveTooLargeError(
+                "This flop solve is too large to finish in reasonable "
+                "time/memory (the game tree would take minutes to build and "
+                "cannot be cancelled mid-build). Narrow the ranges, reduce the "
+                "checked bet sizes, or solve a turn/river subgame instead of "
+                "the flop.",
+                estimated_cost=cost,
+            )
+        # Reset state for the new run. Clearing the events here (not in the
+        # worker) guarantees a clean slate even if a prior solve set stop/pause
+        # and was reaped above without the worker clearing them.
         self._pause_event.clear()
         self._stop_event.clear()
         with self._lock:
@@ -1007,6 +1348,18 @@ class SolveRunner:
             # their result holder (mirrors the preflop_chart pattern).
             self._mode = "chained" if solver_mode == "chained" else self.__dict__.get("_mode", "")
         config = game.config
+        # P2 fix: stash the EXACT config this solve runs against. The
+        # finished ``SolveResult`` carries no config of its own, and the
+        # ``Spot`` round-trip (``_spot_from_config`` -> ``to_hunl_config``)
+        # does NOT preserve a postflop subgame's pot / contributions — so a
+        # tree rebuilt from the spot can land on a DIFFERENT action
+        # abstraction (e.g. 7 legal bet sizes vs the 4 the strategy was
+        # solved with). That shape mismatch silently zeroed every per-combo
+        # strategy lookup in the range matrix (``_strategy_for_combo``
+        # rejects an arr whose length != len(legal_actions)). Keeping the
+        # solved config here lets the tree-browser / matrix project against
+        # the very abstraction the strategy vectors were indexed by.
+        self._solved_config = config
         self._thread = threading.Thread(
             target=self._worker,
             kwargs={
@@ -1032,6 +1385,29 @@ class SolveRunner:
             name="poker-solver-ui-worker",
         )
         self._thread.start()
+
+    def _preflop_custom_sizes_bypass_blueprint(self) -> bool:
+        """Whether the pending action sizes diverge from the engine defaults.
+
+        The input panel stashes the parsed open-size / reraise-multiplier
+        lists on ``self._pending_preflop_chart_opens`` / ``_mults`` at click
+        time (``None`` until the first click → treated as defaults). When
+        either diverges from the FIXED engine menu the blueprint was solved
+        against, the blueprint cannot honor the user's sizes and we must route
+        to a live solve (U05). Comparison is exact + order-sensitive, matching
+        how the engine keys its action menu.
+        """
+        from ui.blueprint_router import custom_sizes_bypass_note
+
+        return (
+            custom_sizes_bypass_note(
+                open_sizes=self._pending_preflop_chart_opens,
+                reraise_multipliers=self._pending_preflop_chart_mults,
+                default_open_sizes=_DEFAULT_PREFLOP_OPEN_SIZES_BB,
+                default_reraise_multipliers=_DEFAULT_PREFLOP_RERAISE_MULTIPLIERS,
+            )
+            is not None
+        )
 
     def try_blueprint_preflop_chart(
         self,
@@ -1063,9 +1439,39 @@ class SolveRunner:
         """
         from ui.blueprint_router import (
             BlueprintRouter,
+            RouteInfo,
             SourceLabel,
+            custom_sizes_bypass_note,
             default_asset_dir,
         )
+
+        # U05: custom action sizes must bypass the blueprint and route to a
+        # LIVE Rust solve. The blueprint asset is solved against the FIXED
+        # engine action menu (opens 2/3/4/5bb, reraise ×2/3/4/5); if the user
+        # edits the open sizes or reraise multipliers, serving the blueprint
+        # would silently show the DEFAULT menu instead of what they typed. The
+        # input panel stashes the parsed lists on the runner at click time, so
+        # we compare them against the engine defaults here and decline the
+        # blueprint (return False) when they diverge — the caller then falls
+        # through to ``start_preflop_chart`` → ``solve_hunl_preflop_rvr``.
+        if self._preflop_custom_sizes_bypass_blueprint():
+            note = custom_sizes_bypass_note(
+                open_sizes=self._pending_preflop_chart_opens,
+                reraise_multipliers=self._pending_preflop_chart_mults,
+                default_open_sizes=_DEFAULT_PREFLOP_OPEN_SIZES_BB,
+                default_reraise_multipliers=_DEFAULT_PREFLOP_RERAISE_MULTIPLIERS,
+            )
+            with self._lock:
+                # Pre-solve LIVE hint so the badge reads "live solve" rather
+                # than a stale blueprint label; the worker overwrites the
+                # wall_time on completion.
+                self.preflop_route_info = RouteInfo(
+                    source=SourceLabel.LIVE,
+                    wall_time_s=0.0,
+                    confidence=(note or "custom action sizes")
+                    + " (live solve required)",
+                )
+            return False
 
         router = BlueprintRouter.from_asset_dir(default_asset_dir())
         if router is None:
@@ -1092,6 +1498,30 @@ class SolveRunner:
             for k in action_map:
                 if k not in action_labels:
                     action_labels.append(k)
+
+        # U06: surface the DEEPER lines (BB vs open / 3-bet / 4-bet / limped
+        # pots), not just the root open. The blueprint shard carries every
+        # infoset history; extract them all so the line selector unlocks for a
+        # blueprint route exactly as it does for a live solve. Keyed by the
+        # shard's ``"||p|<tokens>"`` history suffix (the same shape
+        # ``available_preflop_lines`` / ``preflop_chart_summary_for_line`` and
+        # ``ui.views.preflop_chart.preflop_line_label`` consume). On any
+        # failure we fall back to root-only so the chart still renders.
+        by_line: dict[str, dict[str, dict[str, float]]] = {}
+        try:
+            by_line = router.extract_all_lines(stack_bb=int(stack_bb), ante=ante)
+        except Exception:  # noqa: BLE001
+            logger.exception("blueprint extract_all_lines failed; root-only")
+        # The router's lookup_chart already resolved the root per_class; key it
+        # under the normalized root history so the root line is always present
+        # and selectable even if all-line extraction returned nothing.
+        from ui.blueprint_router import _normalize_root_history
+
+        root_hist = _normalize_root_history(action_history)
+        if root_hist not in by_line and info.per_class:
+            by_line[root_hist] = info.per_class
+        available_lines = sorted(by_line, key=lambda h: (len(h), h))
+
         chart_result: dict[str, Any] = {
             "per_class": info.per_class,
             "actions": action_labels,
@@ -1102,6 +1532,8 @@ class SolveRunner:
                 len(m) for m in info.per_class.values()
             ),
             "source": info.source.value,
+            "available_lines": available_lines,
+            "_by_line": by_line,
         }
         with self._lock:
             self.preflop_chart_result = chart_result
@@ -1136,15 +1568,14 @@ class SolveRunner:
         (hero_class, villain_class, suit_variant) via the precomputed
         169x169x3 table at ``assets/preflop_equity_169x169.npz``.
 
-        Raises ``RuntimeError`` if a previous solve is still alive (call
-        ``stop()`` + ``join()`` first). Raises ``ImportError`` if the
-        Rust extension was built without ``solve_hunl_preflop_rvr``.
+        Raises :class:`SolveInFlightError` if a solve is *genuinely* running
+        (a finished-but-not-yet-reaped worker is joined first and does not
+        block). Raises ``ImportError`` if the Rust extension was built
+        without ``solve_hunl_preflop_rvr``.
         """
-        if self.is_alive():
-            raise RuntimeError(
-                "SolveRunner.start_preflop_chart() called while a solve is in flight; "
-                "call stop() and wait until is_alive() is False first."
-            )
+        self._reap_finished_worker()
+        if self.is_running:
+            raise SolveInFlightError()
         self._pause_event.clear()
         self._stop_event.clear()
         # Task #68 Phase 6: clear any stale blueprint route info; the
@@ -1220,7 +1651,9 @@ class SolveRunner:
         UI can show "running -> done" transitions.
         """
         try:
-            from poker_solver import _rust as _rust_module  # type: ignore[import-untyped]
+            from poker_solver import (
+                _rust as _rust_module,  # type: ignore[import-untyped]
+            )
         except (ImportError, ModuleNotFoundError) as exc:
             with self._lock:
                 self.error = ImportError(
@@ -1314,6 +1747,65 @@ class SolveRunner:
             )
 
     @staticmethod
+    def _project_preflop_by_line(
+        rust_out: dict[str, Any],
+    ) -> dict[str, dict[str, dict[str, float]]]:
+        """Project the full preflop output into a per-LINE, per-class summary.
+
+        Unlike :meth:`_build_preflop_chart_summary` (which discards every
+        node except the root open), this keeps EVERY action line the engine
+        produced. Returns a nested mapping::
+
+            { history_str -> { hand_class -> { action_label -> prob } } }
+
+        where ``history_str`` is the action-line suffix from the Rust infoset
+        key (``""`` is the root / SB open; deeper lines are non-empty, e.g.
+        the BB's response after an open, a 3-bet node, etc.). Within a line,
+        probabilities are averaged across the concrete combos that map to the
+        same hand class (matching the root projection's class-level mean).
+
+        This is the data source for :meth:`available_preflop_lines` and
+        :meth:`preflop_chart_summary_for_line`; UI code (a later chart agent)
+        consumes it to render deeper lines (BB-call / 3-bet / 4-bet) instead
+        of only the open range.
+        """
+        average_strategy = rust_out.get("average_strategy", {})
+        # history -> class -> (running sum of prob vectors, count)
+        by_line: dict[str, dict[str, tuple[list[float], int]]] = {}
+        for key, probs in average_strategy.items():
+            if not probs:
+                continue
+            hole_str, hist = _split_preflop_key(str(key))
+            if hole_str is None:
+                continue
+            cls = _hand_class_from_hole_str(hole_str)
+            if cls is None:
+                continue
+            line_slot = by_line.setdefault(hist, {})
+            prev = line_slot.get(cls)
+            vec = [float(p) for p in probs]
+            if prev is None:
+                line_slot[cls] = (vec, 1)
+            else:
+                acc, cnt = prev
+                if len(acc) == len(vec):
+                    line_slot[cls] = ([a + b for a, b in zip(acc, vec)], cnt + 1)
+                # else: ragged action counts within a class — keep the first.
+
+        out: dict[str, dict[str, dict[str, float]]] = {}
+        for hist, class_map in by_line.items():
+            line_out: dict[str, dict[str, float]] = {}
+            for cls, (acc, cnt) in class_map.items():
+                n = len(acc)
+                if n == 0 or cnt == 0:
+                    continue
+                labels = _action_labels_for_count(n)
+                line_out[cls] = {labels[i]: acc[i] / cnt for i in range(n)}
+            if line_out:
+                out[hist] = line_out
+        return out
+
+    @staticmethod
     def _build_preflop_chart_summary(rust_out: dict[str, Any]) -> dict[str, Any]:
         """Project ``_rust.solve_hunl_preflop_rvr`` output into a chart summary.
 
@@ -1323,71 +1815,33 @@ class SolveRunner:
         decision (SB's first action) is the entry whose ``<history>``
         is empty — i.e. the suffix ends with the player slot only.
 
-        We:
-          1. group entries by ``hole_str``;
-          2. pick the root entry per ``hole_str`` (shortest non-empty
-             history — the SB's open decision);
-          3. convert each ``hole_str`` to its hand-class label;
-          4. aggregate the per-action probabilities across all combos
-             that share the class (simple mean — sufficient for chart
-             display; the engine already weights by reach internally).
+        This returns the ROOT open range only (default behavior, unchanged).
+        The full per-line projection (deeper BB-call / 3-bet / 4-bet nodes)
+        is available via :meth:`_project_preflop_by_line` /
+        :meth:`preflop_chart_summary_for_line`.
 
         Returns a chart_result dict with keys ``per_class``, ``actions``,
         ``iterations``, ``wallclock_seconds``, ``decision_node_count``,
-        ``strategy_entry_count``.
+        ``strategy_entry_count``, plus ``available_lines`` (sorted list of
+        every history suffix the projection found, so the UI can enumerate
+        deeper lines without re-projecting).
         """
-        average_strategy = rust_out.get("average_strategy", {})
         iterations = int(rust_out.get("iterations", 0))
         wallclock = float(rust_out.get("wallclock_seconds", 0.0))
         decision_count = int(rust_out.get("decision_node_count", 0))
         entry_count = int(rust_out.get("strategy_entry_count", 0))
 
-        # Group by hole_str, keep only root-decision entries.
-        per_class_raw: dict[str, dict[int, list[float]]] = {}
-        action_count_at_root: int = 0
-        for key, probs in average_strategy.items():
-            hole_str, hist = _split_preflop_key(str(key))
-            if hole_str is None:
-                continue
-            # Root decision: history is the EMPTY string after the
-            # final separator. Per ``preflop_rvr.rs`` the suffix shape
-            # is ``"||p|<history>"`` so root has ``"||p|"`` (history = "")
-            # OR ``"|||"`` depending on encoding — we treat the
-            # SHORTEST history per hole as the root.
-            cls = _hand_class_from_hole_str(hole_str)
-            if cls is None:
-                continue
-            slot = per_class_raw.setdefault(cls, {})
-            # Track which hist string is the "root" per class: shortest
-            # non-degenerate history wins. We store per-history then
-            # pick the root after the loop.
-            hist_len = len(hist)
-            if hist_len not in slot:
-                slot[hist_len] = list(probs) if probs else []
-                if probs:
-                    action_count_at_root = max(action_count_at_root, len(probs))
+        by_line = SolveRunner._project_preflop_by_line(rust_out)
+        available_lines = sorted(by_line, key=lambda h: (len(h), h))
+        # Root = shortest history line (the SB open decision).
+        root_line = available_lines[0] if available_lines else ""
+        per_class = by_line.get(root_line, {})
 
-        # Now pick the root entry per class (shortest history) and
-        # average across the combos within the class (the raw dict
-        # already gave us one entry per concrete combo's hole_str; we
-        # collapse to the class-level mean).
+        # Derive the action-label list from the widest root entry.
+        action_count_at_root = max(
+            (len(m) for m in per_class.values()), default=0
+        )
         action_labels = _action_labels_for_count(action_count_at_root)
-        per_class: dict[str, dict[str, float]] = {}
-        for cls, hist_map in per_class_raw.items():
-            if not hist_map:
-                continue
-            root_hist = min(hist_map)
-            probs = hist_map[root_hist]
-            if not probs:
-                continue
-            # Map each prob index onto the action label.
-            n = len(probs)
-            labels = (
-                action_labels
-                if len(action_labels) == n
-                else _action_labels_for_count(n)
-            )
-            per_class[cls] = {labels[i]: float(probs[i]) for i in range(n)}
 
         return {
             "per_class": per_class,
@@ -1396,7 +1850,64 @@ class SolveRunner:
             "wallclock_seconds": wallclock,
             "decision_node_count": decision_count,
             "strategy_entry_count": entry_count,
+            "available_lines": available_lines,
+            # Full per-line projection so deeper lines (BB-call / 3-bet /
+            # 4-bet) are reachable via preflop_chart_summary_for_line(line)
+            # without re-running the solve. Keyed by history suffix.
+            "_by_line": by_line,
         }
+
+    def available_preflop_lines(self) -> list[str]:
+        """Return every preflop action line the last chart solve produced.
+
+        Lines are history-suffix strings from the Rust infoset keys, sorted
+        by depth then lexically so the root (``""`` or shortest) comes first
+        and deeper lines (BB-call / 3-bet / 4-bet) follow. Returns ``[]``
+        when no preflop chart result is available.
+
+        Consume the list, then call :meth:`preflop_chart_summary_for_line`
+        with any entry to get that line's per-class strategy.
+        """
+        result = self.preflop_chart_result
+        if not result:
+            return []
+        lines = result.get("available_lines")
+        if isinstance(lines, list):
+            return list(lines)
+        return []
+
+    def preflop_chart_summary_for_line(
+        self, line: str | None = None
+    ) -> dict[str, dict[str, float]]:
+        """Return the per-class strategy for a specified preflop action line.
+
+        ``line`` is one of the history suffixes from
+        :meth:`available_preflop_lines` (e.g. ``""`` for the root SB open, or
+        a deeper line for BB-call / 3-bet / 4-bet nodes). When ``line`` is
+        ``None`` (the default) the ROOT open range is returned — identical to
+        ``self.preflop_chart_result["per_class"]`` so existing callers are
+        unaffected.
+
+        Returns ``{ hand_class -> { action_label -> probability } }``. An
+        unknown ``line`` (or no chart result) yields an empty dict.
+        """
+        result = self.preflop_chart_result
+        if not result:
+            return {}
+        if line is None:
+            return dict(result.get("per_class", {}))
+        # Re-project lazily; the raw rust output isn't retained on the
+        # runner, but the projection was stashed under "available_lines".
+        # We rebuild from the cached per-line map if present, else fall back
+        # to the root per_class for line == root.
+        by_line = result.get("_by_line")
+        if isinstance(by_line, dict):
+            return dict(by_line.get(line, {}))
+        # No cached per-line map (older result shape) — only root is known.
+        available = result.get("available_lines") or []
+        if available and line == available[0]:
+            return dict(result.get("per_class", {}))
+        return {}
 
     def pause(self) -> None:
         """Set the pause flag.
@@ -1446,12 +1957,116 @@ class SolveRunner:
             pass
 
     def is_alive(self) -> bool:
+        """Raw thread liveness. Prefer :attr:`is_running` for logic.
+
+        A worker thread can briefly report ``is_alive() == True`` after the
+        logical solve has reached a terminal status (``done``/``stopped``/
+        ``error``) but before the OS reaps it. Gating ``start()`` on this
+        caused the "Solve already running" false positive; the guard now
+        keys off :attr:`is_running` instead.
+        """
         return self._thread is not None and self._thread.is_alive()
 
+    @property
+    def is_running(self) -> bool:
+        """True iff a solve is *logically* in flight (``running``/``paused``).
+
+        This is the source of truth the UI should poll for the running
+        indicator and the start() guard. It is independent of whether the
+        underlying daemon thread object has been reaped yet.
+        """
+        return self.status in ("running", "paused")
+
+    def _reap_finished_worker(self) -> None:
+        """Join + drop a worker whose solve has reached a terminal status.
+
+        Called at the top of every ``start*`` so a finished-but-not-yet-reaped
+        thread never blocks a new solve. Safe to call when idle (no-op). We
+        only join when the *logical* status is terminal so an actively
+        running worker is never joined out from under itself.
+        """
+        thread = self._thread
+        if thread is None:
+            return
+        if self.status in _TERMINAL_STATUSES:
+            # Logical solve is done; reap the OS thread (short timeout — the
+            # worker has already returned, this just collects the handle).
+            thread.join(timeout=2.0)
+            if not thread.is_alive():
+                self._thread = None
+
     def join(self, timeout: float | None = None) -> None:
-        """Block until the worker thread exits (or ``timeout`` seconds elapse)."""
+        """Block until the worker thread exits (or ``timeout`` seconds elapse).
+
+        After a successful join (thread no longer alive) the internal handle
+        is dropped so :meth:`is_alive` reports ``False`` and the next
+        ``start*`` starts cleanly.
+        """
         if self._thread is not None:
             self._thread.join(timeout=timeout)
+            if not self._thread.is_alive():
+                self._thread = None
+
+    # ------------------------------------------------------------------ #
+    # Progress API (v1.11 UI) — read-only accessors for the run_panel
+    # progress bar + running indicator + ETA. All are cheap, lock-free
+    # reads of atomic int/str/float fields (or single-field snapshots).
+    # ------------------------------------------------------------------ #
+
+    @property
+    def current_iteration(self) -> int:
+        """Iterations completed so far in the active/last solve (>= 0)."""
+        return self.iteration
+
+    @property
+    def total_iterations(self) -> int | None:
+        """Target iteration count, or ``None`` when unknown.
+
+        ``None`` when the runner is idle or the solve has no fixed target
+        (e.g. target-exploitability early-exit with no iteration cap).
+        """
+        return self.target_iterations
+
+    @property
+    def elapsed_seconds(self) -> float:
+        """Wall-clock seconds since the active solve started (0.0 when idle).
+
+        Uses the monotonic clock while running; falls back to
+        ``time.time() - started_at`` if the monotonic fields are unset.
+        """
+        start = self.start_time_monotonic
+        if start is not None:
+            now = self.current_time_monotonic
+            if now is None or self.is_running:
+                now = time.monotonic()
+            return max(0.0, float(now) - float(start))
+        if self.started_at:
+            return max(0.0, time.time() - self.started_at)
+        return 0.0
+
+    @property
+    def progress_fraction(self) -> float | None:
+        """Completion fraction in ``[0.0, 1.0]``, or ``None`` when unknown.
+
+        ``None`` when ``total_iterations`` is unknown. Returns ``1.0`` once
+        the solve has reached a terminal status so the bar reads full even
+        if the final iteration count undershot the target (early-exit).
+        """
+        if self.status in ("done", "stopped"):
+            return 1.0
+        target = self.target_iterations
+        if target is None or target <= 0:
+            return None
+        return max(0.0, min(1.0, self.iteration / target))
+
+    @property
+    def eta_seconds(self) -> float | None:
+        """Estimated seconds remaining, or ``None`` when not derivable.
+
+        Thin alias over :meth:`compute_eta` (iteration-rate × remaining).
+        ``None`` when idle, target unknown/reached, or no forward progress.
+        """
+        return self.compute_eta()
 
     def compute_eta(self) -> float | None:
         """Return the linear-extrapolation ETA in seconds, or None if N/A.
@@ -1780,17 +2395,49 @@ class SolveRunner:
             return solve_pushfold(cfg)
 
         # 2. HUNL postflop — direct call so on_progress + should_stop reach
-        # `_run_with_probe`. The Rust backend doesn't yet support these
-        # callbacks (PR 6 has no equivalent hook), so we fall back to the
-        # Python backend in that case with a one-time warning.
+        # the solve loop.
+        #
+        # v1.11 UI: the postflop engine is an INTERNAL implementation detail
+        # and is NOT user-selectable (the Python/Rust toggle was removed; the
+        # ``backend`` argument no longer downgrades the UI engine — see
+        # ``start()``'s default of "rust"). We now drive postflop on the FAST
+        # Rust tier: the ``_rust.solve_hunl_postflop`` binding gained the two
+        # load-bearing UI hooks (v1.11) —
+        #   * live progress streaming (``on_progress`` → progress bar + ETA),
+        #   * cooperative mid-solve cancellation (``should_stop`` → the Stop
+        #     button, critical for ~90-min flop solves) —
+        # by re-acquiring the GIL only at ``log_every`` checkpoints. The
+        # Python reference engine survives ONLY as a silent fallback when the
+        # Rust extension is genuinely unavailable (not built / wrong arch);
+        # the word "Python" is never surfaced to the user as an engine choice.
+        # ``solve_hunl_postflop_rust`` returns a byte-shape-identical
+        # ``HUNLSolveResult`` so the decision tree + chart widget are
+        # unaffected by the engine swap.
         if Street.FLOP <= cfg.starting_street < Street.SHOWDOWN:
-            from poker_solver.hunl_solver import solve_hunl_postflop
+            from poker_solver.hunl_solver import (
+                rust_postflop_available,
+                solve_hunl_postflop,
+                solve_hunl_postflop_rust,
+            )
 
-            if backend == "rust":
-                logger.info(
-                    "Rust backend does not support on_progress/should_stop "
-                    "yet; falling back to Python tier for this solve."
+            if rust_postflop_available():
+                return solve_hunl_postflop_rust(
+                    cfg,
+                    abstraction=None,
+                    iterations=iterations,
+                    target_exploitability=target_exploitability,
+                    memory_budget_gb=memory_budget_gb,
+                    log_every=log_every,
+                    seed=seed,
+                    on_progress=on_progress,
+                    should_stop=should_stop,
+                    locked_strategies=locked_strategies,
                 )
+            logger.warning(
+                "Rust postflop binding unavailable; falling back to the "
+                "Python reference engine for this postflop solve (progress + "
+                "Stop still work, but the solve will be much slower)."
+            )
             return solve_hunl_postflop(
                 cfg,
                 abstraction=None,
@@ -2641,10 +3288,7 @@ def _serialize_spot_ranges(spot: Spot) -> dict[str, Any] | None:
     """
 
     def _has_fractional(rw: RangeWithFreqs) -> bool:
-        for combo in rw.base_range.combos:
-            if rw.frequency_of(combo) < 1.0:
-                return True
-        return False
+        return any(rw.frequency_of(combo) < 1.0 for combo in rw.base_range.combos)
 
     if not any(_has_fractional(rw) for rw in spot.ranges):
         return None
@@ -2729,6 +3373,27 @@ def load_fixture_config(preset_id: str) -> HUNLConfig | None:
     return load_fixture(preset_id)
 
 
+def fixture_default_ranges(preset_id: str) -> tuple[str, str] | None:
+    """Return a fixture's explicit ``(oop_range_str, ip_range_str)``, if any.
+
+    The range-vs-range example spots (FLOP/TURN/PREFLOP) carry no
+    ``initial_hole_cards`` on their ``HUNLConfig`` — they are not concrete
+    subgames. Each such preset attaches deterministic, tractable per-player
+    range strings (see ``ui.mock_solver_fixtures``); this is the load
+    gateway the spot-input view consults so a freshly loaded flop/turn spot
+    gets real ranges instead of inheriting the previous spot's (a 1-combo
+    subgame or the full 1326-combo default).
+
+    Returns ``None`` when the preset has no explicit ranges (hole-card
+    anchored river subgames) or when ``ui.mock_solver`` is unavailable.
+    """
+    try:
+        from ui.mock_solver import load_fixture_default_ranges
+    except (ImportError, ModuleNotFoundError):
+        return None
+    return load_fixture_default_ranges(preset_id)
+
+
 __all__ = [
     "AppState",
     "HandClass",
@@ -2741,6 +3406,7 @@ __all__ = [
     "classify_combo",
     "enumerate_combos",
     "enumerate_hand_classes",
+    "fixture_default_ranges",
     "get_state",
     "hand_class_label",
     "list_fixture_preset_ids",

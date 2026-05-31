@@ -76,16 +76,21 @@ def isolated_state_dir(
     """
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("POKER_SOLVER_UI_STATE_DIR", str(tmp_path / ".poker_solver_ui"))
-    # PR 10b: stop any in-flight solver from a previous test before this
-    # one starts. With the real solver (vs PR 10a's near-zero-latency
-    # mock) tests can leave the worker thread alive past the test exit
-    # and the singleton SolveRunner refuses re-entrant `start()` while
-    # `is_alive()`. We do NOT reset the AppState singleton here because
-    # some smoke tests rely on cross-test singleton carryover for
-    # render-time state (the rendered matrix bakes in the spot.board at
-    # render time; resetting wipes the board between tests).
-    from ui.state import get_state
+    # Reset the AppState singleton at SETUP so each smoke test starts from a
+    # clean default Spot (PREFLOP, empty board). This mirrors the
+    # ``reset_state_for_testing()`` calls in every other UI test file's
+    # fixture (e.g. ``test_ui_pr24a.py`` / ``test_ui_pr24b.py`` /
+    # ``test_ui_solver_mode.py``) and fixes an order-dependent flake: a prior
+    # test file (notably ``test_ui_pr24a.py``, whose fixture only resets at
+    # setup) can leave the singleton holding a loaded postflop spot with a
+    # non-empty board. Because ``_toggle_board_card`` APPENDS to the existing
+    # board, ``test_board_picker_accepts_three_cards`` then clicked 3 cards
+    # onto a stale board and saw RIVER (5 cards) instead of FLOP (3 cards).
+    # Each smoke test that needs a board clicks its own preset right after
+    # ``user.open("/")``, so no test depends on cross-test board carryover.
+    from ui.state import get_state, reset_state_for_testing
 
+    reset_state_for_testing()
     try:
         current = get_state()
         if current.runner.is_alive():
@@ -1003,18 +1008,40 @@ def test_real_solve_ui_parity_with_direct_solve() -> None:
     assert runner.status == "done"
     via_runner = runner.result
 
-    # DCFR with the same seed should produce byte-identical exploitability
-    # vectors (the strategy is deterministic at fixed seed; the callback
-    # doesn't perturb the math).
+    # Parity gate: the CONVERGED (final) exploitability must be byte-identical
+    # at a fixed seed — that is the "no surprise" guarantee this test locks
+    # (see the docstring: "same exploitability final value").
+    #
+    # Stale-assertion fix (2026-05-30): this previously asserted that the two
+    # *full* exploitability_history vectors were equal length and element-wise
+    # identical. That assumed the runner used the same Python reference engine
+    # (``solve_hunl_postflop``, called directly above) which records one
+    # checkpoint per ``log_every`` chunk — here a length-4 vector for
+    # 200 iters @ log_every=50. The v1.11 UI now drives the runner onto the
+    # FAST Rust production tier (``solve_hunl_postflop_rust``; the engine is an
+    # internal, non-user-selectable detail — see
+    # ``ui/state.py::_dispatch_solve``). The Rust binding streams intermediate
+    # progress via the ``on_progress`` callback but returns only the FINAL
+    # exploitability in its ``HUNLSolveResult.exploitability_history`` (length
+    # 1). The converged value is byte-identical to the Python reference
+    # (verified: both 9.977534179262933e-05 here), so the parity guarantee
+    # holds; only the result object's history *shape* differs by engine. We
+    # therefore compare the converged value (the meaningful parity invariant)
+    # rather than the full per-checkpoint vector, whose length is now an
+    # engine-internal artifact.
     assert via_runner is not None
-    assert len(direct.exploitability_history) == len(via_runner.exploitability_history)
-    for direct_v, runner_v in zip(
-        direct.exploitability_history,
-        via_runner.exploitability_history,
-    ):
-        assert abs(direct_v - runner_v) < 1e-9, (
-            f"parity drift: direct={direct_v}, runner={runner_v}"
-        )
+    assert direct.exploitability_history, "direct solve recorded no exploitability"
+    assert via_runner.exploitability_history, "runner solve recorded no exploitability"
+    assert via_runner.iterations == direct.iterations, (
+        f"iteration-count parity drift: direct={direct.iterations}, "
+        f"runner={via_runner.iterations}"
+    )
+    direct_final = direct.exploitability_history[-1]
+    runner_final = via_runner.exploitability_history[-1]
+    assert abs(direct_final - runner_final) < 1e-9, (
+        f"converged-exploitability parity drift: direct={direct_final}, "
+        f"runner={runner_final}"
+    )
 
 
 def test_real_solve_error_surfaces_to_runner() -> None:

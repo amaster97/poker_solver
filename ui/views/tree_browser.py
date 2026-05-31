@@ -513,9 +513,13 @@ def _action_token(action: int) -> str:
 # -- NiceGUI label rendering --------------------------------------------------
 
 # Color thresholds for inline action badges (Pio palette per spec §7.3).
-_FOLD_COLOR: str = "rgb(220,40,40)"
-_CALL_COLOR: str = "rgb(220,200,40)"
-_RAISE_COLOR: str = "rgb(40,180,60)"
+# F04: these badges are inline-HTML TEXT, so a saturated yellow/green washes
+# out on a light tree row. Route them through the theme action-text vars
+# (defined in ``ui/app.py``) — dark resolves to the exact Pio RYG verbatim,
+# light darkens for contrast. The Pio convention is preserved either way.
+_FOLD_COLOR: str = "var(--ps-act-fold)"
+_CALL_COLOR: str = "var(--ps-act-call)"
+_RAISE_COLOR: str = "var(--ps-act-raise)"
 
 
 def _action_color(action: int) -> str:
@@ -585,13 +589,13 @@ def tree_node_to_dict(
     lock_indicator = ""
     if node.id in locked_keys:
         lock_indicator = (
-            '<span style="color:#d4a017;margin-right:6px" '
+            '<span style="color:var(--ps-accent-lock);margin-right:6px" '
             'title="Locked strategy applied at this infoset">🔒</span>'
         )
     label_html = (
         f"{lock_indicator}"
-        f'<span style="color:#f0f0f0;font-weight:500">{node.label}</span>'
-        f'<span style="color:#9a9a9a">{summary}</span>'
+        f'<span style="color:var(--ps-text);font-weight:500">{node.label}</span>'
+        f'<span style="color:var(--ps-text-faint)">{summary}</span>'
         f'<span style="margin-left:10px">{"".join(badges)}</span>'
     )
     out: dict[str, object] = {
@@ -616,12 +620,103 @@ def _safe_state_field(state: AppState, attr: str, default: Any) -> Any:
     return value
 
 
-def _resolve_tree(state: AppState) -> SolveTree | None:
-    """Best-effort retrieval of the current ``SolveTree`` from state.
+# Terminal statuses at which a concrete solve has published a usable
+# ``SolveResult`` on ``state.runner.result``. ``"stopped"`` is included
+# because a user-halted solve still yields a (partial-iteration but
+# structurally complete) average strategy worth browsing.
+_DONE_STATUSES: frozenset[str] = frozenset({"done", "stopped"})
 
-    Agent A is expected to construct one when a solve completes and
-    park it on ``state.current_tree`` (or on the solve session). We
-    accept either location.
+
+def _build_tree_from_runner(state: AppState) -> SolveTree | None:
+    """Construct (and memoize) a :class:`SolveTree` from the finished solve.
+
+    Root cause of F02: nothing in the UI ever built a ``SolveTree`` from
+    the runner's published result, so ``_resolve_tree`` always returned
+    ``None`` and the placeholder never cleared. This helper closes that
+    gap: when the runner has reached a terminal status with a concrete
+    ``SolveResult`` on ``runner.result``, we build the game from the
+    solved ``Spot`` (``state.current_solve.spot``, falling back to
+    ``state.current_spot``) and wrap result + game in a ``SolveTree``.
+
+    The built tree is cached on the runner under ``_tree_browser_cache``
+    keyed by ``id(runner.result)`` so the 0.5 s refresh timer doesn't
+    rebuild it every tick (and so lazy-expansion state survives across
+    refreshes). A new solve publishes a fresh ``result`` object → new
+    identity → fresh tree.
+
+    Returns ``None`` for non-terminal status, missing/empty result, or
+    the RvR / preflop-chart / chained paths (which leave ``runner.result``
+    as ``None`` and surface their strategies through other views).
+    """
+
+    runner = _safe_state_field(state, "runner", None)
+    if runner is None:
+        return None
+    if getattr(runner, "status", "idle") not in _DONE_STATUSES:
+        return None
+    result = getattr(runner, "result", None)
+    if not isinstance(result, SolveResult):
+        return None
+    if not getattr(result, "average_strategy", None):
+        # Structurally empty (e.g. an RvR result accidentally on this
+        # slot) — nothing to browse.
+        return None
+
+    # Cache hit: same result object → reuse the already-built tree so
+    # expansion state persists and we don't pay the build cost per tick.
+    cache = getattr(runner, "_tree_browser_cache", None)
+    if isinstance(cache, tuple) and len(cache) == 2 and cache[0] == id(result):
+        cached_tree = cache[1]
+        if isinstance(cached_tree, SolveTree):
+            return cached_tree
+
+    # Recover the config that produced this result, then build the game
+    # graph. PREFER the exact config the solve ran against (``runner.
+    # _solved_config``, stashed by ``SolveRunner.start``): the ``Spot`` ->
+    # ``HUNLConfig`` round-trip (``to_hunl_config``) does NOT preserve a
+    # postflop subgame's pot / contributions, so a tree rebuilt from the
+    # spot can land on a different action abstraction (more bet sizes) than
+    # the strategy vectors were indexed by. That mismatch silently zeroed
+    # every per-combo lookup in the range matrix (P2). The spot is the
+    # fallback only when no solved config was stashed (legacy / external
+    # result injection).
+    config = getattr(runner, "_solved_config", None)
+    if config is None:
+        solve_session = _safe_state_field(state, "current_solve", None)
+        spot = getattr(solve_session, "spot", None) or _safe_state_field(
+            state, "current_spot", None
+        )
+        if spot is None:
+            return None
+        try:
+            config = spot.to_hunl_config()
+        except Exception:  # noqa: BLE001 -- a malformed spot must not crash the UI
+            logger.exception("tree_browser: failed to derive config from spot")
+            return None
+    try:
+        game = HUNLPoker(config=config)
+        tree = SolveTree(game, result)
+    except Exception:  # noqa: BLE001 -- a malformed config must not crash the UI
+        logger.exception("tree_browser: failed to build SolveTree from result")
+        return None
+
+    try:
+        runner._tree_browser_cache = (id(result), tree)  # noqa: SLF001
+    except Exception:  # noqa: BLE001 -- caching is best-effort
+        logger.debug("tree_browser: could not memoize SolveTree on runner")
+    return tree
+
+
+def _resolve_tree(state: AppState) -> SolveTree | None:
+    """Best-effort retrieval of the current ``SolveTree``.
+
+    Resolution order:
+      1. A pre-built tree parked on ``state.current_tree`` or
+         ``state.current_solve.tree`` (legacy hook — kept so an external
+         constructor still wins if one ever appears).
+      2. Built on demand from ``state.runner.result`` once the solve
+         reaches a terminal status (the F02 fix; see
+         :func:`_build_tree_from_runner`).
     """
 
     direct = _safe_state_field(state, "current_tree", None)
@@ -632,7 +727,7 @@ def _resolve_tree(state: AppState) -> SolveTree | None:
         embedded = getattr(solve, "tree", None) or getattr(solve, "current_tree", None)
         if isinstance(embedded, SolveTree):
             return embedded
-    return None
+    return _build_tree_from_runner(state)
 
 
 def on_tree_node_selected(state: AppState, node_id: str) -> None:
@@ -650,9 +745,26 @@ def on_tree_node_selected(state: AppState, node_id: str) -> None:
         prefs = _safe_state_field(state, "prefs", None)
         if prefs is not None:
             prefs.current_tree_node_id = str(node_id)
-    refresher = _safe_state_field(state, "matrix_refresh", None)
-    if callable(refresher):
-        refresher()
+    # Drive the range-matrix repaint. ``range_matrix.render`` registers its
+    # refresh callable under BOTH ``state.matrix_refresh`` and
+    # ``runner._range_matrix_refresh``; either drives the same closure. Call
+    # whichever resolves (de-duped) so a node click projects that node's
+    # per-combo strategy into the 13x13 grid. Best-effort: a torn-down slot
+    # (tab switch) must not bubble out of an on-select handler.
+    runner = _safe_state_field(state, "runner", None)
+    candidates = [
+        _safe_state_field(state, "matrix_refresh", None),
+        getattr(runner, "_range_matrix_refresh", None) if runner else None,
+    ]
+    seen: set[int] = set()
+    for refresher in candidates:
+        if not callable(refresher) or id(refresher) in seen:
+            continue
+        seen.add(id(refresher))
+        try:
+            refresher()
+        except Exception:  # noqa: BLE001 -- best-effort; slot may be gone
+            logger.debug("on_tree_node_selected: matrix refresh raised")
 
 
 def on_tree_node_expanded(state: AppState, node_id: str) -> None:
@@ -802,22 +914,114 @@ def render(state: AppState) -> None:
     """
 
     ui_mod = _import_nicegui()
+
+    # F02 fix: the tree must (re)populate the instant a solve finishes.
+    # Previously this body ran once at page build — when no solve had
+    # completed yet ``_resolve_tree`` returned ``None`` and the placeholder
+    # was frozen in place forever, because nothing re-ran ``render`` on
+    # completion. We now wrap the body in an ``@ui.refreshable`` and drive
+    # it from a SELF-CONTAINED ``ui.timer`` that watches the runner's
+    # result identity + status. No dependency on ``ui/app.py``'s poller.
+
+    @ui_mod.refreshable  # type: ignore[untyped-decorator]
+    def _tree_browser_body() -> None:
+        _render_tree_body(state, ui_mod)
+
+    # Expose the refresh callable on the runner (mirrors the existing
+    # ``_preflop_chart_refresh`` / ``_chained_refresh`` hooks) so the
+    # module-level ``refresh_tree(state)`` — and, optionally, app.py's
+    # poller — can trigger a redraw without owning the closure.
+    runner = _safe_state_field(state, "runner", None)
+    if runner is not None:
+        try:
+            runner._tree_browser_refresh = _tree_browser_body.refresh  # noqa: SLF001
+        except Exception:  # noqa: BLE001 -- best-effort hook registration
+            logger.debug("tree_browser: could not register refresh hook on runner")
+
+    # Watcher state: remember the (result-identity, status) we last
+    # rendered so we only refresh when something actually changed (a new
+    # solve published a result, or the status flipped to/from terminal).
+    # A plain ``list`` cell keeps the closure mutable without ``nonlocal``.
+    _last_seen: list[tuple[int, str]] = [_result_signature(state)]
+    # Holder for the poller's own timer so the callback can cancel it once
+    # the slot it refreshes into is gone (tab-switch teardown). A list cell
+    # keeps the closure mutable without ``nonlocal``.
+    _timer_cell: list[Any] = [None]
+
+    def _poll_for_result() -> None:
+        # Tab-switch teardown race: this 0.5 s timer keeps firing after the
+        # user switches the top tabs, but ``_tree_browser_body.refresh()``
+        # re-runs ``_render_tree_body`` which calls ``ui.element(...)`` — if
+        # the slot this view rendered into has already been deleted, NiceGUI
+        # raises ``RuntimeError: The parent slot of the element has been
+        # deleted``. Stop the timer the moment its own element is gone, and
+        # swallow the teardown ``RuntimeError`` defensively (cancelling the
+        # timer so it doesn't thrash on every subsequent tick).
+        timer = _timer_cell[0]
+        if timer is not None and getattr(timer, "is_deleted", False):
+            return
+        sig = _result_signature(state)
+        if sig != _last_seen[0]:
+            _last_seen[0] = sig
+            try:
+                _tree_browser_body.refresh()
+            except RuntimeError as exc:
+                # Only the parent-slot-deleted teardown race is expected
+                # here; re-raise anything else so real bugs surface.
+                if "parent slot" not in str(exc):
+                    raise
+                if timer is not None:
+                    try:
+                        timer.cancel()
+                    except Exception:  # noqa: BLE001 -- best-effort stop
+                        logger.debug("tree_browser: poller timer cancel failed")
+
+    # 0.5 s cadence mirrors app.py's poller but is fully self-contained
+    # here; cheap identity/string compare, refresh only on change.
+    _timer_cell[0] = ui_mod.timer(0.5, _poll_for_result)
+
+    _tree_browser_body()
+
+
+def _result_signature(state: AppState) -> tuple[int, str]:
+    """A cheap change-detection key for the runner's published result.
+
+    Combines ``id(runner.result)`` (new solve → new object → new id) with
+    ``runner.status`` (so an idle→done flip on the *same* result object,
+    or a stop, still triggers one refresh). Returns ``(0, "idle")`` when
+    there is no runner yet.
+    """
+    runner = _safe_state_field(state, "runner", None)
+    if runner is None:
+        return (0, "idle")
+    return (id(getattr(runner, "result", None)), str(getattr(runner, "status", "idle")))
+
+
+def _render_tree_body(state: AppState, ui_mod: Any) -> None:
+    """Render the tree-browser body (refreshable inner pass of :func:`render`).
+
+    Split out of :func:`render` so the ``@ui.refreshable`` wrapper can
+    re-run JUST this content (placeholder → populated tree) when a solve
+    completes, without re-registering the outer card or the watch timer.
+    """
     tree = _resolve_tree(state)
 
     with (
         ui_mod.element("div")
         .mark("tree-browser")
-        .style("background:#0f0f0f;padding:10px;border-radius:6px")
+        .style("background:var(--ps-panel-bg);padding:10px;border-radius:6px")
     ):
         if tree is None:
             ui_mod.label("Solve to populate the decision tree").style(
-                "color:#9a9a9a;font-style:italic"
+                "color:var(--ps-text-faint);font-style:italic"
             )
             return
 
         # Reach-filter slider (Q6 locked: default 0.01).
         with ui_mod.row().style("align-items:center;gap:10px;margin-bottom:6px"):
-            ui_mod.label("Reach >=").style("color:#dcdcdc;font-weight:600")
+            ui_mod.label("Reach >=").style(
+                "color:var(--ps-text-label);font-weight:600"
+            )
             slider = ui_mod.slider(
                 min=0.0,
                 max=1.0,
@@ -831,7 +1035,7 @@ def render(state: AppState) -> None:
                 "leaves with <1% reach (study-irrelevant)."
             )
             reach_label = ui_mod.label(f"{tree.min_reach:.2f}").style(
-                "font-family:Menlo,Consolas,monospace;color:#a8c8e8"
+                "font-family:Menlo,Consolas,monospace;color:var(--ps-accent-reach)"
             )
 
         # PR 24b §3.5: "Lock current node" button. The button affordance
@@ -865,7 +1069,7 @@ def render(state: AppState) -> None:
             lock_btn.on_click(_open_lock_for_current)
 
             ui_mod.label(f"{len(state.current_spot.locked_strategies)} lock(s)").style(
-                "color:#9a9a9a;font-size:11px"
+                "color:var(--ps-text-faint);font-size:11px"
             ).mark("tree-lock-count-label")
 
         @ui_mod.refreshable  # type: ignore[untyped-decorator]
@@ -878,16 +1082,28 @@ def render(state: AppState) -> None:
             reach_label.text = f"{tree.min_reach:.2f}"
             with ui_mod.row().style("gap:8px;margin-bottom:4px"):
                 ui_mod.label(f"Visible: {rendered.visible} nodes").style(
-                    "color:#9a9a9a;font-size:11px"
+                    "color:var(--ps-text-faint);font-size:11px"
                 )
                 if rendered.truncated > 0:
                     badge = ui_mod.label(f"{rendered.truncated} hidden by cap")
                     badge.mark("tree-truncation-badge")
-                    badge.style("color:#d09a4a;font-size:11px")
+                    badge.style("color:var(--ps-accent-warn);font-size:11px")
             widget = ui_mod.tree(rendered.nodes, label_key="label", node_key="id")
             # NiceGUI markers via `.mark()`; the `no-selection-unset` token
             # is a Quasar prop and must stay on `.props()`.
             widget.mark("tree-widget").props("no-selection-unset")
+            # F-tree-label fix: each node's ``label`` is an inline-HTML string
+            # (R/Y/G action badges + reach/EV summary; see
+            # ``tree_node_to_dict``). Quasar's QTree renders ``label`` as
+            # PLAIN TEXT by default, so the raw ``<span ...>`` markup leaked
+            # to the screen as escaped tags. Override the per-node header
+            # slot to render the label as HTML via Vue's ``v-html``. The
+            # ``:props="props"`` binding preserves QTree's native expand /
+            # select / indentation behaviour for the row.
+            widget.add_slot(
+                "default-header",
+                r'<span :props="props" v-html="props.node.label"></span>',
+            )
 
             def _select_handler(event: Any) -> None:
                 node_id = getattr(event, "value", None) or getattr(
@@ -930,6 +1146,30 @@ def render(state: AppState) -> None:
         _tree_slot()
 
 
+def refresh_tree(state: AppState) -> None:
+    """Re-render the decision-tree browser body (populate-on-done hook).
+
+    OPTIONAL external wire. The tree already self-refreshes via an internal
+    ``ui.timer`` registered in :func:`render`, so app.py does NOT need to
+    call this. It is provided so the 0.5 s poller in ``ui/app.py`` MAY call
+    ``tree_browser.refresh_tree(state)`` once per tick as a redundant
+    trigger if desired (one line, no-op when no solve has completed).
+
+    Implementation: invokes the refresh callable that :func:`render`
+    stashed on ``state.runner._tree_browser_refresh``. No-op when render
+    hasn't run yet or the hook is unavailable.
+    """
+    runner = _safe_state_field(state, "runner", None)
+    if runner is None:
+        return
+    refresher = getattr(runner, "_tree_browser_refresh", None)
+    if callable(refresher):
+        try:
+            refresher()
+        except Exception:  # noqa: BLE001 -- never let a poller tick die here
+            logger.debug("tree_browser.refresh_tree: refresh callable raised")
+
+
 __all__ = [
     "TreeNode",
     "SolveTree",
@@ -937,4 +1177,5 @@ __all__ = [
     "on_tree_node_selected",
     "on_tree_node_expanded",
     "render",
+    "refresh_tree",
 ]

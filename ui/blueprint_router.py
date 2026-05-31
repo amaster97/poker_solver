@@ -61,6 +61,8 @@ __all__ = [
     "RouteInfo",
     "BlueprintRouter",
     "describe_route",
+    "describe_route_badge",
+    "custom_sizes_bypass_note",
     "default_asset_dir",
 ]
 
@@ -132,6 +134,88 @@ def describe_route(info: RouteInfo) -> str:
         f"[{info.source.value}] {info.confidence} "
         f"(wall {info.wall_time_s:.3f}s)"
     )
+
+
+def describe_route_badge(info: RouteInfo | None) -> str:
+    """Render a short, user-facing route badge for the chart header.
+
+    Unlike :func:`describe_route` (a dense ``[source] confidence (wall …)``
+    debug line), this produces the polished label the preflop-chart UI shows
+    the user so they can see at a glance what is serving the chart:
+
+      * ``"Blueprint · 100BB"`` — exact precomputed shard at an anchor depth.
+      * ``"Interpolated · 67BB ← 60+80"`` — blended between two anchors.
+      * ``"Live solve · 0.5s"`` — solved on the fly (or "running…" pre-finish).
+      * ``"Live solve required (no blueprint coverage)"`` — out-of-range depth.
+      * ``"No blueprint bundle (live only)"`` — no asset bundle on disk.
+      * ``"Not solved yet"`` — chart hasn't been triggered.
+
+    Derived faithfully from :class:`RouteInfo` fields (``source``,
+    ``stack_bb``, ``anchor_depths``, ``wall_time_s``, ``confidence``), so it
+    stays in sync with the router's actual routing decision.
+    """
+    if info is None:
+        return "Not solved yet"
+    if info.source == SourceLabel.UNAVAILABLE:
+        return f"Unavailable · {info.error or 'no data'}"
+    if info.source == SourceLabel.BLUEPRINT:
+        return f"Blueprint · {info.stack_bb}BB"
+    if info.source == SourceLabel.INTERPOLATED:
+        anchors = info.anchor_depths
+        if anchors is not None:
+            lo, hi = anchors
+            if lo == hi:
+                return f"Interpolated · {info.stack_bb}BB ← clamp {lo}"
+            return f"Interpolated · {info.stack_bb}BB ← {lo}+{hi}"
+        return f"Interpolated · {info.stack_bb}BB"
+    # LIVE
+    if "no blueprint coverage" in (info.confidence or ""):
+        return "Live solve required (no blueprint coverage)"
+    if info.wall_time_s and info.wall_time_s > 0:
+        return f"Live solve · {info.wall_time_s:.1f}s"
+    return "Live solve (running…)"
+
+
+def custom_sizes_bypass_note(
+    *,
+    open_sizes: list[float] | None,
+    reraise_multipliers: list[float] | None,
+    default_open_sizes: tuple[float, ...] | list[float],
+    default_reraise_multipliers: tuple[float, ...] | list[float],
+) -> str | None:
+    """Return a note when custom action sizes will bypass the blueprint.
+
+    The blueprint asset is solved against a FIXED action menu (the engine
+    defaults). When the user edits the open sizes or reraise multipliers so
+    they diverge from those defaults, the lookup key no longer matches any
+    precomputed shard's action menu, so the router MISSES the blueprint and
+    the chart falls back to a live solve.
+
+    Returns a one-line, user-facing explanation when a divergence is present,
+    else ``None`` (defaults in use → blueprint reachable). Comparison is
+    order-sensitive and exact (matching how the engine keys the action menu);
+    a list that merely re-orders the defaults is still treated as custom.
+    """
+
+    def _norm(xs: list[float] | None, default: tuple[float, ...] | list[float]) -> list[float]:
+        return [float(x) for x in (xs if xs else list(default))]
+
+    opens = _norm(open_sizes, default_open_sizes)
+    mults = _norm(reraise_multipliers, default_reraise_multipliers)
+    default_opens = [float(x) for x in default_open_sizes]
+    default_mults = [float(x) for x in default_reraise_multipliers]
+
+    opens_custom = opens != default_opens
+    mults_custom = mults != default_mults
+    if not opens_custom and not mults_custom:
+        return None
+    if opens_custom and mults_custom:
+        what = "open sizes + reraise multipliers"
+    elif opens_custom:
+        what = "open sizes"
+    else:
+        what = "reraise multipliers"
+    return f"Custom {what} → live solve (blueprint bypassed)"
 
 
 # ---------------------------------------------------------------------------
@@ -395,10 +479,160 @@ class BlueprintRouter:
             }
         return out
 
+    # -- All-line (deeper-node) chart extraction ---------------------------
+
+    def extract_all_lines(
+        self, *, stack_bb: int, ante: str | float | int
+    ) -> dict[str, dict[str, dict[str, float]]]:
+        """Extract EVERY preflop line from the blueprint, not just the root.
+
+        Returns a nested ``{history_suffix -> {hand_class -> {action: prob}}}``
+        map mirroring :meth:`ui.state.SolveRunner._project_preflop_by_line` so
+        the chart's line selector can surface deeper nodes (BB vs open / 3-bet
+        / 4-bet / limped pots) from a blueprint route, exactly as it does for a
+        live solve. The ``history_suffix`` keys are the shard's own infoset
+        histories (already in the ``"||p|<tokens>"`` shape the UI's
+        :func:`ui.views.preflop_chart.preflop_line_label` decodes).
+
+        Routes through the same EXACT-vs-INTERPOLATED decision as
+        :meth:`lookup_chart`; on an out-of-range / no-coverage depth returns an
+        empty map (the caller keeps the live-solve lines instead). Per-infoset
+        action menus are preserved (deeper nodes use ``raise_to_*`` labels),
+        which the chart's :func:`ui.views.preflop_chart.classify_action`
+        already buckets correctly.
+        """
+        source, anchors = self.route_label(stack_bb=stack_bb, ante=ante)
+        if source == SourceLabel.LIVE:
+            return {}
+        if source == SourceLabel.BLUEPRINT:
+            return self._all_lines_exact(stack_bb=int(stack_bb), ante=ante)
+        return self._all_lines_interp(
+            target_stack_bb=int(stack_bb),
+            ante=ante,
+            anchor_depths=anchors,  # type: ignore[arg-type]
+        )
+
+    @staticmethod
+    def _infoset_to_per_class(
+        infoset: dict[str, Any] | None,
+    ) -> dict[str, dict[str, float]]:
+        """Convert one shard infoset to ``{hand_class: {action: prob}}``.
+
+        Returns ``{}`` for a missing / malformed infoset (no actions, or
+        per-class probability vectors that don't match the action count).
+        """
+        if not infoset:
+            return {}
+        actions = list(infoset.get("actions", []))
+        strategy_map = infoset.get("strategy", {})
+        out: dict[str, dict[str, float]] = {}
+        for hand_class, probs in strategy_map.items():
+            if not actions or not probs or len(actions) != len(probs):
+                continue
+            out[str(hand_class)] = {
+                str(actions[i]): float(probs[i]) for i in range(len(actions))
+            }
+        return out
+
+    def _all_lines_exact(
+        self, *, stack_bb: int, ante: str | float | int
+    ) -> dict[str, dict[str, dict[str, float]]]:
+        """All-line extraction for an exact shard match."""
+        from poker_solver.blueprint_loader import BlueprintKey
+
+        bp = self.loader._load_shard(BlueprintKey.from_user(stack_bb, ante))
+        out: dict[str, dict[str, dict[str, float]]] = {}
+        for history, infoset in bp.infosets.items():
+            per_class = self._infoset_to_per_class(infoset)
+            if per_class:
+                out[str(history)] = per_class
+        return out
+
+    def _all_lines_interp(
+        self,
+        *,
+        target_stack_bb: int,
+        ante: str | float | int,
+        anchor_depths: tuple[int, int],
+    ) -> dict[str, dict[str, dict[str, float]]]:
+        """All-line extraction by interpolating two anchors per line.
+
+        Interpolates each (history, hand_class) vector across the flanks where
+        the action menus agree; falls back to the nearest anchor for a line
+        whose menus disagree (constant extrapolation rather than a malformed
+        blend), matching :meth:`_extract_chart_interp`'s single-line policy.
+        """
+        from poker_solver.blueprint_interp import interpolate_strategy
+        from poker_solver.blueprint_loader import BlueprintKey
+
+        lo, hi = anchor_depths
+        bp_lo = self.loader._load_shard(BlueprintKey.from_user(lo, ante))
+        bp_hi = self.loader._load_shard(BlueprintKey.from_user(hi, ante))
+        nearest_lo = abs(target_stack_bb - lo) <= abs(target_stack_bb - hi)
+
+        out: dict[str, dict[str, dict[str, float]]] = {}
+        for history, info_lo in bp_lo.infosets.items():
+            info_hi = bp_hi.infosets.get(history)
+            if info_hi is None:
+                # Line not reachable in the far anchor — snap to near anchor.
+                near = self._infoset_to_per_class(info_lo if nearest_lo else None)
+                if near:
+                    out[str(history)] = near
+                continue
+            actions_lo = list(info_lo.get("actions", []))
+            actions_hi = list(info_hi.get("actions", []))
+            if actions_lo != actions_hi:
+                chosen = info_lo if nearest_lo else info_hi
+                near = self._infoset_to_per_class(chosen)
+                if near:
+                    out[str(history)] = near
+                continue
+            actions = actions_lo
+            strat_lo = info_lo.get("strategy", {})
+            strat_hi = info_hi.get("strategy", {})
+            line_out: dict[str, dict[str, float]] = {}
+            for hand_class in strat_lo:
+                v_lo = strat_lo.get(hand_class)
+                v_hi = strat_hi.get(hand_class)
+                if v_lo is None or v_hi is None:
+                    continue
+                if (
+                    not actions
+                    or len(actions) != len(v_lo)
+                    or len(actions) != len(v_hi)
+                ):
+                    continue
+                blended = interpolate_strategy(
+                    float(target_stack_bb),
+                    {float(lo): list(v_lo), float(hi): list(v_hi)},
+                    method="linear",
+                )
+                line_out[str(hand_class)] = {
+                    str(actions[i]): float(blended[i]) for i in range(len(actions))
+                }
+            if line_out:
+                out[str(history)] = line_out
+        return out
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _normalize_root_history(action_history: str = "") -> str:
+    """Normalize an action-history string to the shard's infoset-key form.
+
+    Thin re-export of
+    :func:`poker_solver.blueprint_loader.normalize_action_history` so callers
+    (e.g. ``ui.state.SolveRunner.try_blueprint_preflop_chart``) can key the
+    root line under the SAME ``"||p|<tokens>"`` history the shard's infoset map
+    uses, keeping the blueprint's ``_by_line`` keys consistent with
+    :meth:`BlueprintRouter.extract_all_lines`.
+    """
+    from poker_solver.blueprint_loader import normalize_action_history
+
+    return str(normalize_action_history(action_history))
 
 
 def _normalize_ante_local(ante: str | float | int) -> float:

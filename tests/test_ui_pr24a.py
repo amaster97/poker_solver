@@ -363,15 +363,18 @@ def test_chart_subtitle_says_blueprint_in_rvr_mode() -> None:
     label = run_panel._chart_quality_label(_state(True, "python"))
     assert "blueprint approximation" in label, label
 
-    # Concrete + Rust -> true Nash Rust label
+    # Concrete + Rust -> true Nash label. (Engine names are intentionally
+    # hidden from users; the prior "Rust best-response walk" wording was
+    # sanitized to "true Nash (best-response walk)" — assert the current
+    # sanitized string, not the engine name.)
     label = run_panel._chart_quality_label(_state(False, "rust"))
     assert "true Nash" in label, label
-    assert "Rust best-response walk" in label, label
+    assert label == "true Nash (best-response walk)", label
 
-    # Concrete + Python -> true Nash slow label
+    # Concrete + Python -> true Nash slow label (engine-agnostic wording).
     label = run_panel._chart_quality_label(_state(False, "python"))
     assert "true Nash" in label, label
-    assert "Python" in label, label
+    assert label == "true Nash (best-response walk (slow))", label
 
     # The echarts subtext is rendered.
     opts = run_panel._chart_options(
@@ -419,3 +422,145 @@ def test_to_rvr_call_args_swaps_hero_villain_on_hero_player_change() -> None:
     # P1 range is now hero side.
     assert "72o" in hero1
     assert "AA" in villain1
+
+
+# ---------------------------------------------------------------------------
+# Concrete/Range-vs-range method toggle is DEV-ONLY (2026-05-30)
+# ---------------------------------------------------------------------------
+#
+# Product decision: "Concrete" (point-pair) is a dev/test artifact, not a
+# real study mode. Production postflop = Range-vs-range only. The toggle is
+# hidden in production (no "Concrete"/"point-pair" text in the DOM) and the
+# effective default is RvR (``rvr_mode = True``). The toggle is restored —
+# defaulting to Concrete for fast dev iteration — only when
+# ``POKER_SOLVER_DEV_CONCRETE`` is set. The gate is centralized in
+# ``ui.views.run_panel._concrete_dev_enabled``.
+
+
+def test_concrete_dev_helper_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``_concrete_dev_enabled()`` is True iff ``POKER_SOLVER_DEV_CONCRETE``
+    is set to a non-empty value, read at call time."""
+    run_panel = importlib.import_module("ui.views.run_panel")
+
+    monkeypatch.delenv("POKER_SOLVER_DEV_CONCRETE", raising=False)
+    assert run_panel._concrete_dev_enabled() is False
+
+    monkeypatch.setenv("POKER_SOLVER_DEV_CONCRETE", "1")
+    assert run_panel._concrete_dev_enabled() is True
+
+    # Empty / whitespace-only value does NOT enable the dev toggle.
+    monkeypatch.setenv("POKER_SOLVER_DEV_CONCRETE", "   ")
+    assert run_panel._concrete_dev_enabled() is False
+
+
+async def test_method_toggle_hidden_and_rvr_forced_in_production(
+    user: User,
+    isolated_state_dir: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Production (``POKER_SOLVER_DEV_CONCRETE`` unset): the Concrete/RvR
+    method toggle is NOT rendered, no "Concrete"/"point-pair" text appears
+    in the DOM, and ``rvr_mode`` is forced True (postflop = RvR only)."""
+    from ui.state import get_state
+
+    monkeypatch.delenv("POKER_SOLVER_DEV_CONCRETE", raising=False)
+
+    await user.open("/")
+
+    # The method toggle marker must be absent (``should_not_see`` is the
+    # proper absence assertion; ``user.find`` would itself raise when no
+    # element matches).
+    await user.should_not_see(marker="rvr-mode-toggle")
+
+    # No "Concrete" / "point-pair" framing leaks into the production DOM.
+    await user.should_not_see(content="Concrete")
+    await user.should_not_see(content="point-pair")
+
+    # The effective default is Range-vs-range.
+    state = get_state()
+    assert state.current_spot.rvr_mode is True
+
+
+async def test_method_toggle_shown_and_defaults_concrete_in_dev(
+    user: User,
+    isolated_state_dir: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dev (``POKER_SOLVER_DEV_CONCRETE=1``): the Concrete/RvR method
+    toggle IS rendered (both options) and its selection starts on Concrete
+    (``rvr_mode = False``) so debugging is fast."""
+    from ui.state import get_state
+
+    monkeypatch.setenv("POKER_SOLVER_DEV_CONCRETE", "1")
+
+    await user.open("/")
+
+    # The toggle is present (``find`` raises if absent, so this both
+    # locates the element and asserts presence).
+    toggle_elements = user.find(marker="rvr-mode-toggle").elements
+    assert len(toggle_elements) >= 1, (
+        "Concrete/RvR toggle must be shown when dev flag set"
+    )
+
+    # Both options are offered, defaulting the selection to Concrete.
+    toggle = next(iter(toggle_elements))
+    assert list(toggle.options) == ["Concrete", "Range-vs-range"], toggle.options
+    assert toggle.value == "Concrete", toggle.value
+
+    # Selection defaults to Concrete -> rvr_mode False.
+    state = get_state()
+    assert state.current_spot.rvr_mode is False
+
+
+async def test_prod_stays_rvr_through_preset_load(
+    user: User,
+    isolated_state_dir: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """W1/W4: production (``POKER_SOLVER_DEV_CONCRETE`` unset) must stay
+    Range-vs-range through a preset load.
+
+    Before the fix, ``_on_load_preset`` replaced ``state.current_spot`` with a
+    fresh ``Spot()`` (``rvr_mode`` defaults False) and ``run_panel.render()``
+    — the only place that forced RvR — never re-ran, so a preset load silently
+    reverted prod to the Concrete point-pair path. Two independent backstops now
+    keep prod on RvR:
+
+      1. ``_spot_from_config`` stamps ``rvr_mode`` per the dev-gate, so the
+         loaded spot is already RvR in prod.
+      2. ``_on_solve`` re-forces ``rvr_mode = True`` at the dispatch point.
+
+    This test loads the flop preset, asserts (1), then to defeat (1) for a
+    belt-and-suspenders check, flips ``rvr_mode`` back to False and runs the
+    exact ``_on_solve`` rvr-force, asserting (2) restores True.
+    """
+    from ui.app import _concrete_dev_enabled as _app_concrete_dev_enabled
+    from ui.state import get_state
+    from ui.views.spot_input import _on_load_preset
+
+    monkeypatch.delenv("POKER_SOLVER_DEV_CONCRETE", raising=False)
+
+    await user.open("/")
+    state = get_state()
+
+    with user.client:
+        await _on_load_preset(state, "flop_t87s_100bb")
+
+    # Backstop 1: the loaded spot carries rvr_mode True in production.
+    assert state.current_spot.rvr_mode is True, (
+        "W1/W4: a preset load in production must leave the spot in RvR mode "
+        "(``_spot_from_config`` stamps rvr_mode per the dev-gate)"
+    )
+
+    # Backstop 2: even if something flipped the spot back to Concrete, the
+    # ``_on_solve`` rvr-force restores RvR in production. This mirrors the
+    # exact guard in ``ui.app._on_solve`` (right after ``spot = current_spot``).
+    state.current_spot.rvr_mode = False
+    spot = state.current_spot
+    if not _app_concrete_dev_enabled():
+        spot.rvr_mode = True
+
+    assert state.current_spot.rvr_mode is True, (
+        "W1/W4: the ``_on_solve`` rvr-force must restore Range-vs-range in "
+        "production after a preset load reverted the spot to Concrete"
+    )

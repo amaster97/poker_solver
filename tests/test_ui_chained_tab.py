@@ -74,19 +74,63 @@ def isolated_state_dir(
         reset_state_for_testing()
 
 
-def _fake_chained_result() -> Any:
+def _tractable_flop_config() -> Any:
+    """A preflop ``HUNLConfig`` whose synthesized flop subgame is tractable.
+
+    The chained-tab flop guard (``ui.state.chained_flop_too_large``) blocks
+    a flop solve when the synthesized flop tree exceeds ``TREE_SIZE_BUDGET``.
+    The DEFAULT bet menu (5 sizes + all-in) is intentionally over-budget for
+    a flop (the real solve hangs), so tests that want ``solve_postflop`` to
+    FIRE pin a single-bet-size, no-all-in config that passes the guard.
+    """
+    from poker_solver.hunl import HUNLConfig, Street
+
+    return HUNLConfig(
+        starting_stack=5000,
+        small_blind=50,
+        big_blind=100,
+        starting_street=Street.PREFLOP,
+        bet_size_fractions=(0.75,),
+        include_all_in=False,
+    )
+
+
+def _wide_flop_config() -> Any:
+    """A preflop ``HUNLConfig`` whose synthesized flop subgame is OVER-budget.
+
+    The default 5-bet-size + all-in menu makes a flop tree the guard rejects
+    — used by the flop-guard test to confirm ``solve_postflop`` never fires.
+    """
+    from poker_solver.hunl import HUNLConfig, Street
+
+    return HUNLConfig(
+        starting_stack=5000,
+        small_blind=50,
+        big_blind=100,
+        starting_street=Street.PREFLOP,
+    )
+
+
+def _fake_chained_result(config: Any | None = None) -> Any:
     """Build a synthetic :class:`ChainedSolveResult` for the smoke tests.
 
     Mirrors the shape of a real Phase A solve on a 2x2 range: per-class
-    preflop strategy for AA / KK, one flop-reaching terminal, an empty
-    postflop cache. The orchestrator's ``solve_postflop`` is bypassed
-    by patching the result's ``solve_postflop`` method to return a
-    canned :class:`RangeVsRangeNashResult`.
+    preflop strategy for AA / KK, one flop-reaching terminal (the SB-limp /
+    BB-check line ``("c", "x")``), an empty postflop cache. The
+    ``_config_template`` carries the bet abstraction the chained-tab flop
+    guard inspects; pass a tractable config to let ``solve_postflop`` fire,
+    or a wide config to exercise the guard. Defaults to tractable.
+
+    The orchestrator's ``solve_postflop`` is bypassed by patching the
+    result's method to return a canned :class:`RangeVsRangeNashResult`.
     """
     from collections import OrderedDict
 
     from poker_solver.chained import ChainedSolveResult, ContinuationRanges
     from poker_solver.range_aggregator import RangeVsRangeNashResult
+
+    if config is None:
+        config = _tractable_flop_config()
 
     preflop_result = RangeVsRangeNashResult(
         per_history_strategy={},
@@ -119,6 +163,7 @@ def _fake_chained_result() -> Any:
         # (``move_to_end`` / ``popitem(last=False)``). A plain dict
         # would silently fail on ``move_to_end`` during cache-hit reads.
         postflop_cache=OrderedDict(),
+        _config_template=config,
     )
     return result
 
@@ -205,17 +250,20 @@ async def test_chained_tab_grid_renders_all_169_cells(
 # ---------------------------------------------------------------------------
 
 
-async def test_chained_solve_button_routes_to_solve_chained(
+async def test_chained_solve_button_captures_hole_cards_and_routes(
     user: User,
     isolated_state_dir: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Clicking ``chained-tab-solve-button`` calls
-    ``poker_solver.chained.solve_chained`` (mocked) with hero / villain
-    ranges from the spot and preflop iterations from the input.
+    """Picking 2 hero hole cards then clicking ``chained-tab-solve-button``
+    BOTH captures the hole-card combo on the runner (``_wt_hero_combo``,
+    consumed by the walkthrough to classify the hero hand) AND routes
+    through ``poker_solver.chained.solve_chained`` (mocked) with the spot's
+    ranges + preflop iterations.
 
-    Per task #57 acceptance gate 1 (smoke: solve dispatch wiring).
+    Chain-solve "b" plan: Smoke 3 reworked to assert hole-card capture.
     """
+    from poker_solver.card import Card
     from ui.state import RangeWithFreqs, get_state
 
     calls: dict[str, Any] = {"count": 0, "kwargs": None}
@@ -248,6 +296,18 @@ async def test_chained_solve_button_routes_to_solve_chained(
     state.current_spot.stacks_bb = (50, 50)
     state.current_spot.board = []
 
+    # Pick the hero's two hole cards via the hole-card picker. The marker
+    # is keyed on ``str(Card)`` so the label and the card always agree.
+    user.find(marker="chained-tab-hole-cell-As").click()
+    user.find(marker="chained-tab-hole-cell-Kh").click()
+
+    # The picker mutated ``runner._wt_hero_combo`` directly.
+    captured = getattr(state.runner, "_wt_hero_combo", None)
+    assert captured is not None and len(captured) == 2, (
+        f"hole-card picker did not capture a 2-card combo; got {captured!r}"
+    )
+    assert set(captured) == {Card.from_str("As"), Card.from_str("Kh")}
+
     user.find(marker="chained-tab-solve-button").click()
     deadline = 4.0
     waited = 0.0
@@ -266,6 +326,8 @@ async def test_chained_solve_button_routes_to_solve_chained(
         f"runner status after chained solve: {state.runner.status!r}"
     )
     assert state.runner.chained_result is not None
+    # The captured combo survives the solve dispatch (walkthrough start).
+    assert getattr(state.runner, "_wt_hero_combo", None) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -273,41 +335,45 @@ async def test_chained_solve_button_routes_to_solve_chained(
 # ---------------------------------------------------------------------------
 
 
-async def test_cell_click_plus_flop_triggers_postflop_solve(
+async def test_hole_pick_advance_to_flop_triggers_postflop_solve(
     user: User, isolated_state_dir: pathlib.Path
 ) -> None:
-    """With a populated ``runner.chained_result``, clicking a preflop
-    cell then picking a 3-card flop triggers
-    ``ChainedSolveResult.solve_postflop`` and the right pane renders the
-    per-class postflop strategy rows.
+    """The full Tier-A walk: with a populated ``runner.chained_result``,
+    pick hero hole cards, advance the preflop walk via legal-action buttons
+    to a flop-reaching terminal, deal a 3-card flop, and confirm
+    ``ChainedSolveResult.solve_postflop`` fired + per-action flop strategy
+    rows render.
 
-    Per task #57 acceptance gate 2 (preflop click + flop -> postflop solve).
+    Chain-solve "b" plan: Smoke 4 reworked (no ``chained-tab-action-select``)
+    — hole-card pick -> advance -> flop pick -> ``solve_postflop`` fired.
     """
+    from poker_solver.card import Card
     from ui.state import get_state
 
     await user.open("/")
     state = get_state()
+    state.current_spot.stacks_bb = (50, 50)
+    state.current_spot.board = []
 
-    # Stash a synthetic result on the runner so the chained tab can
-    # project it. ``runner.chained_result`` is what ``project_preflop``
-    # reads (see ``ui/views/chained_tab.py:_chained_result``).
-    result = _fake_chained_result()
+    # Tractable config so the flop guard passes and the solve can fire.
+    result = _fake_chained_result(_tractable_flop_config())
     state.runner.chained_result = result  # type: ignore[attr-defined]
     state.runner._mode = "chained"  # type: ignore[attr-defined]
     state.runner.status = "done"
+    # Hero holds AhAs -> class AA (in the solved range).
+    state.runner._wt_hero_combo = (  # type: ignore[attr-defined]
+        Card.from_str("Ah"),
+        Card.from_str("As"),
+    )
+    state.runner._wt_tokens = ()  # type: ignore[attr-defined]
+    state.runner._wt_step = "preflop"  # type: ignore[attr-defined]
+    state.runner._wt_flop = []  # type: ignore[attr-defined]
 
-    # Patch the result's solve_postflop so we don't run the real Rust
-    # vector-form CFR in a smoke test.
     postflop_calls: dict[str, Any] = {"count": 0}
 
     def _fake_solve_postflop(action_sequence: Any, board: Any) -> Any:
         postflop_calls["count"] += 1
         postflop_result = _fake_postflop_result()
-        # Mirror production's cache key (PR #150): the cache is keyed on
-        # the canonical board (suit-isomorphism class), not the raw tuple.
-        # This fake replaces ``solve_postflop`` entirely via ``patch.object``,
-        # so the only consumer of this write is incidental inspection —
-        # but use the right shape so the test stays a fair stand-in.
         from poker_solver.chained import _canonicalize_board
 
         result.postflop_cache[
@@ -316,41 +382,39 @@ async def test_cell_click_plus_flop_triggers_postflop_solve(
         return postflop_result
 
     with patch.object(result, "solve_postflop", _fake_solve_postflop):
-        # Re-open so the page picks up the new runner state.
         await user.open("/")
 
-        # Click the AA cell to select that class.
-        user.find(marker="chained-tab-cell-AA").click()
+        # The marker ``chained-tab-action-select`` is GONE — the flat
+        # action dropdown was replaced by the stepper walkthrough.
+        await user.should_not_see(marker="chained-tab-action-select")
 
-        # Pick a 3-card flop. Use card strings that match the board
-        # picker marker convention (rank + suit symbol).
-        from poker_solver.card import SUITS
+        # Preflop walk: hero (SB) calls/limps -> "call"; villain (BB)
+        # checks -> "check". That reaches the ("c", "x") flop terminal.
+        user.find(marker="chained-tab-legal-action-call").click()
+        await user.open("/")
+        user.find(marker="chained-tab-legal-action-check").click()
+        await user.open("/")
 
-        # Pick a flop that does NOT block AA. Use 7c 5d 2h (no aces).
-        _ = SUITS  # noqa: F841
+        # Now on a flop-reaching terminal: deal the flop, then pick 3 cards.
+        user.find(marker="chained-tab-legal-action-deal_flop").click()
+        await user.open("/")
+
+        # Pick a flop that does NOT block AA: 7c 5d 2h (no aces).
         user.find(marker="chained-tab-board-cell-7c").click()
         user.find(marker="chained-tab-board-cell-5d").click()
         user.find(marker="chained-tab-board-cell-2h").click()
-
-        # Re-open so the right-pane refreshable picks up the new board
-        # selection. (The board picker mutates runner state via
-        # ``_set_selected_board``; the right pane is gated on the
-        # board having length 3 to trigger the solve.)
         await user.open("/")
 
-        # The postflop strategy panel must have triggered the
-        # lazy solve and rendered per-class rows.
         assert postflop_calls["count"] >= 1, (
             f"expected solve_postflop called >=1 time after flop selection; "
             f"got {postflop_calls['count']}"
         )
-        # Per-class postflop rows materialized for the dominant labels.
-        # The fake postflop result has AA: check 0.4 / bet_75 0.6, so the
-        # bar rows for check + bet_75 must exist.
+        # Per-action flop strategy rows materialized. The fake postflop
+        # result has AA: check 0.4 / bet_75 0.6.
         check_rows = user.find(marker="chained-tab-postflop-row-check").elements
         bet_rows = user.find(marker="chained-tab-postflop-row-bet_75").elements
-        assert len(check_rows) >= 1, "postflop check row missing"
-        assert len(bet_rows) >= 1, "postflop bet_75 row missing"
+        assert len(check_rows) >= 1, "flop check row missing"
+        assert len(bet_rows) >= 1, "flop bet_75 row missing"
 
 
 # ---------------------------------------------------------------------------
@@ -557,3 +621,213 @@ def test_chained_tab_primitives_layout_and_color() -> None:
     assert mixed.dominant_label == "open_3"
     assert mixed.dominant_kind == "raise"
     assert abs(mixed.dominant_prob - 0.6) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# Walkthrough additions (chain-solve "b" plan)
+# ---------------------------------------------------------------------------
+
+
+def test_hole_cards_classify_to_hero_class() -> None:
+    """Two hole cards classify to the hero hand class the walkthrough uses.
+
+    The walkthrough derives the hero's class from ``_wt_hero_combo`` via
+    ``ui.state.classify_combo``; this locks the class derivation the matrix
+    highlight + rec lookups depend on.
+    """
+    from poker_solver.card import Card
+    from ui.state import classify_combo
+
+    assert classify_combo(Card.from_str("Ah"), Card.from_str("As")) == "AA"
+    assert classify_combo(Card.from_str("Ah"), Card.from_str("Kh")) == "AKs"
+    assert classify_combo(Card.from_str("Ah"), Card.from_str("Kd")) == "AKo"
+    assert classify_combo(Card.from_str("7c"), Card.from_str("2d")) == "72o"
+
+
+async def test_preflop_step_shows_rec_for_hero_class(
+    user: User, isolated_state_dir: pathlib.Path
+) -> None:
+    """At a hero preflop decision node, the walkthrough renders the
+    class-level GTO rec (``result.query(hero_class, board=None)``) as bars.
+
+    The fake preflop strategy for AA is ``all_in 0.95 / fold 0.05`` — both
+    rows must materialize when the hero holds AA at the root decision.
+    """
+    from poker_solver.card import Card
+    from ui.state import get_state
+
+    await user.open("/")
+    state = get_state()
+    state.current_spot.stacks_bb = (50, 50)
+    state.current_spot.board = []
+
+    result = _fake_chained_result()
+    state.runner.chained_result = result  # type: ignore[attr-defined]
+    state.runner._mode = "chained"  # type: ignore[attr-defined]
+    state.runner.status = "done"
+    state.runner._wt_hero_combo = (  # type: ignore[attr-defined]
+        Card.from_str("Ah"),
+        Card.from_str("As"),
+    )
+    state.runner._wt_tokens = ()  # type: ignore[attr-defined]
+    state.runner._wt_step = "preflop"  # type: ignore[attr-defined]
+    state.runner._wt_flop = []  # type: ignore[attr-defined]
+
+    await user.open("/")
+
+    # The hero is SB (acts first) at the root — its rec bars render.
+    all_in_rows = user.find(marker="chained-tab-postflop-row-all_in").elements
+    fold_rows = user.find(marker="chained-tab-postflop-row-fold").elements
+    assert len(all_in_rows) >= 1, "preflop all_in rec row missing for AA"
+    assert len(fold_rows) >= 1, "preflop fold rec row missing for AA"
+    # The hero's class cell is highlighted (a 2px border) — at minimum the
+    # AA cell exists in the grid.
+    assert user.find(marker="chained-tab-cell-AA").elements
+
+
+async def test_advance_preflop_to_flop_reaching_terminal(
+    user: User, isolated_state_dir: pathlib.Path
+) -> None:
+    """Picking call (hero) then check (villain) advances the walk onto the
+    ``("c", "x")`` flop-reaching terminal, which surfaces the "deal the
+    flop" affordance.
+    """
+    from poker_solver.card import Card
+    from ui.state import get_state
+
+    await user.open("/")
+    state = get_state()
+    state.current_spot.stacks_bb = (50, 50)
+    state.current_spot.board = []
+
+    result = _fake_chained_result()
+    state.runner.chained_result = result  # type: ignore[attr-defined]
+    state.runner._mode = "chained"  # type: ignore[attr-defined]
+    state.runner.status = "done"
+    state.runner._wt_hero_combo = (  # type: ignore[attr-defined]
+        Card.from_str("Ah"),
+        Card.from_str("As"),
+    )
+    state.runner._wt_tokens = ()  # type: ignore[attr-defined]
+    state.runner._wt_step = "preflop"  # type: ignore[attr-defined]
+    state.runner._wt_flop = []  # type: ignore[attr-defined]
+
+    await user.open("/")
+    user.find(marker="chained-tab-legal-action-call").click()
+    await user.open("/")
+    user.find(marker="chained-tab-legal-action-check").click()
+    await user.open("/")
+
+    # Tokens reached the flop terminal.
+    assert tuple(state.runner._wt_tokens) == ("c", "x")  # type: ignore[attr-defined]
+    # The deal-flop affordance is offered.
+    assert user.find(marker="chained-tab-legal-action-deal_flop").elements
+
+
+async def test_flop_guard_blocks_wide_range_no_solve(
+    user: User, isolated_state_dir: pathlib.Path
+) -> None:
+    """On a wide-range (default bet menu) chained solve, the flop step
+    BLOCKS with a "ranges too wide" message and NEVER calls
+    ``solve_postflop`` — the mandatory anti-hang guard.
+
+    Chain-solve "b" plan §"Flop solve can HANG": the guard is required so a
+    wide flop pick cannot hang the synchronous chained solve.
+    """
+    from poker_solver.card import Card
+    from ui.state import get_state
+
+    await user.open("/")
+    state = get_state()
+    state.current_spot.stacks_bb = (50, 50)
+    state.current_spot.board = []
+
+    # WIDE config (default 5-bet menu + all-in) -> the synthesized flop tree
+    # is over-budget -> the guard must block.
+    result = _fake_chained_result(_wide_flop_config())
+    state.runner.chained_result = result  # type: ignore[attr-defined]
+    state.runner._mode = "chained"  # type: ignore[attr-defined]
+    state.runner.status = "done"
+    state.runner._wt_hero_combo = (  # type: ignore[attr-defined]
+        Card.from_str("Ah"),
+        Card.from_str("As"),
+    )
+    # Already at the flop step on the ("c", "x") terminal.
+    state.runner._wt_tokens = ("c", "x")  # type: ignore[attr-defined]
+    state.runner._wt_step = "flop"  # type: ignore[attr-defined]
+    state.runner._wt_flop = []  # type: ignore[attr-defined]
+
+    postflop_calls: dict[str, Any] = {"count": 0}
+
+    def _fake_solve_postflop(action_sequence: Any, board: Any) -> Any:
+        postflop_calls["count"] += 1
+        return _fake_postflop_result()
+
+    with patch.object(result, "solve_postflop", _fake_solve_postflop):
+        await user.open("/")
+        # Pick a 3-card flop.
+        user.find(marker="chained-tab-board-cell-7c").click()
+        user.find(marker="chained-tab-board-cell-5d").click()
+        user.find(marker="chained-tab-board-cell-2h").click()
+        await user.open("/")
+
+        # The guard message rendered, and solve_postflop NEVER fired.
+        assert user.find(marker="chained-tab-flop-too-large").elements, (
+            "wide-range flop guard message missing"
+        )
+        assert postflop_calls["count"] == 0, (
+            f"solve_postflop must NOT fire on a guard-blocked wide flop; "
+            f"got {postflop_calls['count']} call(s)"
+        )
+
+
+async def test_turn_river_render_pending_placeholder(
+    user: User, isolated_state_dir: pathlib.Path
+) -> None:
+    """The turn / river stepper steps render a Tier-B "pending fast engine"
+    placeholder and run NO compute.
+    """
+    from poker_solver.card import Card
+    from ui.state import get_state
+
+    await user.open("/")
+    state = get_state()
+    state.current_spot.stacks_bb = (50, 50)
+    state.current_spot.board = []
+
+    result = _fake_chained_result()
+    state.runner.chained_result = result  # type: ignore[attr-defined]
+    state.runner._mode = "chained"  # type: ignore[attr-defined]
+    state.runner.status = "done"
+    state.runner._wt_hero_combo = (  # type: ignore[attr-defined]
+        Card.from_str("Ah"),
+        Card.from_str("As"),
+    )
+    state.runner._wt_tokens = ("c", "x")  # type: ignore[attr-defined]
+    state.runner._wt_step = "turn"  # type: ignore[attr-defined]
+    state.runner._wt_flop = [  # type: ignore[attr-defined]
+        Card.from_str("7c"),
+        Card.from_str("5d"),
+        Card.from_str("2h"),
+    ]
+
+    postflop_calls: dict[str, Any] = {"count": 0}
+
+    def _fake_solve_postflop(action_sequence: Any, board: Any) -> Any:
+        postflop_calls["count"] += 1
+        return _fake_postflop_result()
+
+    with patch.object(result, "solve_postflop", _fake_solve_postflop):
+        await user.open("/")
+        assert user.find(marker="chained-tab-pending-engine").elements, (
+            "turn step should render the pending-engine placeholder"
+        )
+        assert postflop_calls["count"] == 0, "turn placeholder must not compute"
+
+        # River too.
+        state.runner._wt_step = "river"  # type: ignore[attr-defined]
+        await user.open("/")
+        assert user.find(marker="chained-tab-pending-engine").elements, (
+            "river step should render the pending-engine placeholder"
+        )
+        assert postflop_calls["count"] == 0, "river placeholder must not compute"

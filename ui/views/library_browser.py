@@ -149,7 +149,11 @@ def render(state: AppState) -> Any:
                 .mark("library-filter-input")
                 .classes("flex-grow")
             )
-            entry_count_label = ui.label("(0 entries)").classes("text-sm text-grey-7")
+            entry_count_label = (
+                ui.label("(0 entries)")
+                .classes("text-sm")
+                .style("color:var(--ps-text-faint)")
+            )
 
         # The container that gets re-rendered when the filter changes
         # or when a row is deleted.
@@ -161,7 +165,17 @@ def render(state: AppState) -> Any:
                 load_btn.props("disable")
                 delete_btn = ui.button("Delete").mark("library-delete-button")
                 delete_btn.props("disable flat color=negative")
-            footer_label = ui.label("").classes("text-xs text-grey-7 italic")
+                # Standalone dismiss so the dialog can always be closed
+                # without relying on the backdrop / Esc.
+                close_btn = ui.button("Close", on_click=dialog.close).mark(
+                    "library-close-button"
+                )
+                close_btn.props("flat")
+            footer_label = (
+                ui.label("")
+                .classes("text-xs italic")
+                .style("color:var(--ps-text-faint)")
+            )
 
         def _refresh() -> None:
             """Re-read rows from the library and re-render the body."""
@@ -173,7 +187,7 @@ def render(state: AppState) -> Any:
                 _render_stub_rows(rows_container)
                 entry_count_label.set_text(f"({len(_STUB_ROWS)} entries)")
                 footer_label.set_text(
-                    "PR 11: persistence not yet wired (library module missing)"
+                    "Saving solves to the library isn't available yet."
                 )
                 return
 
@@ -201,7 +215,13 @@ def render(state: AppState) -> Any:
             except Exception as exc:  # noqa: BLE001 - surface errors as a banner
                 logger.exception("library_browser: list failed")
                 with rows_container:
-                    ui.label(f"Library unavailable: {exc}").classes("text-warning")
+                    # F04: semantic warning amber, themed via --ps-accent-warn
+                    # so it darkens enough to read on the light dialog card
+                    # (bare Quasar ``text-warning`` is a pale amber that
+                    # washes out on white).
+                    ui.label(f"Library unavailable: {exc}").style(
+                        "color:var(--ps-accent-warn)"
+                    )
                 entry_count_label.set_text("(? entries)")
                 footer_label.set_text("library error — see logs")
                 return
@@ -211,8 +231,8 @@ def render(state: AppState) -> Any:
             with rows_container:
                 if not rows:
                     ui.label("(no spots saved yet)").classes(
-                        "text-sm text-grey-6 italic"
-                    )
+                        "text-sm italic"
+                    ).style("color:var(--ps-text-faint)")
                     return
                 for meta in rows:
                     spot_id = meta.spot_id
@@ -227,8 +247,8 @@ def render(state: AppState) -> Any:
                             "font-mono text-sm flex-grow"
                         )
                         ui.label(_format_meta_line(meta)).classes(
-                            "font-mono text-xs text-grey-7"
-                        )
+                            "font-mono text-xs"
+                        ).style("color:var(--ps-text-faint)")
 
                     def _select(_e: Any = None, sid: str = spot_id) -> None:
                         selection["spot_id"] = sid
@@ -297,11 +317,13 @@ def _render_stub_rows(container: Any) -> None:
             row.mark(f"library-stub-row-{idx}")
             with row:
                 ui.label(title).classes("font-mono text-sm flex-grow")
-                ui.label(meta).classes("font-mono text-xs text-grey-7")
+                ui.label(meta).classes("font-mono text-xs").style(
+                    "color:var(--ps-text-faint)"
+                )
             row.on(
                 "click",
                 lambda _e=None: ui.notify(
-                    "PR 11 — load from disk is not yet wired",
+                    "Loading saved spots isn't available yet.",
                     type="info",
                 ),
             )

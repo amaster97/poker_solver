@@ -196,7 +196,7 @@ async def test_chart_100bb_no_ante_aks_blueprint_hit(
     # in app.py's tick should fire within one cycle. Give it a couple.
     await asyncio.sleep(0.6)
 
-    # ----- Assertion 1: badge says [blueprint] -----
+    # ----- Assertion 1: badge says Blueprint -----
     from ui.blueprint_router import SourceLabel
 
     assert state.runner.preflop_route_info is not None, (
@@ -210,12 +210,12 @@ async def test_chart_100bb_no_ante_aks_blueprint_hit(
     badges = list(user.find(marker="preflop-chart-source-badge").elements)
     assert len(badges) >= 1, "preflop-chart-source-badge marker missing"
     badge_texts = [str(getattr(b, "text", "")) for b in badges]
-    assert any("[blueprint]" in t for t in badge_texts), (
-        f"no [blueprint] badge text among {badge_texts!r}"
+    # Friendly badge form (describe_route_badge): "Blueprint · 100BB".
+    assert any("Blueprint" in t for t in badge_texts), (
+        f"no Blueprint badge text among {badge_texts!r}"
     )
-    # The confidence string includes "exact 100BB / no-ante".
-    assert any("100BB" in t and "no-ante" in t for t in badge_texts), (
-        f"blueprint badge missing expected confidence text; got {badge_texts!r}"
+    assert any("100BB" in t for t in badge_texts), (
+        f"blueprint badge missing expected depth text; got {badge_texts!r}"
     )
 
     # ----- Assertion 2: AKs cell rendered + carries real probabilities -----
@@ -314,14 +314,14 @@ async def test_chart_67bb_no_ante_interpolated(
         f"{state.runner.preflop_route_info.anchor_depths!r}"
     )
 
-    # Badge text says [interpolated] and names the anchor depths.
+    # Friendly badge form (describe_route_badge): "Interpolated · 67BB ← 60+80".
     badges = list(user.find(marker="preflop-chart-source-badge").elements)
     badge_texts = [str(getattr(b, "text", "")) for b in badges]
-    assert any("[interpolated]" in t for t in badge_texts), (
-        f"no [interpolated] badge among {badge_texts!r}"
+    assert any("Interpolated" in t for t in badge_texts), (
+        f"no Interpolated badge among {badge_texts!r}"
     )
-    assert any("60/80" in t for t in badge_texts), (
-        f"interpolated badge missing '60/80' anchor text; got {badge_texts!r}"
+    assert any("60+80" in t for t in badge_texts), (
+        f"interpolated badge missing '60+80' anchor text; got {badge_texts!r}"
     )
 
     # Chart actually populated.
