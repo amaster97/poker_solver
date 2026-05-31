@@ -62,7 +62,7 @@ the detailed record of what happened. Branch: `fix/gui-audit-message-leaks` (UNM
 - [E] Rich strategy/action display — raise + multiple bet sizes + mixed frequencies (comes with the real RvR engine; current fold/call view is the Concrete/river-degenerate reality)
 - [E] Bet-size menu UI + street/tree structure — the engine defines these; UI already reads bet sizes from config so it absorbs the final menu
 - [E] RvR-flop tractability — currently hangs in tree-build on this branch's engine
-- [E] **MERGE to `main` + private mirror** — gated on engine reconciliation (main's fast IE/vector/suit-iso engine + this branch's UI progress/cancel hooks). *(user gates the merge)*
+- [E] **MERGE to `main`** — gated on engine reconciliation (main's fast IE/vector/suit-iso engine + this branch's UI progress/cancel hooks). *(user gates the merge)*
 - [E] **`SolveTooLargeError` guard + 2 pre-existing pr24b test failures.** The guard (`state.py:~1280`, fires for concrete-postflop exceeding the tree budget) is the user-REJECTED "tree too large" patchup ([[feedback_no_patchups]]) — it's still in the branch (present at base `6d5fbdc`, NOT added this session). It pre-empts `test_ui_pr24b.py::test_locked_strategies_threads_through_solve_runner_start` + `::test_force_tree_solve_flag_threads_through_runner` (they exercise large concrete-postflop spots → `SolveTooLargeError`). These 2 failures are **PRE-EXISTING** (fail at `6d5fbdc`), NOT a regression from this session. RESOLUTION = remove the guard once the **fast-engine merge** makes flops tractable (removing it on the old-engine branch now → hangs). Until then the guard stays + these 2 tests fail.
 
 ## FOLLOW-UPS / LATENT (documented; fix when convenient)

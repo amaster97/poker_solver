@@ -38,8 +38,8 @@ return canonical_solve(game, iterations, backend="rust",
 - **Raise postflop tier:** `run_panel.py` `_DEFAULT_TIER = "Standard"` (500) → **"Tight"** (1000) per the convergence finding (per-hand EVs degenerate below ~1000it). Fast engine keeps 1000 iters under Marcus's <30s. If a marquee flop overruns, make it a postflop-only override.
 
 ## (4) Build (per build-env)
-`git worktree add /Users/ashen/poker_solver_worktrees/gui-integration integration/<branch>` then:
-`export PATH="$HOME/.cargo/bin:$PATH"; VIRTUAL_ENV=/Users/ashen/poker_solver/.venv PATH="$HOME/.cargo/bin:$PATH" /Users/ashen/poker_solver/.venv/bin/maturin develop --release` (no crates change → `.so` bit-identical to main's; could even copy main's `.so` as a shortcut, but a clean build is the gate).
+`git worktree add <worktrees>/gui-integration integration/<branch>` then:
+`export PATH="$HOME/.cargo/bin:$PATH"; VIRTUAL_ENV=<repo-root>/.venv PATH="$HOME/.cargo/bin:$PATH" <repo-root>/.venv/bin/maturin develop --release` (no crates change → `.so` bit-identical to main's; could even copy main's `.so` as a shortcut, but a clean build is the gate).
 
 ## (5) Test gates
 1. **Marquee RvR flop FAST + non-degenerate** (the headline): default postflop spot (rvr_mode=True, true_nash, Tight=1000) routes to `solve_range_vs_range_nash`, returns <30s, per-combo strategies non-uniform / EVs differ.
