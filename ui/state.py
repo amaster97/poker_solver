@@ -62,7 +62,8 @@ import logging
 import os
 import threading
 import time
-from dataclasses import dataclass, field
+from collections.abc import Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -950,6 +951,50 @@ def exceeds_tree_budget(
     tests) can check the verdict without re-deriving the threshold.
     """
     return estimate_postflop_tree_cost(config) > budget
+
+
+def chained_flop_too_large(
+    config_template: HUNLConfig,
+    board: Sequence[Card],
+    *,
+    budget: float = TREE_SIZE_BUDGET,
+) -> bool:
+    """Return True iff an interactive chained flop solve would be too large.
+
+    MANDATORY guard for the chained-tab walkthrough (chain-solve "b" plan
+    §"Flop solve can HANG"). ``ChainedSolveResult.solve_postflop`` runs
+    ``solve_range_vs_range_nash`` synchronously on the UI thread, and the
+    flop tree-build for the default bet menu hangs for minutes before the
+    iteration loop even starts. The generic ``exceeds_tree_budget`` guard in
+    :meth:`SolveRunner.start` deliberately excludes ``solver_mode=="chained"``
+    (the chained dispatch is a preflop-shaped solve), so the flop subgame is
+    NOT covered there. This helper closes that gap: synthesize the flop
+    ``HUNLConfig`` the orchestrator would build (``starting_street=FLOP`` +
+    the 3-card board, same bet abstraction as the template) and run it
+    through :func:`exceeds_tree_budget`.
+
+    Args:
+        config_template: the preflop config the chained solve ran against
+            (carries the bet-size abstraction the flop subgame inherits).
+        board: the 3 flop cards the user picked.
+        budget: tree-cost ceiling (defaults to :data:`TREE_SIZE_BUDGET`).
+
+    Returns:
+        ``True`` when the synthesized flop solve exceeds ``budget`` (block,
+        show "narrow ranges"); ``False`` when it is tractable.
+    """
+    if len(board) != 3:
+        # Not yet a full flop — nothing to guard against.
+        return False
+    flop_cfg = replace(
+        config_template,
+        starting_street=Street.FLOP,
+        initial_board=tuple(board),
+        initial_pot=0,
+        initial_contributions=(0, 0),
+        initial_hole_cards=(),
+    )
+    return exceeds_tree_budget(flop_cfg, budget=budget)
 
 
 class SolveRunner:

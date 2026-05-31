@@ -1,54 +1,74 @@
-"""Chained orchestrator GUI tab (task #57, #31 Phase C).
+"""Chained orchestrator GUI tab — guided hole-card walkthrough (chain-solve "b").
 
-Two-pane GUI wrapper around :func:`poker_solver.solve_chained` (PR #121
-Phase A). Composes:
+Rebuilt 2026-05-30 (chain-solve "b" plan,
+``docs/gui_audit/chain_solve_b_plan.md``) from a class-level matrix browser
+into a **guided hole-card walkthrough**: "I have X/Y; walk preflop -> flop
+(termination), showing at each street what I did / can do + the GTO rec +
+the range."
 
-  * LEFT pane — 13x13 preflop matrix. Each cell renders the hero's
-    first-decision action frequencies for that hand class, colored by
-    the dominant action (fold = grey, call/check = yellow, raise = red,
-    jam = dark-red). Clicking a cell selects that hand class for the
-    right pane.
+Two-pane composition over :func:`poker_solver.solve_chained` (PR #121
+Phase A):
 
-  * RIGHT pane — preflop terminal action sequence selector + flop board
-    picker. When the user picks a flop, this pane triggers
-    :meth:`ChainedSolveResult.solve_postflop` (lazy) and displays the
-    hero's postflop strategy for the selected hand class.
+  * LEFT pane — the 13x13 preflop matrix (``project_preflop``), with the
+    hero's hand class HIGHLIGHTED. Read-only context for the walkthrough.
 
-The chart and the postflop strategy both pull from a single
-:class:`ChainedSolveResult` object stashed on
-``state.runner.chained_result`` by ``SolveRunner._run_chained_path``
-(see ``ui/state.py``). The lazy postflop cache is owned by that result
-object; repeat board picks on the same action sequence are O(1).
+  * RIGHT pane — a STEPPER walkthrough:
+      Screen 0 — config + 2-card hero hole-card picker -> "Solve chained".
+      Screen 1 — preflop decision node(s): legal actions (walked off
+        ``HUNLPoker``), the class-level GTO rec freqs
+        (``result.query(hero_class, board=None)``, rendered as bars), and
+        the 13x13 range. Pick an action -> advance until a flop-reaching
+        terminal or a fold (terminate).
+      Screen 2 — flop (Tier A, GUARDED): a 3-card board picker, a
+        MANDATORY tractability guard (``chained_flop_too_large``) before any
+        ``solve_postflop`` (the chained flop solve is synchronous + can hang
+        on wide ranges and is NOT covered by ``SolveRunner.start``'s guard),
+        then the class-level flop rec + range + route badge.
+      Screen 3+ — turn/river (Tier B): "pending fast engine" placeholders,
+        no compute.
+      Termination — a summary strip of the walked path on a fold line.
 
-Layout contract (mirrors the locked ``range_matrix._hand_class_at``
-convention):
+**Honesty note (surfaced in the UI):** every strategy lookup is CLASS-level,
+not combo-level. ``AhKh`` is treated as ``AKs`` for ALL recs (preflop AND
+flop); board interaction (a flush draw on a two-heart flop) is NOT reflected.
+Per-combo board-aware strategy is Phase B. The walkthrough banners this.
 
-         A   K   Q   J   T   9   8   7   6   5   4   3   2
-     A  AA  AKs AQs AJs ATs A9s A8s A7s A6s A5s A4s A3s A2s
-     K  AKo KK  KQs KJs KTs K9s K8s K7s K6s K5s K4s K3s K2s
-     ...
-     2  A2o K2o Q2o J2o T2o 92o 82o 72o 62o 52o 42o 32o 22
+Walkthrough state is transient attrs on ``SolveRunner`` (mirrors the
+``_chained_selected_*`` pattern), accessed via the ``_wt_*`` helpers below:
+  ``_wt_hero_combo``  (Card, Card) | None  — hero's two hole cards
+  ``_wt_tokens``      tuple[str, ...]       — action tokens walked so far
+  ``_wt_step``        "preflop"|"flop"|"turn"|"river"|"done"
+  ``_wt_flop``        list[Card]            — the 3 flop cards (Screen 2)
 
-Once PR #147 (preflop_chart widget) lands on main, the per-cell helpers
-``hand_class_at`` / ``cell_color_rgb`` / ``classify_action`` /
-``aggregate_actions`` should be lifted into a shared
-``ui/views/_preflop_grid.py`` module and imported here. For now this
-tab carries a small copy of those primitives so it does not depend on
-the unmerged #147.
+Reuse map (per the plan — reuse the LIGHT chained / preflop-chart
+projections; do NOT reuse ``tree_browser`` / ``range_matrix``, which are
+combo-level + keyed on ``runner.result`` which the chained path leaves
+``None``):
+  * preflop matrix: ``project_preflop`` + ``hand_class_at`` + ``CellSummary``.
+  * freq bars: the bar block extracted into ``_render_freq_bars``.
+  * flop rec+range: ``query`` / ``project_postflop`` / ``classify_action``.
+  * picker grid: the shared ``_card_grid`` (hole + flop both use it).
+  * hole -> class: ``classify_combo`` (state.py).
 
 ElementFilter markers (smoke tests assert on these):
   ``chained-tab-display``            outer container
-  ``chained-tab-grid``                left-pane grid container
+  ``chained-tab-grid``                left-pane preflop matrix container
   ``chained-tab-cell-{class}``        per-class grid marker
-  ``chained-tab-action-select``      preflop terminal action selector
+  ``chained-tab-stepper``             street breadcrumb / stepper
+  ``chained-tab-step-{street}``       per-step nav chip (preflop/flop/turn/river)
+  ``chained-tab-hole-picker``         hero 2-card picker container
+  ``chained-tab-hole-cell-{card}``    per-card hole-picker button
+  ``chained-tab-legal-action-{label}`` a legal action button at the cur node
   ``chained-tab-board-picker``       flop board picker
   ``chained-tab-board-cell-{card}``  per-card flop picker button
   ``chained-tab-clear-board``        clear flop button
-  ``chained-tab-postflop-display``   right-pane postflop strategy block
-  ``chained-tab-postflop-row-{cls}`` per-class postflop row marker
+  ``chained-tab-postflop-display``   right-pane flop strategy block
+  ``chained-tab-postflop-row-{cls}`` per-action flop strategy row marker
+  ``chained-tab-pending-engine``     Tier-B turn/river placeholder
   ``chained-tab-solve-button``       trigger button (preflop chained solve)
   ``chained-tab-iterations``         iteration count input
   ``chained-tab-status``             status indicator
+  ``chained-tab-route-preflop`` / ``-route-postflop``  routing badges
 """
 
 from __future__ import annotations
@@ -58,12 +78,9 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from poker_solver.card import RANKS, SUITS, Card
 
-# PR #147 (merged before this PR) owns the canonical preflop grid
-# primitives — re-export them here so the chained tab keeps a stable
-# import surface (the chained-tab smoke tests import these helpers from
-# ``ui.views.chained_tab`` directly) without duplicating the
-# implementation. This satisfies the PR #148 docstring TODO that said
-# "once #147 merges these will be lifted into a shared module."
+# PR #147 owns the canonical preflop grid primitives — re-export them here
+# so the chained tab keeps a stable import surface (the chained-tab smoke
+# tests import these helpers from ``ui.views.chained_tab`` directly).
 from ui.views.preflop_chart import (
     _COLOR_CALL,
     _COLOR_FOLD,
@@ -84,6 +101,7 @@ if TYPE_CHECKING:
         ChainedSolveResult,
         PreflopActionSequence,
     )
+    from poker_solver.hunl import HUNLState
     from ui.state import AppState
 
 logger = logging.getLogger(__name__)
@@ -102,9 +120,13 @@ _DEFAULT_ITERATIONS: int = 500
 _DEFAULT_HERO_RANGE: str = "AA, KK, QQ, AKs, AKo"
 _DEFAULT_VILLAIN_RANGE: str = "AA, KK, QQ, AKs, AKo"
 
+# Walkthrough streets, in order. "done" is the terminal pseudo-step (fold or
+# end of the supported chain).
+_WT_STREETS: tuple[str, ...] = ("preflop", "flop", "turn", "river")
+
 
 # -----------------------------------------------------------------------------
-# Chained-result projection
+# Chained-result projection (unchanged — reused by the matrix + flop screens)
 # -----------------------------------------------------------------------------
 
 
@@ -136,13 +158,16 @@ def project_postflop(
 
     Returns ``None`` when the needed inputs are not in scope (no chained
     result, no action sequence, board not 3 cards). Returns an empty dict
-    when the postflop solve is not yet cached and we cannot trigger it
-    (the cell render path uses the empty dict as a "loading" placeholder
-    that ``trigger_postflop_solve`` can fill on the next render pass).
+    when the postflop solve is not yet cached and we cannot trigger it.
     """
     if result is None or action_sequence is None or board is None or len(board) != 3:
         return None
-    cache_key = (action_sequence, tuple(board))
+    try:
+        from poker_solver.chained import _canonicalize_board
+
+        cache_key = (action_sequence, _canonicalize_board(board))
+    except (ValueError, ImportError):
+        return None
     cached = result.postflop_cache.get(cache_key)
     if cached is None:
         return {}  # not yet solved; caller can decide whether to trigger
@@ -158,8 +183,7 @@ def project_postflop(
 
 
 # -----------------------------------------------------------------------------
-# State helpers — selection state lives on ``runner`` as transient attrs
-# (mirrors the pattern in ``preflop_chart._selected_cell_label``).
+# Runner-attached transient state
 # -----------------------------------------------------------------------------
 
 
@@ -170,55 +194,83 @@ def _chained_result(state: AppState) -> ChainedSolveResult | None:
     return getattr(runner, "chained_result", None)
 
 
-def _selected_class(state: AppState) -> str | None:
-    runner = getattr(state, "runner", None)
-    if runner is None:
-        return None
-    return getattr(runner, "_chained_selected_class", None)
+def _runner(state: AppState) -> Any | None:
+    return getattr(state, "runner", None)
 
 
-def _set_selected_class(state: AppState, label: str | None) -> None:
-    runner = getattr(state, "runner", None)
-    if runner is not None:
-        runner._chained_selected_class = label  # type: ignore[attr-defined]
-
-
-def _selected_action_sequence(state: AppState) -> PreflopActionSequence | None:
-    runner = getattr(state, "runner", None)
-    if runner is None:
-        return None
-    val = getattr(runner, "_chained_selected_action", None)
-    if val is None:
-        return None
-    return tuple(val)
-
-
-def _set_selected_action_sequence(
-    state: AppState, action_sequence: PreflopActionSequence | None
-) -> None:
-    runner = getattr(state, "runner", None)
-    if runner is not None:
-        runner._chained_selected_action = action_sequence  # type: ignore[attr-defined]
-
-
-def _selected_board(state: AppState) -> list[Card]:
-    runner = getattr(state, "runner", None)
+def _hole_cards(state: AppState) -> list[Card]:
+    """The hero's selected hole cards (0, 1, or 2 cards)."""
+    runner = _runner(state)
     if runner is None:
         return []
-    board = getattr(runner, "_chained_selected_board", None)
-    if board is None:
+    combo = getattr(runner, "_wt_hero_combo", None)
+    if not combo:
         return []
-    return list(board)
+    return list(combo)
 
 
-def _set_selected_board(state: AppState, board: list[Card]) -> None:
-    runner = getattr(state, "runner", None)
+def _set_hole_cards(state: AppState, cards: list[Card]) -> None:
+    runner = _runner(state)
     if runner is not None:
-        runner._chained_selected_board = list(board)  # type: ignore[attr-defined]
+        runner._wt_hero_combo = tuple(cards) if cards else None  # type: ignore[attr-defined]
+
+
+def _hero_class(state: AppState) -> str | None:
+    """Hero's hand class derived from the two hole cards (class-level)."""
+    cards = _hole_cards(state)
+    if len(cards) != 2:
+        return None
+    from ui.state import classify_combo
+
+    try:
+        return classify_combo(cards[0], cards[1])
+    except ValueError:
+        return None
+
+
+def _wt_tokens(state: AppState) -> PreflopActionSequence:
+    runner = _runner(state)
+    if runner is None:
+        return ()
+    val = getattr(runner, "_wt_tokens", None)
+    return tuple(val) if val else ()
+
+
+def _set_wt_tokens(state: AppState, tokens: PreflopActionSequence) -> None:
+    runner = _runner(state)
+    if runner is not None:
+        runner._wt_tokens = tuple(tokens)  # type: ignore[attr-defined]
+
+
+def _wt_step(state: AppState) -> str:
+    runner = _runner(state)
+    if runner is None:
+        return "preflop"
+    return str(getattr(runner, "_wt_step", "preflop") or "preflop")
+
+
+def _set_wt_step(state: AppState, step: str) -> None:
+    runner = _runner(state)
+    if runner is not None:
+        runner._wt_step = step  # type: ignore[attr-defined]
+
+
+def _wt_flop(state: AppState) -> list[Card]:
+    runner = _runner(state)
+    if runner is None:
+        return []
+    flop = getattr(runner, "_wt_flop", None)
+    return list(flop) if flop else []
+
+
+def _set_wt_flop(state: AppState, flop: list[Card]) -> None:
+    runner = _runner(state)
+    if runner is not None:
+        runner._wt_flop = list(flop)  # type: ignore[attr-defined]
 
 
 def _chained_status(state: AppState) -> str:
-    runner = getattr(state, "runner", None)
+    runner = _runner(state)
     if runner is None:
         return "idle"
     mode = getattr(runner, "_mode", "")
@@ -230,13 +282,128 @@ def _chained_status(state: AppState) -> str:
 def format_action_sequence(seq: PreflopActionSequence) -> str:
     """Render an action token sequence as a human-readable label.
 
-    The engine emits per-token strings (``"f"`` / ``"c"`` / ``"A"`` /
-    ``"b{N}"`` / ``"r{N}"``). The dropdown label expands them with
-    arrows so the user can see the sequence at a glance.
+    The engine emits per-token strings (``"f"`` / ``"c"`` / ``"x"`` /
+    ``"A"`` / ``"b{N}"`` / ``"r{N}"``); expand them with arrows.
     """
     if not seq:
-        return "(empty)"
-    return " -> ".join(seq)
+        return "(start)"
+    return " -> ".join(token_label(t) for t in seq)
+
+
+def _slug(label: str) -> str:
+    """Slugify a button label into a single-token marker suffix.
+
+    NiceGUI's ``.mark()`` splits on whitespace, so a label like
+    ``"raise to 200"`` would otherwise become three marker tokens. Collapse
+    whitespace to underscores so ``chained-tab-legal-action-{slug}`` stays a
+    single, assertable marker.
+    """
+    return "_".join(label.split())
+
+
+def token_label(token: str) -> str:
+    """Human-readable label for a single engine action token."""
+    if not token:
+        return "?"
+    head = token[0]
+    base = {
+        "f": "fold",
+        "c": "call",
+        "x": "check",
+        "A": "all-in",
+        "b": "bet",
+        "r": "raise",
+    }.get(head, token)
+    if head in ("b", "r") and len(token) > 1:
+        return f"{base} to {token[1:]}"
+    return base
+
+
+# -----------------------------------------------------------------------------
+# Preflop tree-walk helpers (forward enumeration of hero decision nodes)
+# -----------------------------------------------------------------------------
+
+
+def _build_walk_game(state: AppState) -> Any | None:
+    """Build a ``HUNLPoker`` matching the chained solve's preflop config.
+
+    Hole cards do NOT affect preflop action legality (legality depends only
+    on stacks + contributions), so we walk with a placeholder pair — exactly
+    like ``chained._enumerate_preflop_terminals``. Returns ``None`` when the
+    spot can't be turned into a preflop config.
+    """
+    from dataclasses import replace as _dc_replace
+
+    from poker_solver.card import Card as _Card
+    from poker_solver.hunl import HUNLPoker, Street
+
+    spot = state.current_spot
+    try:
+        config = spot.to_hunl_config()
+    except (ValueError, AttributeError):
+        return None
+    placeholder = (
+        (_Card.from_str("As"), _Card.from_str("Ah")),
+        (_Card.from_str("Kd"), _Card.from_str("Kc")),
+    )
+    config = _dc_replace(
+        config,
+        starting_street=Street.PREFLOP,
+        initial_board=(),
+        initial_pot=0,
+        initial_contributions=(0, 0),
+        initial_hole_cards=placeholder,
+    )
+    return HUNLPoker(config)
+
+
+def _advance_to_tokens(
+    game: Any, tokens: PreflopActionSequence
+) -> HUNLState | None:
+    """Walk ``game`` from the initial state along ``tokens``.
+
+    Returns the state reached after consuming every token, or ``None`` if
+    the token path is not legal against the tree (defensive — should not
+    happen for tokens produced by our own action buttons).
+    """
+    from poker_solver.chained import _last_token
+
+    state = game.initial_state()
+    for want in tokens:
+        if game.is_terminal(state) or game.current_player(state) == -1:
+            return None
+        matched = None
+        for action in game.legal_actions(state):
+            new_state = game.apply(state, action)
+            if _last_token(state, new_state) == want:
+                matched = new_state
+                break
+        if matched is None:
+            return None
+        state = matched
+    return state
+
+
+def _legal_action_options(
+    game: Any, walk_state: HUNLState
+) -> list[tuple[str, str]]:
+    """Return ``[(token, label)]`` for every legal action at ``walk_state``.
+
+    Each token is what ``_last_token`` emits after applying the action — the
+    same token alphabet ``continuation_ranges`` is keyed on, so picking an
+    action and appending its token keeps the walk in sync with the
+    orchestrator's terminal enumeration.
+    """
+    from poker_solver.chained import _last_token
+
+    options: list[tuple[str, str]] = []
+    for action in game.legal_actions(walk_state):
+        new_state = game.apply(walk_state, action)
+        token = _last_token(walk_state, new_state)
+        if not token:
+            continue
+        options.append((token, token_label(token)))
+    return options
 
 
 # -----------------------------------------------------------------------------
@@ -252,14 +419,12 @@ def _import_nicegui() -> Any:
 
 
 def render(state: AppState, on_solve: Callable[[], None] | None = None) -> None:
-    """Render the Chain solve tab into the current NiceGUI slot.
+    """Render the Chain solve tab — guided hole-card walkthrough.
 
-    Composes the two-pane layout: 13x13 preflop matrix on the left, the
-    action-selector + board-picker + postflop-strategy panel on the right.
-
-    ``on_solve`` is invoked when the user clicks the "Solve chained" button;
-    the caller (``ui/app.py:_on_chained_solve``) is responsible for kicking
-    off the worker via ``state.runner.start(..., solver_mode="chained")``.
+    LEFT pane = the 13x13 preflop matrix (hero class highlighted). RIGHT
+    pane = the stepper walkthrough. ``on_solve`` is invoked when the user
+    clicks "Solve chained"; ``ui/app.py:_on_chained_solve`` kicks off the
+    worker via ``state.runner.start(..., solver_mode="chained")``.
     """
     ui = _import_nicegui()
 
@@ -271,26 +436,20 @@ def render(state: AppState, on_solve: Callable[[], None] | None = None) -> None:
     def _right_pane_slot() -> None:
         _render_right_pane(state, on_solve, _refresh_all)
 
-    # Task #68 Phase 6: routing-path indicator slot. Refreshed alongside
-    # the grid + right-pane so updates after a postflop solve show the
-    # new wall time.
     @ui.refreshable  # type: ignore[untyped-decorator]
     def _routing_slot() -> None:
         _render_routing_indicator(state)
 
     def _refresh_all() -> None:
-        try:
-            _grid_slot.refresh()
-        except Exception:  # noqa: BLE001
-            logger.exception("chained tab grid refresh failed")
-        try:
-            _right_pane_slot.refresh()
-        except Exception:  # noqa: BLE001
-            logger.exception("chained tab right-pane refresh failed")
-        try:
-            _routing_slot.refresh()
-        except Exception:  # noqa: BLE001
-            logger.exception("chained tab routing slot refresh failed")
+        for name, slot in (
+            ("grid", _grid_slot),
+            ("right-pane", _right_pane_slot),
+            ("routing", _routing_slot),
+        ):
+            try:
+                slot.refresh()
+            except Exception:  # noqa: BLE001
+                logger.exception("chained tab %s refresh failed", name)
 
     with (
         ui.element("div")
@@ -302,18 +461,22 @@ def render(state: AppState, on_solve: Callable[[], None] | None = None) -> None:
         with ui.row().style(
             "align-items:center;justify-content:space-between;margin-bottom:8px"
         ):
-            ui.label("CHAIN SOLVE").style(
+            ui.label("CHAIN SOLVE — WALKTHROUGH").style(
                 "font-weight:700;letter-spacing:0.05em;color:var(--ps-text-strong)"
             )
             ui.label(_subtitle(state)).mark("chained-tab-status").style(
                 "color:var(--ps-text-muted);font-size:12px"
             )
-        # Task #68 Phase 6: routing-path indicator. Shows the preflop +
-        # postflop route on one line under the header so the user sees
-        # the full chained route at a glance (e.g. "preflop: live 30
-        # iter / postflop: live subgame"). Refreshed on every grid /
-        # right-pane refresh by ``_refresh_all`` via the chained
-        # tab's polling-timer hook in ``ui/app.py``.
+        # Class-level honesty banner (chain-solve "b" plan risk 2). Always
+        # present so the user is never misled into reading combo-exact recs.
+        ui.label(
+            "Class-level only: your exact suits (e.g. AhKh) are treated as the "
+            "hand CLASS (AKs) for every rec — board interaction like a flush "
+            "draw is not modeled. Per-combo board-aware play is a later engine."
+        ).style(
+            "color:var(--ps-text-fainter);font-size:11px;font-style:italic;"
+            "margin-bottom:6px;display:block;max-width:880px"
+        )
         _routing_slot()
         with ui.row().style("align-items:flex-start;gap:14px;flex-wrap:nowrap"):
             with ui.element("div").style(
@@ -321,12 +484,10 @@ def render(state: AppState, on_solve: Callable[[], None] | None = None) -> None:
             ):
                 _grid_slot()
             with ui.element("div").style(
-                "flex:1 1 360px;min-width:360px;max-width:520px"
+                "flex:1 1 400px;min-width:380px;max-width:560px"
             ):
                 _right_pane_slot()
 
-    # Stash refresh hook on the runner so the polling timer in ``ui/app.py``
-    # can re-trigger after the worker finishes (mirrors preflop_chart).
     runner = getattr(state, "runner", None)
     if runner is not None:
         runner._chained_refresh = _refresh_all  # type: ignore[attr-defined]
@@ -337,7 +498,7 @@ def _subtitle(state: AppState) -> str:
     status = _chained_status(state)
     if result is None:
         if status == "running":
-            return "solving... (chart will appear on completion)"
+            return "solving... (walkthrough unlocks on completion)"
         return "no chained solve yet"
     preflop = result.preflop_result
     iters = int(getattr(preflop, "iterations", 0))
@@ -347,21 +508,7 @@ def _subtitle(state: AppState) -> str:
 
 
 def _render_routing_indicator(state: AppState) -> None:
-    """Task #68 Phase 6: render the chained-tab routing indicator.
-
-    Renders TWO badges on one row:
-
-      * preflop: source label + wall time + confidence (e.g. ``[live]
-        30 iter Route A aggregator (wall 1.2s)``).
-      * postflop: same shape but tracking the last-triggered postflop
-        subgame solve.
-
-    Each badge reads its ``RouteInfo`` from ``state.runner``; when no
-    chained solve has run yet, both badges render an "unrouted"
-    placeholder so the badge slot stays present and the smoke tests
-    can assert on ``chained-tab-route-preflop`` /
-    ``chained-tab-route-postflop`` markers regardless.
-    """
+    """Routing badges (preflop + postflop) — one line under the header."""
     ui = _import_nicegui()
     runner = getattr(state, "runner", None)
     preflop_info = (
@@ -385,7 +532,7 @@ def _render_routing_indicator(state: AppState) -> None:
     post_text = (
         f"postflop: {describe_route(postflop_info)}"
         if postflop_info is not None
-        else "postflop: [unrouted] pick a flop to trigger"
+        else "postflop: [unrouted] reach + pick a flop to trigger"
     )
 
     def _color(info: object | None) -> str:
@@ -395,9 +542,6 @@ def _render_routing_indicator(state: AppState) -> None:
         if label == SourceLabel.BLUEPRINT:
             return "var(--ps-accent-ev)"
         if label == SourceLabel.INTERPOLATED:
-            # Interpolated pale-yellow (--ps-accent-interp): dark = #e0d27c
-            # verbatim (pixel-identical), light darkens to #9a7d00 so the
-            # yellow clears white.
             return "var(--ps-accent-interp)"
         if label == SourceLabel.LIVE:
             return "var(--ps-text-dim)"
@@ -420,10 +564,16 @@ def _render_routing_indicator(state: AppState) -> None:
         )
 
 
+# -----------------------------------------------------------------------------
+# Left pane — 13x13 preflop matrix (hero class highlighted)
+# -----------------------------------------------------------------------------
+
+
 def _render_grid(state: AppState) -> None:
-    """Render the 13x13 preflop matrix (left pane)."""
+    """Render the 13x13 preflop matrix; the hero's class is highlighted."""
     ui = _import_nicegui()
     summaries = project_preflop(_chained_result(state))
+    hero_cls = _hero_class(state)
 
     with (
         ui.element("div")
@@ -436,44 +586,29 @@ def _render_grid(state: AppState) -> None:
             for col in range(13):
                 cls = hand_class_at(row, col)
                 summary = summaries.get(cls, CellSummary(label=cls, empty=True))
-                _render_cell(state, cls, summary)
+                _render_cell(state, cls, summary, highlighted=(cls == hero_cls))
 
 
-def _render_cell(state: AppState, hand_class: str, summary: CellSummary) -> None:
-    """Render one matrix cell."""
+def _render_cell(
+    state: AppState, hand_class: str, summary: CellSummary, *, highlighted: bool
+) -> None:
+    """Render one matrix cell. ``highlighted`` marks the hero's hand class."""
     ui = _import_nicegui()
     color = cell_color_css(summary)
     tag = _cell_tag(summary)
-    selected = _selected_class(state) == hand_class
-    # SELECTED border uses --ps-cell-border-sel (white in dark / dark in
-    # light — purpose-built for a selection border); UNSELECTED maps to
-    # --ps-cell-border.
-    border = "var(--ps-cell-border-sel)" if selected else "var(--ps-cell-border)"
+    border = "var(--ps-cell-border-sel)" if highlighted else "var(--ps-cell-border)"
+    border_w = "2px" if highlighted else "1px"
     cell_marker = f"chained-tab-cell chained-tab-cell-{hand_class}"
-
-    def _on_click(_event: object = None, cls: str = hand_class) -> None:
-        _set_selected_class(state, cls)
-        runner = getattr(state, "runner", None)
-        if runner is not None and hasattr(runner, "_chained_refresh"):
-            try:
-                runner._chained_refresh()
-            except Exception:  # noqa: BLE001
-                logger.exception("chained tab cell click refresh failed")
 
     style = (
         f"width:{_CELL_PX}px;height:{_CELL_PX}px;"
         f"background:{color};color:var(--ps-cell-label);"
-        f"border:1px solid {border};"
+        f"border:{border_w} solid {border};"
         f"display:flex;flex-direction:column;justify-content:space-between;"
-        f"padding:2px 3px;font-size:10px;cursor:pointer;"
+        f"padding:2px 3px;font-size:10px;"
         f"font-family:'SF Pro',Inter,sans-serif"
     )
-    with (
-        ui.element("div")
-        .mark(cell_marker)
-        .style(style)
-        .on("click", _on_click)
-    ):
+    with ui.element("div").mark(cell_marker).style(style):
         ui.label(hand_class).style(
             "font-weight:600;line-height:1;color:var(--ps-cell-label)"
         )
@@ -507,11 +642,112 @@ def _tooltip_text(hand_class: str, summary: CellSummary) -> str:
 
 
 # -----------------------------------------------------------------------------
-# Right pane — solve input + action selector + board picker + postflop strategy
+# Shared card-picker grid (hole + flop both use this)
+# -----------------------------------------------------------------------------
+
+
+def _card_grid(
+    state: AppState,
+    selected: list[Card],
+    cap: int,
+    on_toggle: Callable[[Card], None],
+    marker_prefix: str,
+    refresh_after_change: Callable[[], None],
+) -> None:
+    """Render a 4x13 suit-by-rank card-picker grid capped at ``cap`` cards.
+
+    Each button carries the marker ``{marker_prefix}-{card}`` where ``card``
+    is ``str(Card)`` (e.g. ``As``, ``7c``) — so the marker label and the
+    actual ``Card`` always agree (the old board picker had a rank-inversion
+    bug where the marker said one card and the toggle added another). The
+    selected-card chip row sits above the grid.
+    """
+    ui = _import_nicegui()
+
+    with ui.row().classes("gap-1 items-center min-h-6"):
+        for card in selected:
+            with ui.row().classes(
+                "border rounded px-2 py-0 items-center gap-1 bg-gray-100 "
+                "dark:bg-gray-800"
+            ):
+                ui.label(str(card)).classes("font-mono")
+
+    with ui.grid(columns=13).classes("gap-1"):
+        # Suits down (s, h, d, c), ranks across high->low so the label
+        # matches ``str(card)`` exactly.
+        for suit_idx in range(len(SUITS)):
+            for rank_value in range(14, 1, -1):
+                card = Card(rank_value, suit_idx)
+                card_str = str(card)
+                in_sel = card in selected
+
+                def _on_click(_e: Any, c: Card = card) -> None:
+                    on_toggle(c)
+                    refresh_after_change()
+
+                btn = (
+                    ui.button(card_str, on_click=_on_click)
+                    .props("flat dense")
+                    .classes("font-mono")
+                    .mark(f"{marker_prefix}-{card_str}")
+                )
+                if in_sel:
+                    btn.style(
+                        "background:var(--ps-selected-bg);"
+                        "color:var(--ps-cell-border-sel)"
+                    )
+
+    _ = cap  # cap is enforced by the on_toggle closure
+
+
+# -----------------------------------------------------------------------------
+# Right pane — stepper walkthrough
 # -----------------------------------------------------------------------------
 
 
 def _render_right_pane(
+    state: AppState,
+    on_solve: Callable[[], None] | None,
+    refresh_after_change: Callable[[], None],
+) -> None:
+    ui = _import_nicegui()
+    result = _chained_result(state)
+
+    # Screen 0 — config + hero hole-card picker. Always rendered (it is how
+    # the user starts / restarts a walkthrough).
+    _render_config_and_hole_picker(state, on_solve, refresh_after_change)
+
+    if result is None:
+        with (
+            ui.element("div")
+            .mark("chained-tab-postflop-display")
+            .style(
+                "background:var(--ps-strip-bg);padding:10px;border-radius:4px;"
+                "border:1px solid var(--ps-border-strong)"
+            )
+        ):
+            ui.label("Pick your two cards, then Solve chained to walk it.").style(
+                "color:var(--ps-text-muted);font-style:italic"
+            )
+        return
+
+    # Stepper / breadcrumb.
+    _render_stepper(state, refresh_after_change)
+
+    step = _wt_step(state)
+    if step == "preflop":
+        _render_preflop_step(state, refresh_after_change)
+    elif step == "flop":
+        _render_flop_step(state, refresh_after_change)
+    elif step in ("turn", "river"):
+        _render_pending_step(state, step)
+    elif step == "done":
+        _render_termination(state, refresh_after_change)
+    else:
+        _render_preflop_step(state, refresh_after_change)
+
+
+def _render_config_and_hole_picker(
     state: AppState,
     on_solve: Callable[[], None] | None,
     refresh_after_change: Callable[[], None],
@@ -525,13 +761,12 @@ def _render_right_pane(
             "border:1px solid var(--ps-border-soft);margin-bottom:10px"
         )
     ):
-        ui.label("Configure chained solve").style(
+        ui.label("Configure + start walkthrough").style(
             "font-weight:600;color:var(--ps-text);margin-bottom:8px"
         )
 
         spot = state.current_spot
 
-        # Hero range
         hero_range_str = spot.ranges[0].to_string() or _DEFAULT_HERO_RANGE
         hero_input = (
             ui.textarea(label="Hero range", value=hero_range_str)
@@ -555,7 +790,6 @@ def _render_right_pane(
 
         hero_input.on_value_change(_on_hero_range_change)
 
-        # Villain range
         villain_range_str = spot.ranges[1].to_string() or _DEFAULT_VILLAIN_RANGE
         villain_input = (
             ui.textarea(label="Villain range", value=villain_range_str)
@@ -581,7 +815,6 @@ def _render_right_pane(
 
         villain_input.on_value_change(_on_villain_range_change)
 
-        # Iterations + stack depth
         with ui.row().style("gap:8px;align-items:center"):
             stack_input = (
                 ui.number(
@@ -619,6 +852,10 @@ def _render_right_pane(
 
             iter_input.on_value_change(_on_iter_change)
 
+        # Hero hole-card picker (2 cards). The picker mutates the runner's
+        # transient ``_wt_hero_combo``; ``_on_chained_solve`` reads it.
+        _render_hole_picker(state, refresh_after_change)
+
         def _click_solve() -> None:
             if on_solve is None:
                 ui.notify(
@@ -646,73 +883,294 @@ def _render_right_pane(
             "chained-tab-solve-button"
         )
 
-    _render_action_selector(state, refresh_after_change)
-    _render_board_picker(state, refresh_after_change)
-    _render_postflop_panel(state, refresh_after_change)
 
-
-def _render_action_selector(
+def _render_hole_picker(
     state: AppState, refresh_after_change: Callable[[], None]
 ) -> None:
-    """Preflop terminal action selector — drives which continuation is solved."""
     ui = _import_nicegui()
-    result = _chained_result(state)
-    options: dict[str, str] = {}
-    sequences: list[PreflopActionSequence] = []
-    if result is not None:
-        sequences = sorted(result.continuation_ranges.keys(), key=lambda s: (len(s), s))
-        for seq in sequences:
-            key = "|".join(seq) if seq else "(empty)"
-            options[key] = format_action_sequence(seq)
-    if not options:
-        options = {"(none)": "(no chained solve yet)"}
-
-    selected_seq = _selected_action_sequence(state)
-    if selected_seq is None and sequences:
-        selected_seq = sequences[0]
-        _set_selected_action_sequence(state, selected_seq)
-    current_key = (
-        "|".join(selected_seq) if selected_seq else next(iter(options.keys()))
-    )
+    cards = _hole_cards(state)
+    hero_cls = _hero_class(state)
 
     with (
         ui.element("div")
+        .mark("chained-tab-hole-picker")
         .style(
-            "background:var(--ps-input-bg);padding:10px;border-radius:4px;"
-            "border:1px solid var(--ps-border-soft);margin-bottom:10px"
+            "background:var(--ps-strip-bg);padding:8px;border-radius:4px;"
+            "border:1px solid var(--ps-border-soft);margin-top:8px"
         )
     ):
-        ui.label("Preflop terminal action").style(
-            "font-weight:600;color:var(--ps-text);margin-bottom:6px"
+        label = "Your hole cards (pick 2)"
+        if hero_cls is not None:
+            label = f"Your hole cards — class {hero_cls}"
+        ui.label(label).style(
+            "font-weight:600;color:var(--ps-text);margin-bottom:4px"
         )
 
-        def _on_select(e: Any) -> None:
-            key = str(e.value)
-            if key == "(none)" or key == "(empty)":
-                _set_selected_action_sequence(state, ())
-            else:
-                _set_selected_action_sequence(state, tuple(key.split("|")))
+        def _toggle_hole(card: Card) -> None:
+            sel = _hole_cards(state)
+            if card in sel:
+                sel.remove(card)
+                _set_hole_cards(state, sel)
+                return
+            if len(sel) >= 2:
+                ui.notify(
+                    "Two cards already picked; remove one first.",
+                    type="warning",
+                    position="top",
+                )
+                return
+            sel.append(card)
+            _set_hole_cards(state, sel)
+
+        _card_grid(
+            state,
+            selected=cards,
+            cap=2,
+            on_toggle=_toggle_hole,
+            marker_prefix="chained-tab-hole-cell",
+            refresh_after_change=refresh_after_change,
+        )
+
+        def _clear_hole() -> None:
+            _set_hole_cards(state, [])
             refresh_after_change()
 
-        select = (
-            ui.select(
-                options=options,
-                value=current_key,
-                on_change=_on_select,
-            )
-            .classes("w-full")
-            .mark("chained-tab-action-select")
-        )
-        # Keep the dropdown reactive — values come from the chained result.
-        _ = select
+        ui.button(
+            "Clear cards", icon="clear", on_click=_clear_hole
+        ).props("flat dense").mark("chained-tab-clear-hole")
 
 
-def _render_board_picker(
+def _render_stepper(
     state: AppState, refresh_after_change: Callable[[], None]
 ) -> None:
-    """Flop board picker — 4x13 suit-by-rank grid, capped at 3 cards."""
+    """Breadcrumb / stepper: Preflop -> Flop -> Turn -> River + back."""
     ui = _import_nicegui()
+    cur = _wt_step(state)
+    # Determine the furthest reachable street so we don't let the user jump
+    # ahead of where the walk actually is. Preflop is always available;
+    # flop/turn/river depend on the walk having reached them.
+    reached_flop = cur in ("flop", "turn", "river", "done") and bool(_wt_tokens(state))
 
+    with (
+        ui.element("div")
+        .mark("chained-tab-stepper")
+        .style(
+            "display:flex;align-items:center;gap:6px;flex-wrap:wrap;"
+            "margin-bottom:10px"
+        )
+    ):
+        for street in _WT_STREETS:
+            is_cur = street == cur
+            is_reachable = street == "preflop" or (
+                street == "flop" and reached_flop
+            )
+            bg = "var(--ps-selected-bg)" if is_cur else "var(--ps-input-bg)"
+            opacity = "1.0" if is_reachable else "0.45"
+
+            def _go(_e: Any = None, s: str = street) -> None:
+                if s == "preflop":
+                    # Rewind to the preflop root.
+                    _set_wt_tokens(state, ())
+                    _set_wt_flop(state, [])
+                    _set_wt_step(state, "preflop")
+                elif s == "flop" and reached_flop:
+                    _set_wt_step(state, "flop")
+                refresh_after_change()
+
+            chip = (
+                ui.button(street.capitalize(), on_click=_go)
+                .props("flat dense")
+                .mark(f"chained-tab-step-{street}")
+                .style(
+                    f"background:{bg};opacity:{opacity};"
+                    "font-size:11px;text-transform:none"
+                )
+            )
+            if not is_reachable:
+                chip.props("disable")
+            if street != _WT_STREETS[-1]:
+                ui.label("->").style("color:var(--ps-text-fainter)")
+
+
+def _render_freq_bars(
+    state: AppState, freqs: dict[str, float], marker_prefix: str
+) -> None:
+    """Render an action -> probability bar block (reused preflop + flop)."""
+    ui = _import_nicegui()
+    for label, prob in sorted(freqs.items(), key=lambda kv: -float(kv[1])):
+        bucket = classify_action(str(label))
+        with ui.row().style("align-items:center;gap:8px;padding:3px 0").mark(
+            f"{marker_prefix}-{label}"
+        ):
+            ui.label(str(label)).style(
+                "width:90px;color:var(--ps-text-dim);"
+                "font-family:Menlo,Consolas,monospace"
+            )
+            bar_width = 160
+            fill_px = int(round(float(prob) * bar_width))
+            anchor_rgb = {
+                "fold": _COLOR_FOLD,
+                "call": _COLOR_CALL,
+                "raise": _COLOR_RAISE,
+                "jam": _COLOR_JAM,
+            }.get(bucket, _COLOR_NEUTRAL)
+            anchor_css = f"rgb({anchor_rgb[0]},{anchor_rgb[1]},{anchor_rgb[2]})"
+            with ui.element("div").style(
+                f"width:{bar_width}px;height:12px;"
+                f"background:var(--ps-track-bg);"
+                f"border:1px solid var(--ps-border-soft);"
+                f"position:relative"
+            ):
+                ui.element("div").style(
+                    f"width:{fill_px}px;height:100%;background:{anchor_css}"
+                )
+            ui.label(f"{float(prob) * 100:.1f}%").style(
+                "color:var(--ps-text-mono);font-family:Menlo,Consolas,monospace;"
+                "width:60px;text-align:right"
+            )
+
+
+def _render_preflop_step(
+    state: AppState, refresh_after_change: Callable[[], None]
+) -> None:
+    """Screen 1 — preflop decision node walkthrough."""
+    ui = _import_nicegui()
+    result = _chained_result(state)
+    if result is None:
+        return
+
+    with (
+        ui.element("div")
+        .mark("chained-tab-step-panel chained-tab-postflop-display")
+        .style(
+            "background:var(--ps-strip-bg);padding:10px;border-radius:4px;"
+            "border:1px solid var(--ps-border-strong)"
+        )
+    ):
+        ui.label("Preflop").style(
+            "font-weight:600;color:var(--ps-text);margin-bottom:4px"
+        )
+
+        hero_cls = _hero_class(state)
+        if hero_cls is None:
+            ui.label(
+                "Pick your two hole cards above so we can show your "
+                "class's GTO rec."
+            ).style("color:var(--ps-text-muted);font-style:italic")
+            return
+
+        tokens = _wt_tokens(state)
+        ui.label(f"Line so far: {format_action_sequence(tokens)}").style(
+            "color:var(--ps-text-dim);font-family:Menlo,Consolas,monospace;"
+            "font-size:11px;margin-bottom:6px"
+        )
+
+        game = _build_walk_game(state)
+        if game is None:
+            ui.label("Could not rebuild the preflop tree for this spot.").style(
+                "color:var(--ps-text-error)"
+            )
+            return
+        walk_state = _advance_to_tokens(game, tokens)
+        if walk_state is None:
+            ui.label(
+                "The walked line is no longer legal — resetting to preflop."
+            ).style("color:var(--ps-text-error)")
+            return
+
+        # If this line is a flop-reaching terminal, offer "deal the flop".
+        if tokens in result.continuation_ranges:
+            ui.label(
+                "This line reaches the flop. Deal a board to continue."
+            ).style("color:var(--ps-text);font-weight:600;margin:4px 0")
+
+            def _to_flop(_e: Any = None) -> None:
+                _set_wt_step(state, "flop")
+                refresh_after_change()
+
+            ui.button(
+                "Deal the flop ->", on_click=_to_flop, icon="casino"
+            ).props("color=primary").mark("chained-tab-legal-action-deal_flop")
+            return
+
+        # Terminal but NOT flop-reaching (fold / all-in run-out): terminate.
+        if game.is_terminal(walk_state) or game.current_player(walk_state) == -1:
+            ui.label(
+                "This line ends preflop (a fold or all-in run-out) — no flop "
+                "to walk."
+            ).style("color:var(--ps-text-muted);font-style:italic;margin:4px 0")
+
+            def _terminate(_e: Any = None) -> None:
+                _set_wt_step(state, "done")
+                refresh_after_change()
+
+            ui.button(
+                "See line summary", on_click=_terminate, icon="flag"
+            ).props("flat").mark("chained-tab-legal-action-summary")
+            return
+
+        cur_player = game.current_player(walk_state)
+        hero_player = int(getattr(state.current_spot, "hero_player", 0))
+        is_hero_node = cur_player == hero_player
+
+        if is_hero_node:
+            ui.label(f"Your decision ({hero_cls}) — GTO rec:").style(
+                "color:var(--ps-text);font-weight:600;margin:6px 0 2px"
+            )
+            try:
+                rec = result.query(hero_cls, board=None)
+            except (KeyError, ValueError):
+                rec = {}
+            if rec:
+                _render_freq_bars(state, rec, "chained-tab-postflop-row")
+            else:
+                ui.label(
+                    f"{hero_cls} has no preflop rec in this solve (it may be "
+                    f"outside the hero range you solved)."
+                ).style("color:var(--ps-text-muted);font-style:italic")
+            ui.label("Your move:").style(
+                "color:var(--ps-text-dim);font-size:11px;margin-top:6px"
+            )
+        else:
+            ui.label("Villain to act — pick villain's action to advance:").style(
+                "color:var(--ps-text-dim);font-size:11px;margin-top:6px"
+            )
+
+        options = _legal_action_options(game, walk_state)
+        with ui.row().style("gap:6px;flex-wrap:wrap;margin-top:4px"):
+            for token, label in options:
+
+                def _pick(_e: Any = None, tok: str = token) -> None:
+                    _set_wt_tokens(state, tokens + (tok,))
+                    refresh_after_change()
+
+                ui.button(label, on_click=_pick).props("flat dense").mark(
+                    f"chained-tab-legal-action-{_slug(label)}"
+                ).style("text-transform:none")
+
+        if tokens:
+
+            def _back(_e: Any = None) -> None:
+                _set_wt_tokens(state, tokens[:-1])
+                refresh_after_change()
+
+            ui.button("Back", on_click=_back, icon="undo").props(
+                "flat dense"
+            ).style("margin-top:6px").mark("chained-tab-back")
+
+
+def _render_flop_step(
+    state: AppState, refresh_after_change: Callable[[], None]
+) -> None:
+    """Screen 2 — flop board pick + GUARDED solve + class-level flop rec."""
+    ui = _import_nicegui()
+    result = _chained_result(state)
+    if result is None:
+        return
+    tokens = _wt_tokens(state)
+    hero_cls = _hero_class(state)
+
+    # Board picker.
     with (
         ui.element("div")
         .mark("chained-tab-board-picker")
@@ -721,90 +1179,53 @@ def _render_board_picker(
             "border:1px solid var(--ps-border-soft);margin-bottom:10px"
         )
     ):
-        ui.label("Flop board (3 cards)").style(
+        ui.label("Flop board (pick 3)").style(
             "font-weight:600;color:var(--ps-text);margin-bottom:6px"
         )
+        flop = _wt_flop(state)
+        hole = _hole_cards(state)
 
-        # Selected-card chip row.
-        board = _selected_board(state)
-        with ui.row().classes("gap-1 items-center min-h-6"):
-            for card in board:
-                with ui.row().classes(
-                    "border rounded px-2 py-0 items-center gap-1 bg-gray-100 "
-                    "dark:bg-gray-800"
-                ):
-                    ui.label(str(card)).classes("font-mono")
+        def _toggle_flop(card: Card) -> None:
+            board = _wt_flop(state)
+            if card in board:
+                board.remove(card)
+                _set_wt_flop(state, board)
+                return
+            if card in hole:
+                ui.notify(
+                    "That card is one of your hole cards.",
+                    type="warning",
+                    position="top",
+                )
+                return
+            if len(board) >= 3:
+                ui.notify(
+                    "Flop is already 3 cards; remove one first.",
+                    type="warning",
+                    position="top",
+                )
+                return
+            board.append(card)
+            _set_wt_flop(state, board)
 
-        # 4x13 suit-by-rank grid.
-        with ui.grid(columns=13).classes("gap-1"):
-            for suit_idx, suit_char in enumerate(SUITS):
-                for rank_idx, rank_char in enumerate(RANKS):
-                    rank_value = 14 - rank_idx
-                    card = Card(rank_value, suit_idx)
-                    card_str = f"{rank_char}{suit_char}"
-                    in_board = card in board
-
-                    def _on_card_click(_e: Any, c: Card = card) -> None:
-                        _toggle_board_card(state, c)
-                        refresh_after_change()
-
-                    btn = (
-                        ui.button(
-                            card_str,
-                            on_click=_on_card_click,
-                        )
-                        .props("flat dense")
-                        .classes("font-mono")
-                    )
-                    btn.mark(f"chained-tab-board-cell-{card_str}")
-                    if in_board:
-                        btn.style(
-                            "background:var(--ps-selected-bg);"
-                            "color:var(--ps-cell-border-sel)"
-                        )
+        _card_grid(
+            state,
+            selected=flop,
+            cap=3,
+            on_toggle=_toggle_flop,
+            marker_prefix="chained-tab-board-cell",
+            refresh_after_change=refresh_after_change,
+        )
 
         def _clear() -> None:
-            _set_selected_board(state, [])
+            _set_wt_flop(state, [])
             refresh_after_change()
 
-        ui.button(
-            "Clear board",
-            icon="clear",
-            on_click=_clear,
-        ).props("flat dense").mark("chained-tab-clear-board")
+        ui.button("Clear board", icon="clear", on_click=_clear).props(
+            "flat dense"
+        ).mark("chained-tab-clear-board")
 
-
-def _toggle_board_card(state: AppState, card: Card) -> None:
-    """Toggle a card on the flop selection (max 3 cards)."""
-    board = _selected_board(state)
-    if card in board:
-        board.remove(card)
-        _set_selected_board(state, board)
-        return
-    if len(board) >= 3:
-        ui = _import_nicegui()
-        ui.notify(
-            "Flop is already 3 cards; remove one before adding another.",
-            type="warning",
-            position="top",
-        )
-        return
-    board.append(card)
-    _set_selected_board(state, board)
-
-
-def _render_postflop_panel(
-    state: AppState, refresh_after_change: Callable[[], None]
-) -> None:
-    """Right-pane postflop strategy display.
-
-    When the user has selected a hand class + action sequence + 3-card
-    flop, this panel triggers (or fetches the cached) postflop solve via
-    ``ChainedSolveResult.solve_postflop`` and renders the hero's strategy
-    for the selected class. Otherwise it shows a friendly status hint.
-    """
-    ui = _import_nicegui()
-
+    # Flop strategy panel (guarded).
     with (
         ui.element("div")
         .mark("chained-tab-postflop-display")
@@ -813,130 +1234,163 @@ def _render_postflop_panel(
             "border:1px solid var(--ps-border-strong)"
         )
     ):
-        ui.label("Postflop strategy").style(
+        ui.label("Flop strategy").style(
             "font-weight:600;color:var(--ps-text);margin-bottom:6px"
         )
 
-        result = _chained_result(state)
-        if result is None:
-            ui.label("Run a chained solve to populate the preflop chart.").style(
+        if hero_cls is None:
+            ui.label("Pick your hole cards first.").style(
                 "color:var(--ps-text-muted);font-style:italic"
             )
             return
-
-        selected_class = _selected_class(state)
-        if selected_class is None:
-            ui.label("Click a preflop cell to select a hand class.").style(
-                "color:var(--ps-text-muted);font-style:italic"
-            )
-            return
-
-        action_seq = _selected_action_sequence(state)
-        if action_seq is None or action_seq not in result.continuation_ranges:
-            ui.label("Pick a preflop terminal action above.").style(
-                "color:var(--ps-text-muted);font-style:italic"
-            )
-            return
-
-        board = _selected_board(state)
-        if len(board) != 3:
+        if tokens not in result.continuation_ranges:
             ui.label(
-                f"Pick 3 flop cards above (currently {len(board)}/3) to "
-                f"trigger the postflop solve."
+                "This preflop line does not reach the flop in the solve."
+            ).style("color:var(--ps-text-muted);font-style:italic")
+            return
+        flop = _wt_flop(state)
+        if len(flop) != 3:
+            ui.label(
+                f"Pick 3 flop cards above (currently {len(flop)}/3)."
             ).style("color:var(--ps-text-muted);font-style:italic")
             return
 
-        board_tuple = tuple(board)
-        cache_key = (action_seq, board_tuple)
-        cached = result.postflop_cache.get(cache_key)
-        if cached is None:
-            # Trigger the lazy solve on demand. The Rust vector-form CFR
-            # runs synchronously here — for production wall-clock this is
-            # roughly seconds to tens of seconds; an async dispatch path
-            # is a Phase B concern (issue #31 §3 future work).
-            #
-            # Task #68 Phase 6: time the solve so we can update the
-            # postflop badge with the real wall time the user just paid.
-            import time as _time
+        # MANDATORY tractability guard (chain-solve "b" plan §"Flop solve can
+        # HANG"). The chained flop solve is synchronous on the UI thread and
+        # the default bet menu hangs for minutes before iterating; it is NOT
+        # covered by SolveRunner.start's guard. Block wide-range flops here.
+        from ui.state import chained_flop_too_large
 
-            t_post = _time.monotonic()
-            try:
-                cached = result.solve_postflop(action_seq, board_tuple)
-            except (KeyError, ValueError) as exc:
-                ui.label(f"Postflop solve failed: {exc}").style(
-                    "color:var(--ps-text-error)"
-                )
-                return
-            except (RuntimeError, ImportError) as exc:
-                logger.exception("chained postflop solve raised")
-                ui.label(f"Postflop solve error: {exc}").style("color:var(--ps-text-error)")
-                return
-            wall_post = _time.monotonic() - t_post
-            # Update the postflop route info badge so the polling timer
-            # in ``ui/app.py`` picks up the identity change on the next
-            # tick and refreshes the routing slot. We deliberately do
-            # NOT call ``_chained_refresh()`` inline here — the polling
-            # tick is the single owner of refresh scheduling, and
-            # calling it from inside a render context (this function is
-            # the body of ``_render_postflop_panel`` -> ``_right_pane_slot``)
-            # would re-enter the same refreshable mid-render.
-            from ui.blueprint_router import RouteInfo, SourceLabel
-
-            runner = getattr(state, "runner", None)
-            if runner is not None:
-                runner.chained_postflop_route_info = RouteInfo(
-                    source=SourceLabel.LIVE,
-                    wall_time_s=wall_post,
-                    confidence=f"live subgame ({len(action_seq)}-token line)",
-                )
-
-        per_class = getattr(cached, "per_class_strategy", {}) or {}
-        if selected_class not in per_class:
+        config_template = getattr(result, "_config_template", None)
+        if config_template is not None and chained_flop_too_large(
+            config_template, flop
+        ):
             ui.label(
-                f"{selected_class} not in postflop continuation range (it "
-                f"may have been blocked by the board or filtered out)."
-            ).style("color:var(--ps-text-muted);font-style:italic")
+                "These ranges are too wide for an interactive flop solve on "
+                "this engine. Narrow the hero/villain ranges (or reduce the "
+                "bet sizes) and re-solve, then walk to the flop again."
+            ).mark("chained-tab-flop-too-large").style(
+                "color:var(--ps-text-error);font-weight:600"
+            )
             return
 
-        freqs = per_class[selected_class]
+        board_tuple = tuple(flop)
+        try:
+            rec = result.query(hero_cls, tokens, board_tuple)
+        except (KeyError, ValueError) as exc:
+            ui.label(f"Flop solve unavailable: {exc}").style(
+                "color:var(--ps-text-muted);font-style:italic"
+            )
+            return
+        except (RuntimeError, ImportError) as exc:
+            logger.exception("chained flop solve raised")
+            ui.label(f"Flop solve error: {exc}").style(
+                "color:var(--ps-text-error)"
+            )
+            return
+
+        # Update the postflop route badge (polling tick picks up the change).
+        from ui.blueprint_router import RouteInfo, SourceLabel
+
+        runner = getattr(state, "runner", None)
+        if runner is not None:
+            runner.chained_postflop_route_info = RouteInfo(  # type: ignore[attr-defined]
+                source=SourceLabel.LIVE,
+                wall_time_s=0.0,
+                confidence=f"live subgame ({len(tokens)}-token line)",
+            )
+
         ui.label(
-            f"{selected_class} on {''.join(str(c) for c in board_tuple)} "
-            f"after {format_action_sequence(action_seq)}"
+            f"{hero_cls} on {''.join(str(c) for c in board_tuple)} "
+            f"after {format_action_sequence(tokens)}"
         ).style("color:var(--ps-text);font-weight:600;margin-bottom:6px")
+        if rec:
+            _render_freq_bars(state, rec, "chained-tab-postflop-row")
+        else:
+            ui.label(
+                f"{hero_cls} is not in the flop continuation range (blocked by "
+                f"the board or filtered out)."
+            ).style("color:var(--ps-text-muted);font-style:italic")
 
-        for label, prob in sorted(freqs.items(), key=lambda kv: -float(kv[1])):
-            bucket = classify_action(str(label))
-            with ui.row().style(
-                "align-items:center;gap:8px;padding:3px 0;"
-            ).mark(f"chained-tab-postflop-row-{label}"):
-                ui.label(str(label)).style(
-                    "width:90px;color:var(--ps-text-dim);"
-                    "font-family:Menlo,Consolas,monospace"
-                )
-                bar_width = 160
-                fill_px = int(round(float(prob) * bar_width))
-                anchor_rgb = {
-                    "fold": _COLOR_FOLD,
-                    "call": _COLOR_CALL,
-                    "raise": _COLOR_RAISE,
-                    "jam": _COLOR_JAM,
-                }.get(bucket, _COLOR_NEUTRAL)
-                anchor_css = (
-                    f"rgb({anchor_rgb[0]},{anchor_rgb[1]},{anchor_rgb[2]})"
-                )
-                with ui.element("div").style(
-                    f"width:{bar_width}px;height:12px;"
-                    f"background:var(--ps-track-bg);"
-                    f"border:1px solid var(--ps-border-soft);"
-                    f"position:relative"
-                ):
-                    ui.element("div").style(
-                        f"width:{fill_px}px;height:100%;background:{anchor_css}"
-                    )
-                ui.label(f"{float(prob) * 100:.1f}%").style(
-                    "color:var(--ps-text-mono);font-family:Menlo,Consolas,monospace;"
-                    "width:60px;text-align:right"
-                )
+        # Turn is Tier B.
+        ui.label(
+            "Turn / river are not yet chained on this engine."
+        ).style("color:var(--ps-text-fainter);font-size:11px;margin-top:8px")
+
+        def _to_turn(_e: Any = None) -> None:
+            _set_wt_step(state, "turn")
+            refresh_after_change()
+
+        ui.button(
+            "Turn (pending) ->", on_click=_to_turn, icon="hourglass_empty"
+        ).props("flat dense").mark("chained-tab-legal-action-turn")
+
+
+def _render_pending_step(state: AppState, street: str) -> None:
+    """Screen 3+ — Tier-B turn/river placeholder. No compute."""
+    ui = _import_nicegui()
+    with (
+        ui.element("div")
+        .mark("chained-tab-pending-engine chained-tab-postflop-display")
+        .style(
+            "background:var(--ps-strip-bg);padding:14px;border-radius:4px;"
+            "border:1px dashed var(--ps-border-strong)"
+        )
+    ):
+        ui.label(f"{street.capitalize()} — pending fast engine").style(
+            "font-weight:600;color:var(--ps-text);margin-bottom:6px"
+        )
+        ui.label(
+            "Turn and river chaining is not yet implemented on this engine. "
+            "The chained orchestrator (Phase A) only solves the flop subgame "
+            "lazily; flop -> turn -> river chaining lands with the faster "
+            "engine. Solve the flop above to study it for now."
+        ).style("color:var(--ps-text-muted);font-style:italic")
+
+
+def _render_termination(
+    state: AppState, refresh_after_change: Callable[[], None]
+) -> None:
+    """Termination — summary strip of the walked path (fold / preflop end)."""
+    ui = _import_nicegui()
+    with (
+        ui.element("div")
+        .mark("chained-tab-postflop-display")
+        .style(
+            "background:var(--ps-strip-bg);padding:12px;border-radius:4px;"
+            "border:1px solid var(--ps-border-strong)"
+        )
+    ):
+        ui.label("Hand summary").style(
+            "font-weight:600;color:var(--ps-text);margin-bottom:6px"
+        )
+        hero_cls = _hero_class(state)
+        tokens = _wt_tokens(state)
+        ui.label(f"Hero class: {hero_cls or '(none)'}").style(
+            "color:var(--ps-text-dim)"
+        )
+        ui.label(f"Preflop line: {format_action_sequence(tokens)}").style(
+            "color:var(--ps-text-dim);font-family:Menlo,Consolas,monospace"
+        )
+        last = tokens[-1] if tokens else ""
+        if last == "f":
+            ui.label("Result: a player folded — hand ends preflop.").style(
+                "color:var(--ps-text);margin-top:4px"
+            )
+        else:
+            ui.label("Result: line ended preflop (no flop reached).").style(
+                "color:var(--ps-text);margin-top:4px"
+            )
+
+        def _restart(_e: Any = None) -> None:
+            _set_wt_tokens(state, ())
+            _set_wt_flop(state, [])
+            _set_wt_step(state, "preflop")
+            refresh_after_change()
+
+        ui.button(
+            "Walk again from preflop", on_click=_restart, icon="replay"
+        ).props("flat").mark("chained-tab-restart")
 
 
 __all__ = [
@@ -950,5 +1404,6 @@ __all__ = [
     "project_postflop",
     "project_preflop",
     "render",
+    "token_label",
     "_DEFAULT_ITERATIONS",
 ]

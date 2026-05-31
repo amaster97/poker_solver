@@ -1216,6 +1216,22 @@ def _on_chained_solve(state: AppState) -> None:
     )
     log_every = state.current_solve.log_every if state.current_solve else 50
 
+    # Capture the hero hole-card combo picked in the chained tab so the
+    # walkthrough can classify the hero hand (state.py:classify_combo) and
+    # highlight that class on the preflop matrix. Reset any prior
+    # walkthrough position so the new solve starts at the preflop root.
+    # Walkthrough state is transient attrs on the runner (mirrors the
+    # ``_chained_selected_*`` pattern). See ui/views/chained_tab.py.
+    from poker_solver.card import Card as _Card  # noqa: F401
+
+    hero_combo = getattr(state.runner, "_wt_hero_combo", None)
+    state.runner._wt_hero_combo = (  # type: ignore[attr-defined]
+        tuple(hero_combo) if hero_combo else None
+    )
+    state.runner._wt_tokens = ()  # type: ignore[attr-defined]
+    state.runner._wt_step = "preflop"  # type: ignore[attr-defined]
+    state.runner._wt_flop = []  # type: ignore[attr-defined]
+
     from poker_solver.hunl import HUNLPoker
 
     game = HUNLPoker(config=config)
