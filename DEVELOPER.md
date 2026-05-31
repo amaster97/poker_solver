@@ -91,7 +91,7 @@ Top-level layout:
 | [`crates/cfr_core/`](crates/cfr_core/) | Rust performance tier (PyO3 ext). |
 | [`tests/`](tests/) | Pytest suite. `test_*_diff.py` are the two-tier gates. |
 | `references/` (local-only, gitignored) | Papers, blogs, OSS solver clones. Populated by `scripts/setup_references.sh`. |
-| [`ui/`](ui/) | NiceGUI app (mock-backed today; a future PR swaps in real solver). |
+| [`ui/`](ui/) | NiceGUI desktop-style web app. Wired to the real solver (`SolveRunner._dispatch_solve`); the `mock_solver` path is retained only for smoke-test failure-mode injection and is unreachable from the UI. Launch with `poker-solver ui`. |
 | [`scripts/`](scripts/) | `check_pr.sh`, chart generation, macOS packaging. |
 
 Inside [`poker_solver/`](poker_solver/):
@@ -370,8 +370,9 @@ default) and it survives the dry-run / spot-skip idempotency tests.
 
 ## 10. Where to go next
 
-- Strategic roadmap: NEON SIMD + cache blocking + public chance
-  sampling (Rust perf), HUNL preflop full solve (replacing the
-  push/fold lookup above 15 BB), and mock-to-real solver swap in the
-  UI are the next scheduled tracks.
+- Strategic roadmap: deeper postflop memory optimization (board-tree
+  collapse to bend the full-range flop memory wall — the v1.11 engine
+  track), NEON SIMD + cache blocking + public chance sampling (Rust
+  perf), and HUNL preflop full solve (replacing the push/fold lookup
+  above 15 BB) are the next scheduled tracks.
 - Open issues on the GitHub repo are a good first-issue source.

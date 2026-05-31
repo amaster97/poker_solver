@@ -1,4 +1,4 @@
-# Using poker_solver — End-User Guide (v1.10.0)
+# Using poker_solver — End-User Guide (v1.11)
 
 For people who want to **use** the solver to improve their poker game,
 not develop it. You should be comfortable in a terminal and editing a
@@ -10,25 +10,21 @@ Document baseline: v1.0.0. Updates through v1.8.x layered in §5.3
 (node-locking), §5.4 (asymmetric contributions), §5.5 (range
 utilities), §5.6 (aggregator vs. true-Nash range-vs-range, v1.7.0+),
 §5.7 (off-path filtering, v1.8.2), §5.8 (DCFR α-guard, v1.8.2), §7a
-(ergonomic subcommands), §7b (known perf cliffs).
+(ergonomic subcommands), §7b (known perf cliffs). v1.10.0 added §5.9
+(Preflop blueprint — instant lookup + interpolation + postflop subgame
+chaining) and §5.10 (CLI BB-normalization — canonical `--pot N
+--stack M` flags).
 
-**v1.10.0 (this ship)** adds §5.9 (Preflop blueprint — instant lookup
-+ interpolation + postflop subgame chaining), §5.10 (CLI
-BB-normalization — canonical `--pot N --stack M` flags), and updates
-§7b with the v1.10 postflop optimization stream (live flop subgame
-now completes — was OOM/jetsam-killed — though full-range flop
-memory still exceeds budget, deferred to v1.11). v1.9.0 was drafted
-but never tagged — the
-Premium-A blueprint feature train (PRs #149/#154/#158/#160 B10
-per-combo train; PRs #163/#167/#171/#173/#174/#175/#176/#177/#178/#181/#182
-Premium-A blueprint chain; PRs #165/#170 engine fixes; PR #152 CLI
-BB-normalization) and the v1.10 postflop optimization PRs (arena
-allocator, vector-form turn + flop forward walks, opt-in rayon, perf
-harness + profiler — PRs #186/#187/#188/#189/#190 plus PR-1 + PR-3)
-fold into the v1.10.0 MINOR bump. See README "What's new in v1.10.0"
-for the consolidated list; per-stream detail in
-`docs/v1_9_0_release_notes_DRAFT.md` and
-`docs/v1_10_postflop_optimization_plan.md`.
+**v1.11 (this ship)** brings the desktop-style web GUI to the
+front (§4 — the real solver shipped in the UI back in v1.2.0; the
+legacy mock-mode banner is gone), ships per-street bet menus +
+raise-multiplier sizing on the postflop solve path (§3b, §5.1), and
+continues the postflop engine optimization stream — suit isomorphism,
+inclusion-exclusion terminal evaluation, and rayon chance-parallelism
+are on by default in the vector-form Rust core, each force-disablable
+via an environment variable for the differential tests. Full-range
+deep-stack flop solves remain compute-intensive (the board-chance tree
+is large); see §7b for honest perf framing.
 
 ---
 
@@ -48,9 +44,10 @@ subgame solver has been externally validated against
 `noambrown/poker_solver` (MIT). It is not trying to be a multiway,
 cloud-hosted library service like GTO Wizard.
 
-v1.0.0 (2026-05-22) is the first end-user-shippable artifact. CLI and
-Python library are stable; the NiceGUI desktop app ships alongside in
-mock mode (see §4).
+v1.0.0 (2026-05-22) was the first end-user-shippable artifact. The CLI
+and Python library are stable; the NiceGUI desktop-style web app (see
+§4) is wired to the real solver and is the recommended front-door for
+preflop charts, range editing, and range-vs-range postflop solving.
 
 ---
 
@@ -208,29 +205,55 @@ you whether the exact path or MC fired.
 
 ---
 
-## 4. The UI (currently mock mode)
+## 4. The GUI (real solver)
+
+Install the optional `ui` extra (`pip install -e ".[ui]"`), then launch
+the desktop-style web app:
 
 ```bash
 poker-solver ui
 # Then open http://127.0.0.1:8080
 ```
 
-What you see: a 13x13 range matrix with hand-class labels (PioSolver
-palette), a board picker, a solver controls panel (iterations,
-bet-size menu, target-exploitability mode), a live exploitability
-curve, a decision-tree browser with a reach-frequency filter, and a
-per-combo inspector strip below the matrix.
+The app binds only to localhost (`127.0.0.1`); if port 8080 is busy it
+falls back to the next free port up through 8090 and prints the chosen
+one. Flags: `--port`, `--host`, and `--dark-mode {auto,light,dark}`
+(default `auto` follows your OS theme).
 
-**Mock-mode banner — plain terms.** When you click **Solve**, the
-results panel is populated from a fixture, not from a real solve. All
-the visuals, frequencies, and EV numbers are placeholders for UI
-development. A banner across the top makes this explicit. v1.0.0
-deliberately built the UX against this mock surface so v1.0.0 could
-ship now; a future PR swaps in the real solver, expected with v1.1.
+**This runs the real solver — not a mock.** The legacy "mock mode"
+banner from early releases was removed once the real-solver bindings
+shipped (v1.2.0); clicking **Solve** now routes to the production
+solver. (A `mock_solver` path still exists in the codebase, but it is
+reserved for smoke-test failure-mode injection and is unreachable from
+the UI.)
 
-Still useful in v1.0.0 for: getting familiar with the workflow,
-planning analysis sessions, giving feedback. For real strategies
-today, drop down to the CLI in §3.
+What the GUI offers:
+
+- **Preflop charts / ranges** — a 13×13 hand-class matrix of GTO action
+  frequencies, backed by the precomputed preflop blueprint (§5.9) with a
+  fall-through to a live solve for out-of-envelope spots. Cells carry a
+  `blueprint` / `interpolated` / `live` source badge so you know which
+  path produced the number.
+- **Range editor** — build and edit ranges three ways: clicking cells on
+  the 13×13 matrix, typing Pio-style range strings (`AA, KK, AKs, 76s+`),
+  or a per-hand frequency editor for finer control. Suited / offsuit
+  cells are handled distinctly.
+- **Postflop range-vs-range solving** — set a board and two ranges and
+  solve the postflop subgame, including a guided hole-card walkthrough
+  that chains a preflop blueprint range into a postflop street.
+- **Solve library** — a local store of solved spots you can list, search,
+  load, and delete (the same SQLite library described in §6).
+- **Tree browser + strategy matrix** — walk the post-solve decision tree
+  and inspect the strategy at each node, with a combo inspector and a
+  node-lock editor.
+
+**Honest perf framing for the GUI.** The interactive sweet spot is
+push/fold, preflop blueprint lookups (instant), and river / turn
+range-vs-range solves (sub-second to seconds on the Rust tier). Deep
+full-range **flop** solves are compute- and memory-intensive — this is
+not a real-time deep-flop solver; budget wall-clock time for the
+heaviest spots, or use the CLI / Python paths in §3 and §5 for batch
+work. See §7b for the per-street regime guidance.
 
 ---
 
@@ -416,7 +439,7 @@ walker silently passed through P1's modal action before grabbing P0's
 frequencies. On no-history defending spots (river bluff-catchers, MDF
 queries) P1 modally checked, so P0 had no bet to face and the API
 returned ~100% check no matter what hero was. Caught by the Option B
-pre-ship stress test S4 (internal mirror).
+pre-ship stress test S4 and fixed in v1.3.1.
 
 #### Honest perf caveat — 100 BB flop-start is minutes, not seconds
 
@@ -1035,17 +1058,17 @@ description, so the same configuration always resolves to the same row.
 
 ---
 
-## 7. Known limitations (v1.10.0)
+## 7. Known limitations (v1.11)
 
-- **UI standalone tab is mock mode; chart widget + chained tab are
-  real (v1.10.0).** The PR #178 wiring landed for the chart widget
-  (`blueprint` / `interpolated` / `live` source badges) and the
-  chained postflop tab (consumes the blueprint preflop range + runs
-  a live postflop subgame). The ad-hoc **Solve** button on the
-  standalone tab still uses the PR 10a mock fixtures; real-solver
-  swap there is tracked as PR 10b. For real preflop, use the chart
-  widget; for real postflop, use the chained tab or the CLI / Python
-  API.
+- **GUI is real-solver-backed; full-range deep flop is the heavy
+  spot.** The GUI (§4) runs the production solver across preflop charts,
+  range editing, and range-vs-range postflop solving — the early
+  mock-mode caveat no longer applies. The remaining honest limitation is
+  shared with the CLI / Python paths: deep-stack full-range **flop**
+  solves are compute- and memory-intensive (see §7b). Use the GUI
+  interactively for push/fold, preflop, and river / turn spots; budget
+  wall-clock time (or drop to the CLI / Python batch paths) for heavy
+  full-range flop work.
 - **No full-tree HUNL solving above 15 BB yet.** `--hunl-mode full`
   raises `NotImplementedError`. Fixed-hole-card preflop shipped in
   v1.1.0 (`solve_hunl_preflop`); full-tree preflop with the chance node
@@ -1222,7 +1245,7 @@ is a thin wrapper around an existing library API; zero engine changes.
 
   ```bash
   $ poker-solver --version
-  poker-solver 1.10.0
+  poker-solver 1.11.0
   ```
 
 ### Still missing from the CLI
@@ -1319,20 +1342,22 @@ Regime guidance at a glance (v1.10.0):
 
 ## 8. What's coming
 
-The three items most likely to matter for users beyond v1.10.0:
+The items most likely to matter for users beyond v1.11:
 
-- **PR 9 — HUNL preflop solve.** Shipped in v1.1.0 for fixed hole
-  cards (`solve_hunl_preflop` is exported from the top-level package).
-  v1.10.0's Premium-A blueprint feature train (§5.9) ships the
-  precomputed-Nash lookup path for the 27-cell envelope and the
-  chained postflop subgame. Full-tree preflop with the chance node
-  over hole cards on out-of-envelope configs is still pending —
-  `--hunl-mode full` continues to raise `NotImplementedError`.
-- **PR 10b — real solver bindings in the UI standalone tab.** v1.10.0
-  ships the chart widget + chained postflop tab on real solver output
-  (PR #178), but the ad-hoc **Solve** button on the standalone tab
-  still uses the PR 10a mock fixtures. Mechanical swap of
-  `ui/mock_solver.py` for the real solver call pending.
+- **Full-range flop memory optimization.** The dominant remaining
+  limitation is the full-range deep-stack **flop** memory wall: the
+  materialized board-chance tree dominates RSS independent of `top_k`,
+  so deep full-range flop solves are compute- and memory-intensive (see
+  §7b). Bending this wall — board-tree memory collapse / abstraction —
+  is the active v1.11 engine track; until it lands, use the §5.2
+  aggregator for full-range flop charts.
+- **HUNL preflop full solve.** Fixed-hole-card preflop shipped in v1.1.0
+  (`solve_hunl_preflop` is exported from the top-level package), and the
+  preflop blueprint (§5.9) covers the 27-cell precomputed-Nash envelope
+  plus interpolation and the chained postflop subgame. Full-tree preflop
+  with the chance node over hole cards on out-of-envelope configs is
+  still pending — `--hunl-mode full` continues to raise
+  `NotImplementedError`.
 - **v1.10 turn/river perf benchmark publication.** All four v1.10
   perf PRs are merged: PR-1 (arena+LTO, `eb5b4d0`/#197), PR-2
   (vector turn, `7fa4d73`/#190), PR-3 (vector flop, `cda3eeb`), and
