@@ -229,8 +229,28 @@ def classify_combo(card1: Card, card2: Card) -> str:
 # ``poker_solver/range_aggregator.py:_hole_string_rust``. The hole_str is
 # exactly 4 characters; the suffix is everything after that.
 
-_RANKS_RUST_ORDER: str = "23456789TJQKA"
-_SUITS_RUST_ORDER: str = "shdc"
+# The engine key-parsing + projection primitives moved to the GUI-agnostic
+# ``poker_solver.preflop_offpath`` module (so the same logic backs both the
+# chart widget and the programmatic ``strategy_table`` API). They are
+# re-exported here so this module's historical import surface
+# (``_split_preflop_key`` / ``_hand_class_from_hole_str`` /
+# ``_split_class169_key`` / ``_action_labels_for_count`` /
+# ``_RANKS_RUST_ORDER`` / ``_SUITS_RUST_ORDER`` / ``_PREFLOP_KEY_SEP`` /
+# ``_ALL_169_HAND_CLASSES``) stays intact for existing callers + tests.
+from poker_solver.preflop_offpath import (  # noqa: E402,F401
+    _ALL_169_HAND_CLASSES,
+    _PREFLOP_KEY_SEP,
+    _RANKS_RUST_ORDER,
+    _SUITS_RUST_ORDER,
+    _action_labels_for_count,
+    _all_169_hand_classes,
+    _hand_class_from_hole_str,
+    _split_class169_key,
+    _split_preflop_key,
+)
+from poker_solver.preflop_offpath import (  # noqa: E402
+    project_by_line as _project_by_line,
+)
 
 # Engine-default preflop action menu (opens 2/3/4/5bb, reraise ×2/3/4/5).
 # These mirror ``ui.views.preflop_chart._DEFAULT_OPEN_SIZES_BB`` /
@@ -240,127 +260,6 @@ _SUITS_RUST_ORDER: str = "shdc"
 # that diverges must route to a live ``solve_hunl_preflop_rvr`` solve.
 _DEFAULT_PREFLOP_OPEN_SIZES_BB: tuple[float, ...] = (2.0, 3.0, 4.0, 5.0)
 _DEFAULT_PREFLOP_RERAISE_MULTIPLIERS: tuple[float, ...] = (2.0, 3.0, 4.0, 5.0)
-
-
-def _split_preflop_key(key: str) -> tuple[str | None, str]:
-    """Split a Rust preflop key into (hole_str, history_suffix).
-
-    Returns ``(None, "")`` when the key is malformed (doesn't start with
-    a valid 4-char hole_str). Defensive — the engine emits well-formed
-    keys but we tolerate noise so a bad key doesn't crash the chart.
-    """
-    if len(key) < 4:
-        return (None, "")
-    hole_str = key[:4]
-    # Validate: 4 chars, rank/suit/rank/suit per RANKS_RUST_ORDER /
-    # SUITS_RUST_ORDER.
-    if not (
-        hole_str[0] in _RANKS_RUST_ORDER
-        and hole_str[1] in _SUITS_RUST_ORDER
-        and hole_str[2] in _RANKS_RUST_ORDER
-        and hole_str[3] in _SUITS_RUST_ORDER
-    ):
-        return (None, "")
-    return (hole_str, key[4:])
-
-
-def _hand_class_from_hole_str(hole_str: str) -> str | None:
-    """Convert a Rust ``hole_str`` (e.g. "AsKh") to a hand-class label.
-
-    Mirrors the inverse of ``poker_solver.range_aggregator._hole_string_rust``.
-    Returns ``None`` on malformed input.
-    """
-    if len(hole_str) != 4:
-        return None
-    r1_char, s1_char = hole_str[0], hole_str[1]
-    r2_char, s2_char = hole_str[2], hole_str[3]
-    if (
-        r1_char not in _RANKS_RUST_ORDER
-        or r2_char not in _RANKS_RUST_ORDER
-        or s1_char not in _SUITS_RUST_ORDER
-        or s2_char not in _SUITS_RUST_ORDER
-    ):
-        return None
-    r1 = _RANKS_RUST_ORDER.index(r1_char) + 2
-    r2 = _RANKS_RUST_ORDER.index(r2_char) + 2
-    suited = s1_char == s2_char
-    if r1 == r2 and s1_char == s2_char:
-        # Same card twice — malformed.
-        return None
-    return hand_class_label(r1, r2, suited)
-
-
-_PREFLOP_KEY_SEP: str = "||p|"
-
-
-def _split_class169_key(key: str) -> tuple[str | None, str]:
-    """Split a class-169 engine key into (class_label, history_suffix).
-
-    The ``solve_hunl_preflop_rvr_class169`` kernel emits keys of the form
-    ``"<class_label>||p|<history>"`` (e.g. ``"AA||p|"`` for the SB AA root
-    decision, ``"T4s||p|b400r1900A"`` for a deeper node). The class label is
-    the standard Pio chart label (2 chars for a pair like ``"AA"``, 3 chars
-    for ``"AKs"`` / ``"AKo"``). The history suffix returned here matches the
-    ``"||p|<history>"`` shape that :func:`_split_preflop_key` returns for the
-    1326 kernel, so both feed the same per-line projection unchanged.
-
-    Returns ``(None, "")`` when the key lacks the separator or the prefix is
-    not a recognized hand-class label (defensive against malformed keys).
-    """
-    idx = key.find(_PREFLOP_KEY_SEP)
-    if idx < 0:
-        return (None, "")
-    cls = key[:idx]
-    if cls not in _ALL_169_HAND_CLASSES:
-        return (None, "")
-    # Re-attach the separator so the suffix shape matches _split_preflop_key's
-    # ``"||p|<history>"`` (the per-line projection keys on this exact suffix).
-    return (cls, key[idx:])
-
-
-def _all_169_hand_classes() -> frozenset[str]:
-    """The 169 canonical Pio hand-class labels (AA, AKs, AKo, ..., 22)."""
-    out: set[str] = set()
-    for r1 in range(2, 15):
-        for r2 in range(2, 15):
-            if r1 == r2:
-                out.add(hand_class_label(r1, r2, suited=False))  # pair
-            else:
-                out.add(hand_class_label(r1, r2, suited=True))  # suited
-                out.add(hand_class_label(r1, r2, suited=False))  # offsuit
-    return frozenset(out)
-
-
-_ALL_169_HAND_CLASSES: frozenset[str] = _all_169_hand_classes()
-
-
-def _action_labels_for_count(count: int) -> list[str]:
-    """Build the default action-label list for a preflop tree.
-
-    The Phase A engine emits actions in the canonical order
-    ``fold, call/check, open_2, open_3, open_4, open_5, all_in``
-    (per ``crates/cfr_core/src/preflop_rvr.rs``). Counts below the
-    full menu drop the last entries; counts above add ``raise_*``
-    placeholders. This is a best-effort label set that the chart can
-    display; the engine's true labels live in the Rust binding and
-    aren't currently exported.
-    """
-    canonical = [
-        "fold",
-        "call",
-        "open_2",
-        "open_3",
-        "open_4",
-        "open_5",
-        "all_in",
-    ]
-    if count <= 0:
-        return canonical
-    if count <= len(canonical):
-        return canonical[:count]
-    # Pad with raise_N placeholders.
-    extras = [f"raise_{i}" for i in range(count - len(canonical))]
-    return canonical + extras
 
 
 # --------------------------------------------------------------------------- #
@@ -1716,47 +1615,16 @@ class SolveRunner:
         :meth:`preflop_chart_summary_for_line`; UI code (a later chart agent)
         consumes it to render deeper lines (BB-call / 3-bet / 4-bet) instead
         of only the open range.
-        """
-        average_strategy = rust_out.get("average_strategy", {})
-        # history -> class -> (running sum of prob vectors, count)
-        by_line: dict[str, dict[str, tuple[list[float], int]]] = {}
-        for key, probs in average_strategy.items():
-            if not probs:
-                continue
-            if class169:
-                cls, hist = _split_class169_key(str(key))
-            else:
-                hole_str, hist = _split_preflop_key(str(key))
-                cls = (
-                    _hand_class_from_hole_str(hole_str)
-                    if hole_str is not None
-                    else None
-                )
-            if cls is None:
-                continue
-            line_slot = by_line.setdefault(hist, {})
-            prev = line_slot.get(cls)
-            vec = [float(p) for p in probs]
-            if prev is None:
-                line_slot[cls] = (vec, 1)
-            else:
-                acc, cnt = prev
-                if len(acc) == len(vec):
-                    line_slot[cls] = ([a + b for a, b in zip(acc, vec)], cnt + 1)
-                # else: ragged action counts within a class — keep the first.
 
-        out: dict[str, dict[str, dict[str, float]]] = {}
-        for hist, class_map in by_line.items():
-            line_out: dict[str, dict[str, float]] = {}
-            for cls, (acc, cnt) in class_map.items():
-                n = len(acc)
-                if n == 0 or cnt == 0:
-                    continue
-                labels = _action_labels_for_count(n)
-                line_out[cls] = {labels[i]: acc[i] / cnt for i in range(n)}
-            if line_out:
-                out[hist] = line_out
-        return out
+        The pure projection now lives in
+        :func:`poker_solver.preflop_offpath.project_by_line`; this thin wrapper
+        just feeds it ``rust_out["average_strategy"]`` so the GUI and the
+        programmatic ``strategy_table`` API share one implementation. It reads
+        the raw strategy without mutating it.
+        """
+        return _project_by_line(
+            rust_out.get("average_strategy", {}), class169=class169
+        )
 
     @staticmethod
     def _build_preflop_chart_summary(
