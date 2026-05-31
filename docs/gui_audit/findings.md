@@ -130,6 +130,8 @@ Net new code this session: `ui/app.py` (4 message rewrites) + `ui/views/run_pane
 
 **Still pending (environment-gated):** live click-through + solve-path verification (matrix populate, on/off-path tree, MDF sanity) and the UI pytest battery — blocked until the concurrent engine rebuild reinstalls `cfr_core` (watcher armed). Light-mode contrast, hamburger-opens, and preset-refresh are live-verifiable now (no engine needed).
 
+> **[HISTORICAL — superseded, see "AUTHORITATIVE GROUND TRUTH" + "FINAL STATUS LEDGER" below.]** The blocks from here through the end of CORRECTION 2 describe a transient broken-engine / branch-staleness state from a 2026-05-30 session. That blocker was an environment artifact (venv loaded the hook-less `.so`) and the engine↔GUI integration has since LANDED and SHIPPED at `a9e92ea`. Do NOT read the "STILL BROKEN cfr_core" / "postflop crashes" claims below as current. Retained for audit trail only.
+
 ### ⚠️ RETRACTED / INCORRECT — see "CORRECTION (2026-05-30, later)" at the END of this file
 
 > The "LIVE VERIFICATION … ALL PASS" section immediately below is **incorrect** and is retained only for audit trail.
@@ -264,6 +266,8 @@ _rust.so in the worktree is a gitignored symlink (not tracked).
 
 # ⭐ AUTHORITATIVE GROUND TRUTH — Session 2026-05-30 (Opus, fresh chat post-migration)
 
+> **[Its "OPEN / PENDING" list below is itself superseded by the "FINAL STATUS LEDGER" further down — the engine merge landed and the `SolveTooLargeError` guard was removed; see that ledger + the top-of-`TODO.md` STATUS line for current state.]**
+
 This section supersedes the confused/retracted blocks above. It is verified against the
 **live running server** (launched FROM this GUI worktree → loads the hook-enabled `_rust.so`,
 so postflop solves run) and against on-disk code. Driver: Claude Preview MCP browser on :8080.
@@ -319,11 +323,10 @@ so postflop solves run) and against on-disk code. Driver: Claude Preview MCP bro
   "interpolated 67bb ← 60/80"), confirm deeper-line chips unlock.
 - **Marquee range-vs-range FLOP:** confirm matrix fully populates with non-uniform strategy on a
   flop node using G1's tractable ranges (light; full-range 100bb flop = memory wall, engine track).
-- **Method default = Concrete (point-pair)** contradicts locked "postflop = range-vs-range" —
-  DECISION FOR USER (flip to RvR couples to memory wall + the existing `SolveTooLargeError` guard).
+- **Method default = Concrete (point-pair)** vs locked "postflop = range-vs-range" — RESOLVED: Concrete is dev-only (`POKER_SOLVER_DEV_CONCRETE`), prod forces RvR; the `SolveTooLargeError` guard was removed when the fast engine made flops tractable.
 - Pre-existing ruff errors in untouched files (`poker_solver/cli.py`, etc.) — report, not fix here.
-- Part B persona walkthroughs + timings; full pytest/ruff battery; PR.
-- **Engine merge** (main perf + hooks) — backend-owned; gates the shippable wide-flop demo.
+- Part B persona walkthroughs + timings; full pytest/ruff battery.
+- **Engine merge** (main perf + hooks) — DONE (`b551b13` / `f11f19f` / `3d469e4`, shipped at `a9e92ea`); the wide-flop demo runs on the fast engine.
 
 ## UPDATE — post-fix-wave live re-verify (server restarted w/ G1 + fix wave)
 - **N3 Library Close button** — VERIFIED live: dialog now shows LOAD SELECTED / DELETE / **CLOSE**.
@@ -345,7 +348,7 @@ so postflop solves run) and against on-disk code. Driver: Claude Preview MCP bro
 
 # ⭐⭐ FINAL STATUS LEDGER — Session 2026-05-30 (Opus close-out) — supersedes all above
 
-All work is **UNCOMMITTED on branch `fix/gui-audit-message-leaks`** (worktree `musing-bartik-6e495b`); `main` untouched by the UI track.
+> **SHIPPED:** this campaign is committed, integrated with the v1.11 fast engine (`b551b13` / `f11f19f` / `3d469e4`), and released PUBLIC at `a9e92ea` (origin + backup mirror). The ledger below records what was verified/fixed; the engine-merge blocker noted at the bottom has since been resolved.
 
 ## Verified working — live, engine-independent (driven via Claude Preview on :8080)
 F04 light mode legible (the #1 complaint) · F08 no Python/Mock/engine-toggle visible · F06 hamburger (Replay/About) · F05 LIBRARY dialog (+ Close button) · U08/U09 MATRIX/STRING + suited/offsuit toggles + affordance text · U02/F09 header pencil + stack/blinds editing · U13 clean "already running" (no traceback leak) · F07 real progress bar · zero console errors · U04 preflop route badge ("Blueprint · 100BB", "Interpolated · 67BB ← 60+80") · U06 deeper preflop lines (78-line dropdown; selecting changes the 13×13 grid, AA R88→R68) · 13×13 preflop grid populated (N1 = non-issue).
@@ -386,11 +389,11 @@ F01 fast postflop solve (river subgame <1s) · F02 decision tree populates · F0
 ## Deferred / known-remaining (documented, NOT fixed this session)
 - **P2** — decision-tree node click does NOT drive the range matrix (matrix stays at root); on/off-path nav reads only from the tree text. Real gap, larger change. *(scoped follow-up)*
 - **P3** — matrix highlights the *acting* player's hand while the combo inspector shows the *hero*'s combos → lit cell reads "0 combos." Manifests on Concrete point-pair spots (now dev-only). *(scoped follow-up)*
-- **ENGINE MERGE (blocker for the marquee):** prod RvR postflop is **not tractable on this branch's engine** — a modest 226×184 @ 100BB flop hangs in tree-build (RSS flat ~120MB, CPU-bound), and Stop can't interrupt the build phase. Needs main's IE/vector/suit-iso engine merged with this branch's progress/cancel hooks (backend track). Until then, postflop demos use the dev-flag Concrete path.
+- **ENGINE MERGE — RESOLVED.** The integration landed: main's IE/vector/suit-iso engine reconciled with the UI progress/cancel hooks (`b551b13` / `f11f19f` / `3d469e4`), shipped at `a9e92ea`. Prod RvR postflop now runs on the fast engine (the earlier "tree-build hang" was the old-engine branch state).
 - Smoke-test pre-existing failures (exploitability_history length drift from log_every) — *(Agent B triage; pre-existing, not a regression)*.
 
-## Merge path (per user workflow)
-Branch verified green → commit to `fix/gui-audit-message-leaks` → merge to `main` is the **final gated step**, entangled with the engine reconciliation (this branch carries older engine files; main has the fast engine). UI work rides on top either way.
+## Merge path (per user workflow) — COMPLETE
+Branch verified green → committed → engine reconciliation (`b551b13` / `f11f19f` / `3d469e4`) → merged → shipped at `a9e92ea` (public origin + backup mirror). The engine reconciliation that was the gated step is done; the UI rides on the v1.11 fast engine.
 
 ## UPDATE 2 — P2/P3 RESOLVED (full UI suite 102 passed)
 - **P2 FIXED** — decision-tree node selection now drives the range matrix. Root cause was NOT the wiring (it existed) but `Spot.to_hunl_config()` **dropping a postflop subgame's pot/contributions** (river_tiny: solved pot 1000/(500,500) → round-trip 200/(100,100)) → wrong bet-size action abstraction (7 legal vs the solved 4) → `_strategy_for_combo`'s shape guard rejected every combo → all-zero strategy (looked "locked to root"). Fix: stash the exact solved `HUNLConfig` on `SolveRunner` (`_solved_config`, set in `start()`); `tree_browser._build_tree_from_runner` builds the browse/matrix tree from it (spot round-trip is now only a fallback). Live: matrix renders real strategy (QQ "MIX"), header tracks the node.
