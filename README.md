@@ -219,6 +219,13 @@ cargo clippy --all-targets --manifest-path crates/cfr_core/Cargo.toml -- -D warn
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the PR-flow contract.
 
+## Coordination
+
+Working alongside another agent or picking up in-flight work? Start with
+[`docs/AGENT_COORDINATION.md`](docs/AGENT_COORDINATION.md) — current shipped
+state, GUI vs engine track ownership, the open engine-track asks, and git
+coordination rules.
+
 ## References
 
 The CFR / DCFR / HUNL literature and reference codebases used for study and
