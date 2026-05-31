@@ -19,11 +19,10 @@ Phase A):
         (``result.query(hero_class, board=None)``, rendered as bars), and
         the 13x13 range. Pick an action -> advance until a flop-reaching
         terminal or a fold (terminate).
-      Screen 2 — flop (Tier A, GUARDED): a 3-card board picker, a
-        MANDATORY tractability guard (``chained_flop_too_large``) before any
-        ``solve_postflop`` (the chained flop solve is synchronous + can hang
-        on wide ranges and is NOT covered by ``SolveRunner.start``'s guard),
-        then the class-level flop rec + range + route badge.
+      Screen 2 — flop (Tier A): a 3-card board picker, then a synchronous
+        ``solve_postflop`` on main's fast engine (no pre-solve tractability
+        guard — flops are tractable in v1.11), then the class-level flop rec
+        + range + route badge.
       Screen 3+ — turn/river (Tier B): "pending fast engine" placeholders,
         no compute.
       Termination — a summary strip of the walked path on a fold line.
@@ -1255,25 +1254,11 @@ def _render_flop_step(
             ).style("color:var(--ps-text-muted);font-style:italic")
             return
 
-        # MANDATORY tractability guard (chain-solve "b" plan §"Flop solve can
-        # HANG"). The chained flop solve is synchronous on the UI thread and
-        # the default bet menu hangs for minutes before iterating; it is NOT
-        # covered by SolveRunner.start's guard. Block wide-range flops here.
-        from ui.state import chained_flop_too_large
-
-        config_template = getattr(result, "_config_template", None)
-        if config_template is not None and chained_flop_too_large(
-            config_template, flop
-        ):
-            ui.label(
-                "These ranges are too wide for an interactive flop solve on "
-                "this engine. Narrow the hero/villain ranges (or reduce the "
-                "bet sizes) and re-solve, then walk to the flop again."
-            ).mark("chained-tab-flop-too-large").style(
-                "color:var(--ps-text-error);font-weight:600"
-            )
-            return
-
+        # v1.11: no chained-flop tractability guard. The chained flop subgame
+        # runs on main's fast engine (rayon + suit-iso + IE terminal eval), so
+        # the GUI-branch ``chained_flop_too_large`` refusal — built against the
+        # old engine where a wide flop hung for minutes in tree-build — is
+        # removed.
         board_tuple = tuple(flop)
         try:
             rec = result.query(hero_cls, tokens, board_tuple)

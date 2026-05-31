@@ -473,22 +473,6 @@ impl HUNLDcfr {
 /// iteration order, so the seed has no observable effect. PR 8 may wire
 /// `_seed` into a `StdHasher` for `HashMap` insertion-order determinism and
 /// `_target_exploitability` into an `exploitability::compute` poll loop.
-///
-/// **v1.11 GUI hooks (`log_every` + `progress`):** the UI postflop path needs
-/// a live progress bar and a working Stop button while running on this fast
-/// tier. The optional `progress` callback is invoked at checkpoint boundaries
-/// — every `log_every` completed iterations (and once at the end) — with the
-/// number of iterations completed so far. It returns `true` to request an
-/// early, cooperative stop: the loop breaks on a clean iteration boundary and
-/// returns the partial average strategy (the `average_strategy()` snapshot is
-/// always self-consistent because regret/strategy sums are only mutated inside
-/// a full `cfr` traversal). The hot loop stays allocation-free; the callback
-/// is only touched at checkpoints (`log_every`-spaced), so steady-state
-/// overhead is negligible. When `log_every` is `None` or `0`, or `progress`
-/// is `None`, behavior is bit-identical to the pre-hook path (no callback,
-/// no early exit). Exploitability is intentionally NOT computed here — this
-/// entry returns `0.0` per D5 and Python recomputes — so the callback carries
-/// the iteration count only, which is exactly what the GUI progress bar needs.
 #[allow(clippy::too_many_arguments)]
 pub fn solve_hunl_postflop(
     config: &HUNLConfig,
@@ -502,12 +486,6 @@ pub fn solve_hunl_postflop(
     locked_strategies: Option<HashMap<String, Vec<f64>>>,
     regret_init_noise: f64,
     rng_seed: u64,
-    log_every: Option<u32>,
-    // `+ Send` is required so the PyO3 entry can pass this across
-    // `Python::allow_threads` (whose `Ungil` bound is `Send`-based on stable
-    // PyO3). The closure re-acquires the GIL via `Python::with_gil` only at
-    // checkpoint boundaries; it is never invoked concurrently.
-    mut progress: Option<&mut (dyn FnMut(u32) -> bool + Send)>,
 ) -> Result<HUNLSolveOutput, HUNLSolveError> {
     validate_config(config)?;
 
@@ -559,12 +537,6 @@ pub fn solve_hunl_postflop(
     // infoset is visited every iteration, so `last_discount_iter` always
     // matches `self.iteration`), so we omit it here as well.
     let initial = HUNLState::initial(Arc::clone(&config_arc));
-    // v1.11 GUI: checkpoint stride. `0`/`None` disables checkpointing, which
-    // keeps the loop bit-identical to the pre-hook path (no callback poll).
-    let checkpoint_stride = log_every.unwrap_or(0);
-    // Track how many iterations actually ran so an early stop reports the
-    // true partial count (not the requested `iterations`).
-    let mut completed: u32 = 0;
     for _ in 0..iterations {
         solver.iteration += 1;
         let reach = [1.0_f64, 1.0, 1.0];
@@ -576,22 +548,6 @@ pub fn solve_hunl_postflop(
             sampling,
             &mut rng,
         );
-        completed += 1;
-
-        // Checkpoint boundary: fire the progress callback and honor an
-        // early-stop request. Only entered every `checkpoint_stride`
-        // iterations so the steady-state hot loop is callback-free.
-        if checkpoint_stride != 0 && completed.is_multiple_of(checkpoint_stride) {
-            if let Some(cb) = progress.as_mut() {
-                // `cb` re-acquires the GIL on the PyO3 side, fires
-                // on_progress, then polls should_stop. A `true` return means
-                // the user pressed Stop: break on this clean boundary and
-                // return the partial (self-consistent) average strategy.
-                if cb(completed) {
-                    break;
-                }
-            }
-        }
     }
 
     let average_strategy = solver.average_strategy();
@@ -602,10 +558,7 @@ pub fn solve_hunl_postflop(
         average_strategy,
         exploitability: 0.0, // Python recomputes (D5).
         game_value: 0.0,     // Python recomputes (D5).
-        // Report the iterations that actually ran. On a full run this equals
-        // `iterations`; on an early stop it's the partial count so the caller
-        // (and the GUI's "N iters" label) reflects reality.
-        iterations: completed,
+        iterations,
         wallclock_seconds,
         infoset_count,
     })

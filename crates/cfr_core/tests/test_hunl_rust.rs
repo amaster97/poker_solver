@@ -608,7 +608,7 @@ fn test_hunl_strength_eval_handles_ties() {
 fn test_hunl_solve_river_subgame_smoke() {
     let config = default_tiny_subgame();
     let result = solve_hunl_postflop(
-        &config, None, 100, 1.5, 0.0, 2.0, None, Some(42), None, 0.0, 0, None, None,
+        &config, None, 100, 1.5, 0.0, 2.0, None, Some(42), None, 0.0, 0,
     );
     assert!(
         result.is_ok(),
@@ -647,7 +647,7 @@ fn test_hunl_solve_reject_preflop() {
         ..HUNLConfig::default()
     };
     let result = solve_hunl_postflop(
-        &config, None, 10, 1.5, 0.0, 2.0, None, None, None, 0.0, 0, None, None,
+        &config, None, 10, 1.5, 0.0, 2.0, None, None, None, 0.0, 0,
     );
     match result {
         Err(HUNLSolveError::PreflopNotSupported) => {} // expected
@@ -667,7 +667,7 @@ fn test_hunl_solve_reject_missing_hole_cards() {
     let mut config = default_tiny_subgame();
     config.initial_hole_cards = None;
     let result = solve_hunl_postflop(
-        &config, None, 10, 1.5, 0.0, 2.0, None, None, None, 0.0, 0, None, None,
+        &config, None, 10, 1.5, 0.0, 2.0, None, None, None, 0.0, 0,
     );
     match result {
         Err(HUNLSolveError::InvalidConfig(msg)) => {
