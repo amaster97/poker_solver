@@ -457,3 +457,288 @@ def test_chart_subtitle_empty_state_only_when_no_chart() -> None:
     live_sub = preflop_chart._chart_subtitle(live_state)
     assert "500 iters" in live_sub and "12.3s" in live_sub, live_sub
     assert "no chart computed yet" not in live_sub
+
+
+# ===========================================================================
+# Preflop Chart "Configure preflop solve" page — 5 coherent UI fixes.
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# Fix 1: color-code lines by actor — preflop_line_actor(suffix) -> "SB"/"BB".
+# The engine's turn rule at ``||p|<tokens>``: root (no tokens) = SB; play
+# alternates per token, so EVEN token count => SB acts, ODD => BB acts.
+# ---------------------------------------------------------------------------
+
+
+def test_preflop_line_actor_alternates_per_token() -> None:
+    """SB at the root + on even token counts; BB on odd counts."""
+    from ui.views import preflop_chart
+
+    actor = preflop_chart.preflop_line_actor
+    # Root / None -> SB (engine root cur_player == 0 == SB).
+    assert actor(None) == "SB"
+    assert actor("||p|") == "SB"
+    assert actor("|p|") == "SB"  # normalized variant tolerated
+    # The exact spec cases.
+    assert actor("||p|") == "SB"  # 0 tokens
+    assert actor("||p|b200") == "BB"  # 1 token
+    assert actor("||p|b200r400") == "SB"  # 2 tokens
+    assert actor("||p|A") == "BB"  # 1 token (facing root all-in)
+    assert actor("||p|b200A") == "SB"  # 2 tokens
+    assert actor("||p|b200r400A") == "BB"  # 3 tokens
+    # A limp (call) token also counts toward alternation.
+    assert actor("||p|c") == "BB"  # 1 token (BB after SB limp)
+    # Undecodable grammar falls back to the root actor (SB).
+    assert actor("||p|zzz") == "SB"
+
+
+def test_preflop_line_actor_color_distinct_per_actor() -> None:
+    """SB and BB map to two distinct theme-aware accents."""
+    from ui.views import preflop_chart
+
+    sb = preflop_chart.preflop_line_actor_color("SB")
+    bb = preflop_chart.preflop_line_actor_color("BB")
+    assert sb != bb
+    assert sb.startswith("var(--ps-") and bb.startswith("var(--ps-")
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: clearer labels — actor shown in the selector + "(vs all-in)" reworded.
+# ---------------------------------------------------------------------------
+
+
+def test_preflop_line_label_allin_phrase_override() -> None:
+    """``preflop_line_label`` keeps its default output but accepts a reworded
+    all-in phrase. The base (non-all-in) names are unchanged so existing
+    callers/tests stay valid."""
+    from ui.views import preflop_chart
+
+    label = preflop_chart.preflop_line_label
+    # Unchanged base labels (no all-in).
+    assert label(None) == "Open (RFI)"
+    assert label("||p|") == "Open (RFI)"
+    assert label("||p|b200") == "BB vs open"
+    assert label("||p|b200r400") == "3-bet"
+    # Default all-in phrasing is preserved (back-compat).
+    assert label("||p|A") == "Open (RFI) (vs all-in)"
+    # Reworded phrasing for the selector: unambiguous call/fold framing.
+    selector = label("||p|A", allin_phrase="— facing all-in (call/fold)")
+    assert selector == "Open (RFI) — facing all-in (call/fold)"
+    assert "(vs all-in)" not in selector
+
+
+def test_line_options_show_actor_and_reworded_allin() -> None:
+    """The line-selector options are prefixed with the acting player and use
+    the reworded all-in phrase (no bare contradictory "(vs all-in)")."""
+    from types import SimpleNamespace
+
+    from ui.views import preflop_chart
+
+    lines = ["||p|", "||p|b200", "||p|b200r400", "||p|A"]
+    state = SimpleNamespace(
+        runner=SimpleNamespace(available_preflop_lines=lambda: lines)
+    )
+    opts = preflop_chart._line_options(state)
+    # Root line: SB decides.
+    assert opts["||p|"].startswith("[SB] ")
+    assert "Open (RFI)" in opts["||p|"]
+    # BB-vs-open line: BB decides.
+    assert opts["||p|b200"].startswith("[BB] ")
+    # All-in line is reworded (call/fold framing), not the bare "(vs all-in)".
+    allin_opt = opts["||p|A"]
+    assert "facing all-in (call/fold)" in allin_opt
+    assert "(vs all-in)" not in allin_opt
+
+
+async def test_actor_badge_renders_decides_text(
+    user: User, isolated_state_dir: pathlib.Path
+) -> None:
+    """The grid header carries a "<SB|BB> decides" badge so whose strategy the
+    grid shows is obvious at a glance. At the open/root the SB decides."""
+    await user.open("/")
+    # The badge element is marked ``preflop-chart-actor-badge`` and shows the
+    # root actor (SB) text. ``User.should_see`` matches rendered text.
+    user.find(marker="preflop-chart-actor-badge")
+    await user.should_see("SB decides")
+
+
+# ---------------------------------------------------------------------------
+# Fix 5: iterations no-op clarity — blueprint route greys/annotates iterations.
+# ---------------------------------------------------------------------------
+
+
+def test_range_is_restricted_full_vs_subset() -> None:
+    """A full 1326-combo range is NOT a restriction; a subset IS."""
+    from ui.state import RangeWithFreqs
+    from ui.views import preflop_chart
+
+    full = RangeWithFreqs.full()
+    assert preflop_chart._range_is_restricted(full) is False
+    # A small hard range is a restriction.
+    subset = RangeWithFreqs.from_string("AA, KK, AKs")
+    assert preflop_chart._range_is_restricted(subset) is True
+    # Empty range is not treated as a (live-forcing) restriction.
+    empty = RangeWithFreqs.empty()
+    assert preflop_chart._range_is_restricted(empty) is False
+
+
+def test_next_solve_hits_blueprint_predictor() -> None:
+    """The route predictor: default sizes + full ranges -> blueprint (iters
+    ignored); a restricted range -> live (iters honored)."""
+    from types import SimpleNamespace
+
+    from ui.state import RangeWithFreqs, Spot
+    from ui.views import preflop_chart
+
+    # Default spot: full ranges, default (None) pending sizes -> blueprint.
+    spot = Spot()
+    runner = SimpleNamespace(
+        _pending_preflop_chart_opens=None,
+        _pending_preflop_chart_mults=None,
+    )
+    state = SimpleNamespace(current_spot=spot, runner=runner)
+    assert preflop_chart._next_solve_hits_blueprint(state) is True
+
+    # Restrict the hero range -> live path (iterations matter).
+    spot.ranges = (RangeWithFreqs.from_string("AA, KK"), spot.ranges[1])
+    assert preflop_chart._next_solve_hits_blueprint(state) is False
+
+
+# ---------------------------------------------------------------------------
+# Fix 4: wire Hero/Villain ranges into the solve.
+# ---------------------------------------------------------------------------
+
+
+def test_preflop_holes_from_range_full_returns_none() -> None:
+    """A full range yields None (no restriction); a subset yields explicit
+    [card_int, card_int] holes."""
+    from ui import app
+    from ui.state import RangeWithFreqs
+
+    assert app._preflop_holes_from_range(RangeWithFreqs.full()) is None
+    holes = app._preflop_holes_from_range(RangeWithFreqs.from_string("AA"))
+    assert holes is not None
+    # AA = 6 combos; each a 2-int list.
+    assert len(holes) == 6
+    assert all(len(h) == 2 and all(isinstance(c, int) for c in h) for h in holes)
+
+
+async def test_restricted_range_forces_live_with_holes(
+    user: User,
+    isolated_state_dir: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A restricted Hero range must (a) bypass the blueprint and (b) thread
+    non-None ``hero_holes`` into ``start_preflop_chart``."""
+    from ui.state import RangeWithFreqs, SolveRunner, get_state
+
+    captured: dict[str, Any] = {"called": 0, "kwargs": None}
+
+    def _fake_start(self: Any, config: Any, **kwargs: Any) -> None:
+        captured["called"] += 1
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(SolveRunner, "start_preflop_chart", _fake_start)
+
+    # Track whether the blueprint was even consulted as a hit. The real
+    # try_blueprint_preflop_chart must DECLINE (return False) for a restricted
+    # range so we fall through to the live dispatch.
+    real_try = SolveRunner.try_blueprint_preflop_chart
+    bp_calls: dict[str, Any] = {"result": None}
+
+    def _spy_try(self: Any, **kw: Any) -> bool:
+        out = real_try(self, **kw)
+        bp_calls["result"] = out
+        return out
+
+    monkeypatch.setattr(SolveRunner, "try_blueprint_preflop_chart", _spy_try)
+
+    await user.open("/")
+    state = get_state()
+    # Restrict the Hero range to a hard subset (not the full deck).
+    state.current_spot.ranges = (
+        RangeWithFreqs.from_string("AA, KK, QQ"),
+        RangeWithFreqs.full(),
+    )
+
+    from ui.app import _on_preflop_chart_solve
+
+    with user.client:
+        _on_preflop_chart_solve(state)
+
+    # Blueprint declined (range bypass) -> live dispatch fired with holes.
+    assert bp_calls["result"] is False, (
+        "restricted range must bypass the blueprint (try returned "
+        f"{bp_calls['result']!r})"
+    )
+    assert captured["called"] == 1, "live start_preflop_chart was not called"
+    kwargs = captured["kwargs"]
+    assert kwargs["hero_holes"] is not None, "hero_holes not threaded through"
+    # AA+KK+QQ = 18 combos.
+    assert len(kwargs["hero_holes"]) == 18
+    # Villain was full -> no restriction.
+    assert kwargs["villain_holes"] is None
+
+
+# ---------------------------------------------------------------------------
+# Fix 3: solve-button feedback notifies per route.
+# ---------------------------------------------------------------------------
+
+
+async def test_blueprint_hit_notifies(
+    user: User,
+    isolated_state_dir: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blueprint hit surfaces a 'Loaded precomputed blueprint chart' toast."""
+    from ui.state import SolveRunner, get_state
+
+    # Force a blueprint hit regardless of asset coverage.
+    monkeypatch.setattr(
+        SolveRunner, "try_blueprint_preflop_chart", lambda self, **kw: True
+    )
+
+    await user.open("/")
+    state = get_state()
+    from ui.app import _on_preflop_chart_solve
+
+    with user.client:
+        _on_preflop_chart_solve(state)
+
+    assert user.notify.contains("Loaded precomputed blueprint chart"), (
+        f"blueprint-hit toast not emitted (messages: {user.notify.messages!r})"
+    )
+
+
+async def test_live_solve_notifies(
+    user: User,
+    isolated_state_dir: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live dispatch surfaces a 'Solving live (... iters)' toast."""
+    from ui.state import SolveRunner, get_state
+
+    # Blueprint miss -> live path.
+    monkeypatch.setattr(
+        SolveRunner, "try_blueprint_preflop_chart", lambda self, **kw: False
+    )
+    # Stub the live start so no worker thread / Rust binding is needed.
+    monkeypatch.setattr(
+        SolveRunner, "start_preflop_chart", lambda self, config, **kw: None
+    )
+
+    await user.open("/")
+    state = get_state()
+    state.runner._pending_preflop_chart_iterations = 750
+    from ui.app import _on_preflop_chart_solve
+
+    with user.client:
+        _on_preflop_chart_solve(state)
+
+    assert user.notify.contains("Solving live"), (
+        f"live-solve toast not emitted (messages: {user.notify.messages!r})"
+    )
+    assert user.notify.contains("750"), (
+        f"live-solve toast missing iter count (messages: {user.notify.messages!r})"
+    )

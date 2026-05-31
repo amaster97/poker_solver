@@ -950,6 +950,16 @@ class SolveRunner:
         self._pending_preflop_chart_opens: list[float] | None = None
         self._pending_preflop_chart_mults: list[float] | None = None
         self._pending_preflop_chart_iterations: int | None = None
+        # Restricted Hero/Villain hole enumerations stashed by the dispatch
+        # handler at click time. ``None`` => full 1326 (no restriction). A
+        # non-None value is a list of ``[card_int, card_int]`` pairs; it both
+        # (a) routes the solve down the LIVE path (the blueprint asset is
+        # full-range-only — see ``_preflop_custom_range_bypass_blueprint``)
+        # and (b) is forwarded into ``solve_hunl_preflop_rvr`` so the chart
+        # reflects the restricted range. Per-combo weights are NOT sent
+        # (uniform-within-enumeration); fine for hard ranges.
+        self._pending_preflop_chart_hero_holes: list[list[int]] | None = None
+        self._pending_preflop_chart_villain_holes: list[list[int]] | None = None
         # Task #68 Phase 6: blueprint-vs-live routing metadata. The
         # preflop chart + chained tab read these to render a "source"
         # badge under each chart so the user can see whether the
@@ -1211,6 +1221,24 @@ class SolveRunner:
             is not None
         )
 
+    def _preflop_custom_range_bypass_blueprint(self) -> bool:
+        """Whether a restricted Hero/Villain range must force the LIVE path.
+
+        The blueprint asset is solved against the FULL deck (all 1326 combos
+        per player); it cannot represent a restricted range. The dispatch
+        handler stashes a non-``None`` hole enumeration on
+        ``self._pending_preflop_chart_{hero,villain}_holes`` whenever the
+        corresponding range is a real restriction (not all-169). When either
+        side is restricted we must decline the blueprint and route to a live
+        ``solve_hunl_preflop_rvr`` so the chart reflects the typed range. This
+        is the range analogue of
+        :meth:`_preflop_custom_sizes_bypass_blueprint`.
+        """
+        return (
+            self._pending_preflop_chart_hero_holes is not None
+            or self._pending_preflop_chart_villain_holes is not None
+        )
+
     def try_blueprint_preflop_chart(
         self,
         *,
@@ -1272,6 +1300,19 @@ class SolveRunner:
                     wall_time_s=0.0,
                     confidence=(note or "custom action sizes")
                     + " (live solve required)",
+                )
+            return False
+
+        # U(range): a restricted Hero/Villain range must ALSO bypass the
+        # (full-range-only) blueprint and route to a live solve so the chart
+        # reflects the typed range. The dispatch handler has already stashed
+        # the restricted hole enumeration(s) on the runner at click time.
+        if self._preflop_custom_range_bypass_blueprint():
+            with self._lock:
+                self.preflop_route_info = RouteInfo(
+                    source=SourceLabel.LIVE,
+                    wall_time_s=0.0,
+                    confidence="custom range (live solve required)",
                 )
             return False
 

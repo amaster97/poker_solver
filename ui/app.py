@@ -855,6 +855,50 @@ def _open_library() -> None:
         dialog.open()
 
 
+_FULL_RANGE_COMBO_COUNT = 1326
+
+
+def _preflop_holes_from_range(range_with_freqs: Any) -> list[list[int]] | None:
+    """Convert a ``RangeWithFreqs`` to the engine's hole enumeration.
+
+    Returns ``None`` when the range is the full deck (all 1326 combos) or is
+    empty/missing — i.e. NOT a real restriction, so the (full-range) blueprint
+    can still serve it. Otherwise returns a list of ``[card_int, card_int]``
+    pairs (only combos with weight > 0), which the dispatch handler both
+    forwards to ``solve_hunl_preflop_rvr`` and uses to force the live path.
+
+    CAVEAT: per-combo fractional weights are NOT propagated to the engine
+    (uniform-within-enumeration) — fine for hard ranges. See
+    ``poker_solver.solver_router._holes_from_range_override`` for the same
+    limitation.
+    """
+    if range_with_freqs is None:
+        return None
+    base = getattr(range_with_freqs, "base_range", None)
+    if base is None:
+        return None
+    try:
+        from poker_solver.card import card_to_int
+
+        present = [
+            combo
+            for combo in base
+            if range_with_freqs.frequency_of(combo.cards) > 0.0
+        ]
+    except Exception:  # noqa: BLE001 — defensive: never break the solve click
+        logger.exception("preflop chart: range->holes conversion failed")
+        return None
+    n = len(present)
+    # Full deck (or, defensively, anything >= 1326) is NOT a restriction.
+    if n == 0 or n >= _FULL_RANGE_COMBO_COUNT:
+        return None
+    holes: list[list[int]] = []
+    for combo in present:
+        c0, c1 = combo.cards
+        holes.append([card_to_int(c0), card_to_int(c1)])
+    return holes
+
+
 def _on_preflop_chart_solve(state: AppState) -> None:
     """Solve button handler for the preflop chart widget (task #55).
 
@@ -880,6 +924,19 @@ def _on_preflop_chart_solve(state: AppState) -> None:
     open_sizes = getattr(state.runner, "_pending_preflop_chart_opens", None)
     reraise_mults = getattr(state.runner, "_pending_preflop_chart_mults", None)
 
+    # Wire Hero/Villain ranges into the solve. A range that is a real
+    # restriction (not the full 1326-combo deck) is converted to an explicit
+    # hole enumeration; a full deck yields ``None`` (no restriction). The
+    # holes are stashed on the runner BEFORE the blueprint try so
+    # ``_preflop_custom_range_bypass_blueprint`` forces the live path for a
+    # restricted range (the blueprint asset is full-range-only), and are
+    # forwarded into ``start_preflop_chart`` so the chart reflects the range.
+    # NOTE: per-combo weights are not sent (uniform-within-enumeration).
+    hero_holes = _preflop_holes_from_range(spot.ranges[0])
+    villain_holes = _preflop_holes_from_range(spot.ranges[1])
+    state.runner._pending_preflop_chart_hero_holes = hero_holes  # type: ignore[attr-defined]
+    state.runner._pending_preflop_chart_villain_holes = villain_holes  # type: ignore[attr-defined]
+
     # Task #68 Phase 6: try blueprint first. When the user's
     # (stack_bb, ante) is covered by the Premium-A asset bundle (or
     # falls between two anchor depths), this returns instantly without
@@ -902,6 +959,16 @@ def _on_preflop_chart_solve(state: AppState) -> None:
         logger.exception("blueprint preflop chart lookup raised: %s", exc)
         blueprint_hit = False
     if blueprint_hit:
+        # Solve-button feedback: a blueprint hit is instant and otherwise
+        # silent, so an unchanged spot feels like the button did nothing.
+        # Tell the user the chart was served from the precomputed asset and
+        # how to trigger a live solve.
+        ui.notify(
+            f"Loaded precomputed blueprint chart ({int(spot.stacks_bb[0])}BB). "
+            "Change bet sizes or ranges to solve live.",
+            type="positive",
+            position="top",
+        )
         # Refresh the chart widget so the badge + cells update on the
         # current frame; the polling timer would catch it on the next
         # tick anyway, but instant refresh feels snappier.
@@ -974,6 +1041,8 @@ def _on_preflop_chart_solve(state: AppState) -> None:
             iterations=int(iterations),
             open_sizes_bb=list(open_sizes) if open_sizes else None,
             reraise_multipliers=list(reraise_mults) if reraise_mults else None,
+            hero_holes=hero_holes,
+            villain_holes=villain_holes,
         )
     except RuntimeError:
         ui.notify(
@@ -991,6 +1060,15 @@ def _on_preflop_chart_solve(state: AppState) -> None:
             multi_line=True,
         )
         return
+
+    # Solve-button feedback: the live path runs on a worker thread and the
+    # only other signal is the source badge flipping to "live", so confirm the
+    # dispatch (with the iteration count) the moment the user clicks.
+    ui.notify(
+        f"Solving live ({int(iterations)} iters)…",
+        type="info",
+        position="top",
+    )
 
 
 def _on_solve(state: AppState) -> None:

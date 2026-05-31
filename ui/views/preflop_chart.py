@@ -347,7 +347,47 @@ _ROOT_DEPTH_LABELS: dict[int, str] = {
 }
 
 
-def preflop_line_label(suffix: str | None) -> str:
+def _line_body(suffix: str | None) -> str:
+    """Strip the constant root marker (``||p|`` or normalized ``|p|``).
+
+    Returns the post-marker token body (possibly empty for the root).
+    Shared by :func:`preflop_line_label`, :func:`preflop_line_actor`, and
+    :func:`_is_open_root_line` so they decode the suffix identically.
+    """
+    if suffix is None:
+        return ""
+    body = suffix
+    if body.startswith("||p|"):
+        body = body[len("||p|") :]
+    elif body.startswith("|p|"):  # defensive: tolerate a normalized variant
+        body = body[len("|p|") :]
+    return body
+
+
+def preflop_line_actor(suffix: str | None) -> str:
+    """Return which player ACTS at node ``suffix`` — ``"SB"`` or ``"BB"``.
+
+    Decodes the post-``||p|`` token body (``c``/``b<amt>``/``r<amt>``/``A``)
+    and applies the engine's turn rule: the root (no tokens) is the SB's first
+    decision, and play alternates with each token, so an EVEN token count means
+    the SB acts and an ODD count means the BB acts. ``None`` / the bare root /
+    an undecodable suffix all map to ``"SB"`` (the root actor).
+
+    Engine-confirmed: the preflop root has ``cur_player == 0`` (SB).
+    """
+    body = _line_body(suffix)
+    if body == "":
+        return "SB"
+    tokens = _LINE_TOKEN_RE.findall(body)
+    # Undecodable grammar -> treat as the root actor so the badge still renders.
+    if "".join(tokens) != body:
+        return "SB"
+    return "SB" if len(tokens) % 2 == 0 else "BB"
+
+
+def preflop_line_label(
+    suffix: str | None, *, allin_phrase: str = "(vs all-in)"
+) -> str:
     """Map a raw Rust history suffix to a human-readable poker line name.
 
     ``suffix`` is an entry from
@@ -356,17 +396,18 @@ def preflop_line_label(suffix: str | None) -> str:
     for the opener facing a 3-bet). ``None`` or the bare root maps to
     "Open (RFI)".
 
+    ``allin_phrase`` is appended (space-separated) when the line ends in an
+    all-in token. It defaults to ``"(vs all-in)"`` (the historical wording);
+    the line selector passes ``"— facing all-in (call/fold)"`` so the option
+    reads unambiguously as "the actor's call/fold decision facing a shove"
+    rather than the contradictory bare ``(vs all-in)``.
+
     Falls back to the raw suffix (wrapped) when the grammar can't be decoded
     so an unrecognized node is still selectable.
     """
     if suffix is None:
         return _ROOT_DEPTH_LABELS[0]
-    body = suffix
-    # Strip the constant root marker prefix if present.
-    if body.startswith("||p|"):
-        body = body[len("||p|") :]
-    elif body.startswith("|p|"):  # defensive: tolerate a normalized variant
-        body = body[len("|p|") :]
+    body = _line_body(suffix)
     if body == "":
         return _ROOT_DEPTH_LABELS[0]
 
@@ -394,7 +435,7 @@ def preflop_line_label(suffix: str | None) -> str:
         label = base
 
     if facing_allin:
-        label = f"{label} (vs all-in)"
+        label = f"{label} {allin_phrase}"
     return label
 
 
@@ -498,12 +539,7 @@ def _is_open_root_line(suffix: str | None) -> bool:
     """
     if suffix is None:
         return True
-    body = suffix
-    if body.startswith("||p|"):
-        body = body[len("||p|") :]
-    elif body.startswith("|p|"):  # defensive: tolerate a normalized variant
-        body = body[len("|p|") :]
-    return body == ""
+    return _line_body(suffix) == ""
 
 
 def _line_chart_result(state: AppState) -> dict[str, Any] | None:
@@ -623,6 +659,13 @@ def render(state: AppState, on_solve: Callable[[], None] | None = None) -> None:
     def _line_selector_slot() -> None:
         _render_line_selector(state, _on_line_change)
 
+    # Actor badge: a colored "<SB|BB> decides" chip directly above the grid so
+    # the user can tell at a glance whose strategy the 13x13 grid is showing
+    # for the currently-selected line. Refreshable so it tracks line changes.
+    @ui.refreshable  # type: ignore[untyped-decorator]
+    def _actor_badge_slot() -> None:
+        _render_actor_badge(state)
+
     def _refresh_all() -> None:
         try:
             _subtitle_slot.refresh()
@@ -632,6 +675,10 @@ def render(state: AppState, on_solve: Callable[[], None] | None = None) -> None:
             _line_selector_slot.refresh()
         except Exception:  # noqa: BLE001
             logger.exception("preflop chart line selector refresh failed")
+        try:
+            _actor_badge_slot.refresh()
+        except Exception:  # noqa: BLE001
+            logger.exception("preflop chart actor badge refresh failed")
         try:
             _grid_slot.refresh()
         except Exception:  # noqa: BLE001
@@ -667,6 +714,10 @@ def render(state: AppState, on_solve: Callable[[], None] | None = None) -> None:
                 # Line/node selector sits above the grid so the user picks
                 # which node (open / BB vs open / 3-bet / 4-bet) to view.
                 _line_selector_slot()
+                # Actor badge ("<SB|BB> decides") immediately above the grid,
+                # colored per actor, so whose strategy the grid shows is
+                # obvious at a glance.
+                _actor_badge_slot()
                 _grid_slot()
                 # Source badge sits directly under the chart grid so the
                 # user sees the route on the same eye-line as the data.
@@ -824,27 +875,134 @@ def _badge_color(info: Any) -> str:
     return "var(--ps-text-fainter)"
 
 
+# Reworded all-in phrase shown in the line selector so "(vs all-in)" reads as
+# the actor's call/fold decision facing a shove rather than a contradiction.
+_SELECTOR_ALLIN_PHRASE = "— facing all-in (call/fold)"
+
+# Theme-aware accents that distinguish the two actors at a glance. SB gets the
+# cool/blue ``--ps-accent-reach``; BB gets the warm/amber ``--ps-accent-warn``.
+# Both vars are defined for the dark AND light themes (ui/app.py CSS block).
+_ACTOR_COLOR: dict[str, str] = {
+    "SB": "var(--ps-accent-reach)",
+    "BB": "var(--ps-accent-warn)",
+}
+
+
+def preflop_line_actor_color(actor: str) -> str:
+    """Theme-aware accent color for an actor (``"SB"`` / ``"BB"``)."""
+    return _ACTOR_COLOR.get(actor, "var(--ps-text)")
+
+
+_FULL_RANGE_COMBO_COUNT = 1326
+
+
+def _range_is_restricted(range_with_freqs: Any) -> bool:
+    """True when ``range_with_freqs`` is a real restriction (not all-169).
+
+    A restriction forces the live path (the blueprint asset is full-range
+    only). Mirrors ``ui.app._preflop_holes_from_range``'s full-vs-restricted
+    test: the full 1326-combo deck (or a defensively over-full count) is NOT a
+    restriction; anything fewer (and non-empty) is.
+    """
+    if range_with_freqs is None:
+        return False
+    base = getattr(range_with_freqs, "base_range", None)
+    if base is None:
+        return False
+    try:
+        n = sum(
+            1
+            for combo in base
+            if range_with_freqs.frequency_of(combo.cards) > 0.0
+        )
+    except Exception:  # noqa: BLE001
+        return False
+    return 0 < n < _FULL_RANGE_COMBO_COUNT
+
+
+def _next_solve_hits_blueprint(state: AppState) -> bool:
+    """Predict whether the NEXT Solve click would be served by the blueprint.
+
+    The dispatch (``ui.app._on_preflop_chart_solve``) tries the blueprint
+    first and only falls through to a live solve when a bypass is active:
+    custom action sizes (``_custom_sizes_bypass_label``) OR a restricted
+    Hero/Villain range. When NEITHER bypass applies the route attempts the
+    blueprint (and the shipped Premium-A bundle covers the common depths), so
+    the Iterations input is a no-op there. This drives the Fix-5 greying.
+
+    Conservative: if either bypass is active we report ``False`` (live), so we
+    never grey the Iterations input when it actually matters.
+    """
+    if _custom_sizes_bypass_label(state) is not None:
+        return False
+    spot = getattr(state, "current_spot", None)
+    ranges = getattr(spot, "ranges", None) if spot is not None else None
+    restricted = bool(ranges) and (
+        _range_is_restricted(ranges[0]) or _range_is_restricted(ranges[1])
+    )
+    return not restricted
+
+
 def _line_options(state: AppState) -> dict[str, str]:
     """Build the {suffix -> human label} option map for the line selector.
+
+    Each label is prefixed with the acting player (``[SB]`` / ``[BB]``) so the
+    user can tell whose strategy a line shows directly in the dropdown, and the
+    all-in line is reworded via ``_SELECTOR_ALLIN_PHRASE`` so ``(vs all-in)`` no
+    longer reads as a contradiction.
 
     Disambiguates collisions (two suffixes mapping to the same human label —
     e.g. multiple 3-bet sub-nodes) by appending the raw suffix so every
     option stays distinct and addressable.
     """
     lines = _available_lines(state)
-    raw: list[tuple[str, str]] = [(ln, preflop_line_label(ln)) for ln in lines]
+    raw: list[tuple[str, str, str]] = [
+        (ln, preflop_line_actor(ln), preflop_line_label(ln, allin_phrase=_SELECTOR_ALLIN_PHRASE))
+        for ln in lines
+    ]
     label_counts: dict[str, int] = {}
-    for _, lab in raw:
+    for _, _actor, lab in raw:
         label_counts[lab] = label_counts.get(lab, 0) + 1
     options: dict[str, str] = {}
-    for suffix, lab in raw:
+    for suffix, actor, lab in raw:
         if label_counts[lab] > 1:
             # Show the distinguishing token tail so duplicates are unique.
             tail = suffix[len("||p|") :] if suffix.startswith("||p|") else suffix
-            options[suffix] = f"{lab}  ({tail or 'root'})"
+            options[suffix] = f"[{actor}] {lab}  ({tail or 'root'})"
         else:
-            options[suffix] = lab
+            options[suffix] = f"[{actor}] {lab}"
     return options
+
+
+def _render_actor_badge(state: AppState) -> None:
+    """Render the colored "<SB|BB> decides" badge for the selected line.
+
+    Makes whose strategy the grid shows unambiguous: at the open/root the SB
+    decides; alternating per action thereafter (see :func:`preflop_line_actor`).
+    The chip is tinted with the actor's theme-aware accent so SB vs BB reads at
+    a glance, matching the ``[SB]``/``[BB]`` prefix in the line selector.
+    """
+    ui = _import_nicegui()
+    actor = preflop_line_actor(_selected_line(state))
+    color = preflop_line_actor_color(actor)
+    full = "Small blind" if actor == "SB" else "Big blind"
+    with (
+        ui.element("div")
+        .mark("preflop-chart-actor-badge")
+        .style(
+            "display:inline-flex;align-items:center;gap:6px;margin-bottom:6px;"
+            f"padding:3px 10px;border-radius:10px;border:1px solid {color};"
+            "background:var(--ps-strip-bg);font-size:11px;font-weight:700;"
+            "letter-spacing:0.04em"
+        )
+    ):
+        ui.element("div").style(
+            f"width:8px;height:8px;border-radius:50%;background:{color}"
+        )
+        ui.label(f"{actor} decides").style(f"color:{color}")
+        ui.label(f"({full} acts on this line)").style(
+            "color:var(--ps-text-fainter);font-weight:400;letter-spacing:0"
+        )
 
 
 def _render_line_selector(
@@ -1058,6 +1216,7 @@ def _render_input_panel(
             ranges = list(state.current_spot.ranges)
             ranges[0] = new_range
             state.current_spot.ranges = (ranges[0], ranges[1])
+            _sync_iter_route()
             refresh_after_change()
 
         hero_input.on_value_change(_on_hero_range_change)
@@ -1085,6 +1244,7 @@ def _render_input_panel(
             ranges = list(state.current_spot.ranges)
             ranges[1] = new_range
             state.current_spot.ranges = (ranges[0], ranges[1])
+            _sync_iter_route()
             refresh_after_change()
 
         villain_input.on_value_change(_on_villain_range_change)
@@ -1128,6 +1288,39 @@ def _render_input_panel(
 
             iter_input.on_value_change(_on_iter_change)
 
+        # Fix 5: when the next solve would be served from the (instant)
+        # blueprint, iterations are ignored — grey the input + annotate so it
+        # doesn't look broken. The annotation re-evaluates whenever the
+        # range/size inputs change (those handlers call ``_sync_iter_route``).
+        @ui.refreshable  # type: ignore[untyped-decorator]
+        def _iter_hint_slot() -> None:
+            if _next_solve_hits_blueprint(state):
+                ui.label(
+                    "Iterations ignored on the blueprint route — fixed. "
+                    "Change bet sizes or ranges to solve live."
+                ).mark("preflop-chart-iterations-hint").style(
+                    "color:var(--ps-text-fainter);font-size:11px;"
+                    "font-style:italic;margin-top:-4px;margin-bottom:4px"
+                )
+
+        def _sync_iter_route() -> None:
+            """Grey/enable the Iterations input to match the predicted route."""
+            blueprint = _next_solve_hits_blueprint(state)
+            try:
+                iter_input.set_enabled(not blueprint)
+                # Visually grey when disabled so the no-op reads at a glance.
+                iter_input.style(
+                    "opacity:0.45" if blueprint else "opacity:1.0"
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("preflop chart: iter route sync failed")
+            try:
+                _iter_hint_slot.refresh()
+            except Exception:  # noqa: BLE001
+                logger.exception("preflop chart: iter hint refresh failed")
+
+        _iter_hint_slot()
+
         # Action menu inputs (open sizes / reraise multipliers per #32).
         opens_default = ",".join(f"{x:g}" for x in _DEFAULT_OPEN_SIZES_BB)
         opens_input = (
@@ -1148,6 +1341,8 @@ def _render_input_panel(
                     type="negative",
                     position="top",
                 )
+            # Editing sizes may flip blueprint <-> live; re-grey iterations.
+            _sync_iter_route()
 
         opens_input.on_value_change(_on_opens_change)
 
@@ -1170,6 +1365,8 @@ def _render_input_panel(
                     type="negative",
                     position="top",
                 )
+            # Editing multipliers may flip blueprint <-> live; re-grey iters.
+            _sync_iter_route()
 
         mults_input.on_value_change(_on_mults_change)
 
@@ -1178,6 +1375,11 @@ def _render_input_panel(
         # Lazy attribute assignment keeps the dataclass unchanged.
         state.current_spot.preflop_chart_opens = opens_input  # type: ignore[attr-defined]
         state.current_spot.preflop_chart_mults = mults_input  # type: ignore[attr-defined]
+
+        # Now that the size widgets are stashed (so ``_custom_sizes_bypass_label``
+        # can read them), set the initial Iterations greying to match the
+        # predicted route. Subsequent edits re-sync via the change handlers.
+        _sync_iter_route()
 
         # Solve button.
         def _click_solve() -> None:
