@@ -76,6 +76,7 @@ import logging
 from typing import TYPE_CHECKING, Any, Callable
 
 from poker_solver.card import RANKS, SUITS, Card
+from ui.views._cards import board_html, card_html
 
 # PR #147 owns the canonical preflop grid primitives — re-export them here
 # so the chained tab keeps a stable import surface (the chained-tab smoke
@@ -669,7 +670,10 @@ def _card_grid(
                 "border rounded px-2 py-0 items-center gap-1 bg-gray-100 "
                 "dark:bg-gray-800"
             ):
-                ui.label(str(card)).classes("font-mono")
+                # Colored suit-symbol graphic (4-color deck). The span keeps
+                # the canonical 2-char ``aria-label`` (e.g. "As") so the
+                # text/marker contract + screen-readers stay intact.
+                ui.html(card_html(card))
 
     with ui.grid(columns=13).classes("gap-1"):
         # Suits down (s, h, d, c), ranks across high->low so the label
@@ -1285,10 +1289,16 @@ def _render_flop_step(
                 confidence=f"live subgame ({len(tokens)}-token line)",
             )
 
-        ui.label(
-            f"{hero_cls} on {''.join(str(c) for c in board_tuple)} "
-            f"after {format_action_sequence(tokens)}"
-        ).style("color:var(--ps-text);font-weight:600;margin-bottom:6px")
+        # "{class} on {board} after {line}" — the board renders as colored
+        # suit-symbol graphics (the spans carry canonical aria-labels), the
+        # surrounding text stays plain.
+        with ui.row().style(
+            "align-items:center;gap:6px;margin-bottom:6px;"
+            "color:var(--ps-text);font-weight:600"
+        ).mark("chained-tab-flop-header"):
+            ui.label(f"{hero_cls} on")
+            ui.html(board_html(list(board_tuple), sep=""))
+            ui.label(f"after {format_action_sequence(tokens)}")
         if rec:
             _render_freq_bars(state, rec, "chained-tab-postflop-row")
         else:

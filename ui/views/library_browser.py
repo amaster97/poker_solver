@@ -36,6 +36,9 @@ from typing import TYPE_CHECKING, Any
 
 from nicegui import ui
 
+from poker_solver.card import Card, parse_board
+from ui.views._cards import board_html
+
 logger = logging.getLogger(__name__)
 
 # Type-only import: Agent A owns ``AppState``. Importing it under
@@ -104,11 +107,38 @@ def _format_meta_line(meta: Any) -> str:
 
 
 def _row_title(meta: Any) -> str:
-    """Human-friendly title for a library row."""
+    """Human-friendly title for a library row (text-only fallback).
+
+    Kept for any text/marker callers; the dialog now renders the board
+    portion as colored card graphics via :func:`_row_title_parts`.
+    """
     label = (meta.label or "").strip() or f"spot_{meta.spot_id[:8]}"
     if meta.board_signature:
         return f"{label} on {meta.board_signature}"
     return label
+
+
+def _row_title_parts(meta: Any) -> tuple[str, list[Card] | None]:
+    """Split a row title into ``(text_prefix, board_cards)``.
+
+    ``board_signature`` is a concatenation of canonical 2-char card codes
+    (e.g. ``"7s8hTs"``); when present (and parseable) the board portion is
+    returned as ``Card`` objects so the row can render real card graphics.
+    Returns ``board_cards=None`` for preflop spots (no board) or if the
+    signature is not a clean card string.
+    """
+    label = (meta.label or "").strip() or f"spot_{meta.spot_id[:8]}"
+    sig = getattr(meta, "board_signature", "") or ""
+    if not sig:
+        return label, None
+    try:
+        cards = parse_board(sig)
+    except (ValueError, TypeError):
+        # Non-card signature (e.g. a stub shorthand) — keep it as text.
+        return f"{label} on {sig}", None
+    if not cards:
+        return label, None
+    return f"{label} on", cards
 
 
 def render(state: AppState) -> Any:
@@ -243,9 +273,17 @@ def render(state: AppState) -> Any:
                     )
                     row.mark(f"library-row-{short}")
                     with row:
-                        ui.label(_row_title(meta)).classes(
-                            "font-mono text-sm flex-grow"
-                        )
+                        # Title: "{label} on {board}" — the board portion is
+                        # rendered as colored card graphics (canonical
+                        # aria-labels preserved) when the signature parses;
+                        # otherwise it stays plain text.
+                        title_prefix, board_cards = _row_title_parts(meta)
+                        with ui.row().classes(
+                            "items-center gap-1 flex-grow font-mono text-sm"
+                        ):
+                            ui.label(title_prefix)
+                            if board_cards:
+                                ui.html(board_html(board_cards, sep=""))
                         ui.label(_format_meta_line(meta)).classes(
                             "font-mono text-xs"
                         ).style("color:var(--ps-text-faint)")
