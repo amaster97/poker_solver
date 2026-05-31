@@ -71,5 +71,13 @@ the detailed record of what happened. Branch: `fix/gui-audit-message-leaks` (UNM
 - [?] **POSTFLOP TIER / CONVERGENCE — likely root of the user's "results just say fold/call" complaint.** UI tiers (run_panel.py): Draft=200 / **Standard=500 (default)** / Tight=1000 / Library=2000 iters — set by MEASURED *exploitability* (Q3 LOCKED). BUT [[project_postflop_convergence]] (backend finding): postflop per-hand EVs are DEGENERATE at 100-150 iters (dominated hands pinned 0/>pot), AA/KK only 0.001→0.267 by 1000it, river baseline=100k. So **low exploitability ≠ converged per-hand EVs** → at the default Standard=500 the combo-inspector EVs/strategies are under-converged/degenerate (what the user SAW). RECOMMENDATION (product + backend, NOT a unilateral change since tiers are locked/measured): once on main's fast engine, **raise the postflop default tier** (or split exploitability-tier vs EV-convergence) so per-hand EVs are trustworthy; balance vs Marcus's <30s tolerance. Surface to user.
 - [ ] Open-chart `AA` cell read `C36` once (looks off for a standard RFI) — blueprint-data/projection; verify with engine/blueprint review.
 
-## IDEAS / TO-ADD
+## OTHER ASPECTS OF THE SOLVER — standing mandate (user 2026-05-30: "continue to keep working on other aspects of the solver")
+Forward roadmap once the merge + verification land (pick high-value, non-conflicting with the engine/`feat/ds-*` tracks):
+- [ ] **Chain solve (b) Tier B** — turn/river streets, now buildable on main's fast engine (was the only engine-gate).
+- [ ] **Postflop EV-convergence validation** — after raising the postflop tier, confirm combo-inspector EVs are non-degenerate (AA/KK etc. sane), per [[project_postflop_convergence]].
+- [ ] **Poker-intuition validation gauntlet** — run MDF / polarization / set-on-board / fold-equity sanity on the merged-engine GUI outputs (use the `poker-validator` agent); a correctness axis beyond "it renders".
+- [ ] **Persona-qualitative-test on the merged engine** — run each Part-B persona's task through the GUI end-to-end (single-solve) and confirm it's COMPUTABLE on the fast engine (the user's "back of mind" item; postflop personas were engine-gated).
+- [ ] **Preflop-chart `AA C36` oddity** — the open-RFI chart showed AA call-36% once (looks off for a standard RFI); investigate vs the blueprint projection.
+- [ ] **Visual dress-up pass** — matrix color gradients / spacing (the non-engine-gated polish).
+- [ ] **Docs/USAGE refresh** — the GUI + engine (bet-size menu, RvR-default, card graphics, walkthrough) changed a lot; update user-facing docs.
 - _(append new items here as they surface)_
