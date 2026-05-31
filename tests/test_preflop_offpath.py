@@ -15,10 +15,15 @@ from __future__ import annotations
 import copy
 
 from poker_solver.preflop_offpath import (
+    _ALL_IN_DOMINANT_THRESHOLD,
+    _FOLD_DOMINANT_THRESHOLD,
     _FOLD_LABEL,
+    _bet_labels,
     clean_off_path,
     mark_off_path,
+    mark_off_path_with_reason,
     project_by_line,
+    reach_and_fold_dominant,
     strategy_table,
 )
 
@@ -498,3 +503,303 @@ def test_regression_other_pure_size_mixer_in_range_real_blueprint() -> None:
     assert "KK" in node
     off = mark_off_path(by_line, _REAL_LINE, list(node.keys()))
     assert off["KK"] is False, "KK falsely greyed off-path at a multi-size line"
+
+
+# --------------------------------------------------------------------------- #
+# Rule 1: all-in carries over
+# --------------------------------------------------------------------------- #
+#
+# After a hand goes all-in there is NO further voluntary action, so it is
+# off-path on EVERY deeper line. The ancestor-dominance walk must therefore
+# check the all-in mass (exact ``all_in`` label) the same way it checks fold;
+# previously only fold was checked, so an all-in-dominant hand was wrongly left
+# in-range on a size-raise continuation. The all-in mass is read from the EXACT
+# ``all_in`` label and is NEVER summed into the bet/raise aggregation.
+
+
+_SYNTH_LINE = "||p|b100r600"  # SB opens b100, BB 3-bets r600 -> SB acts (2 toks)
+
+
+def _all_in_carryover_by_line() -> dict[str, dict[str, dict[str, float]]]:
+    """A tree gating the SB on the displayed line ``||p|b100r600``.
+
+    On ``||p|b100r600`` (SB opens ``b100``, BB 3-bets ``r600``) the actor facing
+    the 3-bet is the SB (even token count), so the SB's OWN gating node is the
+    root ``||p|``. We pin the root so that ``ALLIN`` jams 100% (-> carries over
+    OFF-PATH on the deeper line), ``RAISER`` size-raises 100% (-> on-path), and
+    ``FOLDER`` folds 100% (-> off-path via the fold rule).
+    """
+    classes = ("ALLIN", "RAISER", "FOLDER")
+
+    def root(cls: str) -> dict[str, float]:
+        if cls == "ALLIN":
+            # All-in 100% at the SB's own (root) node -> carries over off-path.
+            return {"fold": 0.0, "call": 0.0, "open_2": 0.0, "all_in": 1.0}
+        if cls == "RAISER":
+            return {"fold": 0.0, "call": 0.0, "open_2": 1.0, "all_in": 0.0}
+        return {"fold": 1.0, "call": 0.0, "open_2": 0.0, "all_in": 0.0}
+
+    # ``b100`` is the SB's open token (rank->label: open_2). The deeper ``r600``
+    # is the BB's 3-bet token (opponent node; does not gate the SB's reach).
+    return {
+        "||p|": {c: root(c) for c in classes},
+        "||p|b100": {c: {"fold": 0.0, "call": 1.0} for c in classes},
+        _SYNTH_LINE: {c: {"fold": 0.0, "call": 1.0} for c in classes},
+    }
+
+
+def test_all_in_dominant_threshold_mirrors_fold() -> None:
+    """The all-in dominance threshold mirrors the fold threshold (0.99)."""
+    assert _ALL_IN_DOMINANT_THRESHOLD == _FOLD_DOMINANT_THRESHOLD == 0.99
+
+
+def test_all_in_not_summed_into_bet_labels_aggregation() -> None:
+    """``all_in`` is NEVER folded into the bet/raise aggression mass.
+
+    ``_bet_labels`` returns only ``open_*`` / ``raise_*`` (the size menu), so a
+    hand that goes all-in 70% and size-raises 30% credits reach 0.30 on a
+    bet/raise token, NOT 1.0.
+    """
+    node_strat = {
+        "open_2": {},
+        "open_3": {},
+        "all_in": {},
+        "call": {},
+        "fold": {},
+    }
+    # _bet_labels takes a NODE (dict of class -> strat); build a 1-class node.
+    node = {"X": node_strat}
+    labels = _bet_labels(node)
+    assert "all_in" not in labels
+    assert set(labels) == {"open_2", "open_3"}
+
+    # And the reach aggregation must not pick up the all-in mass. A hand that
+    # size-raises 0.30 (0.1 + 0.2) and jams 0.70 should credit reach 0.30 on a
+    # bet/raise continuation token. We display ``||p|b100r600`` (SB opens, BB
+    # 3-bets) so the SB's OWN root node gates the reach via its ``b100`` open.
+    by_line = {
+        "||p|": {
+            "X": {"open_2": 0.1, "open_3": 0.2, "all_in": 0.7, "fold": 0.0}
+        },
+        "||p|b100": {"X": {"fold": 0.0, "call": 1.0}},
+        "||p|b100r600": {"X": {"fold": 0.0, "call": 1.0}},
+    }
+    from poker_solver.preflop_offpath import reach
+
+    # The ``b100`` open token at the root (SB's own node) -> bet token -> sums
+    # the bet/raise mass (0.1 + 0.2 = 0.3); all_in (0.7) is excluded.
+    assert abs(reach(by_line, "X", "||p|b100r600") - 0.3) < 1e-9
+
+
+def test_all_in_ancestor_marks_off_path_on_size_raise_line() -> None:
+    """A hand all-in 100% at an ancestor decision node is off-path (reason
+    ``all_in``) on a deeper size-raise continuation line; a genuine size-raiser
+    is in-range and a folder is off-path (reason ``folded``)."""
+    by_line = _all_in_carryover_by_line()
+    line = _SYNTH_LINE
+    classes = ["ALLIN", "RAISER", "FOLDER"]
+    off = mark_off_path(by_line, line, classes)
+    reasons = mark_off_path_with_reason(by_line, line, classes)
+    # ALLIN jammed 100% at the root -> carries over off-path on this line.
+    assert off["ALLIN"] is True
+    assert reasons["ALLIN"] == "all_in"
+    # RAISER took the size-raise (b100 == open_2) -> in-range.
+    assert off["RAISER"] is False
+    assert reasons["RAISER"] is None
+    # FOLDER folded 100% at the root -> off-path via the fold rule.
+    assert off["FOLDER"] is True
+    assert reasons["FOLDER"] == "folded"
+
+
+def test_all_in_reach_and_fold_dominant_boolean() -> None:
+    """The backward-compat ``reach_and_fold_dominant`` boolean is True for an
+    all-in-dominant hand (the all-in block flips it, not just fold)."""
+    by_line = _all_in_carryover_by_line()
+    rfd = reach_and_fold_dominant(by_line, "ALLIN", _SYNTH_LINE)
+    assert rfd is not None
+    _reach, blocked = rfd
+    assert blocked is True
+
+
+# --------------------------------------------------------------------------- #
+# Rule 2: reason-aware off-path mapping (synthetic, deterministic)
+# --------------------------------------------------------------------------- #
+
+
+def _reason_by_line() -> dict[str, dict[str, dict[str, float]]]:
+    """A tree exercising each reason at the SB's OWN (root) gating node.
+
+    The displayed line is ``||p|b100r600`` (SB opens ``b100``, BB 3-bets
+    ``r600``), so the actor facing the 3-bet is the SB and its OWN gating node is
+    the root ``||p|``. Per-class root strategy:
+      * FOLDER   — folds 100%             -> ``folded``
+      * SHOVER   — all-in 100%            -> ``all_in``
+      * CALLER   — calls 100%             -> ``called_closed`` (line raises on)
+      * MIXER    — size-raises 0.4% only  -> ``low_reach`` (below threshold)
+      * AGGRO    — size-raises 100%       -> on-path (None)
+    """
+    classes = ("FOLDER", "SHOVER", "CALLER", "MIXER", "AGGRO")
+
+    def root(cls: str) -> dict[str, float]:
+        if cls == "FOLDER":
+            return {"fold": 1.0, "call": 0.0, "open_2": 0.0, "all_in": 0.0}
+        if cls == "SHOVER":
+            return {"fold": 0.0, "call": 0.0, "open_2": 0.0, "all_in": 1.0}
+        if cls == "CALLER":
+            return {"fold": 0.0, "call": 1.0, "open_2": 0.0, "all_in": 0.0}
+        if cls == "MIXER":
+            # Tiny aggression mass -> below the reach threshold but NOT call-,
+            # fold- or all-in-dominant -> generic low_reach.
+            return {"fold": 0.3, "call": 0.296, "open_2": 0.004, "all_in": 0.4}
+        # AGGRO size-raises 100% -> on-path.
+        return {"fold": 0.0, "call": 0.0, "open_2": 1.0, "all_in": 0.0}
+
+    return {
+        "||p|": {c: root(c) for c in classes},
+        "||p|b100": {c: {"fold": 0.0, "call": 1.0} for c in classes},
+        _SYNTH_LINE: {c: {"fold": 0.0, "call": 1.0} for c in classes},
+    }
+
+
+def test_reason_mapping_each_code() -> None:
+    """Each reason code is produced by its archetype; the in-range aggressor is
+    ``None``. Priority across classes is folded > all_in > called_closed >
+    low_reach (here each class hits exactly one)."""
+    by_line = _reason_by_line()
+    line = _SYNTH_LINE
+    classes = ["FOLDER", "SHOVER", "CALLER", "MIXER", "AGGRO"]
+    reasons = mark_off_path_with_reason(by_line, line, classes)
+    assert reasons["FOLDER"] == "folded"
+    assert reasons["SHOVER"] == "all_in"
+    assert reasons["CALLER"] == "called_closed"
+    assert reasons["MIXER"] == "low_reach"
+    assert reasons["AGGRO"] is None
+
+
+def test_mark_off_path_bool_matches_reason_map() -> None:
+    """``mark_off_path`` (bool) is consistent with the reason map: off-path
+    exactly when the reason is not None."""
+    by_line = _reason_by_line()
+    line = _SYNTH_LINE
+    classes = ["FOLDER", "SHOVER", "CALLER", "MIXER", "AGGRO"]
+    bools = mark_off_path(by_line, line, classes)
+    reasons = mark_off_path_with_reason(by_line, line, classes)
+    for cls in classes:
+        assert bools[cls] is (reasons[cls] is not None), cls
+
+
+def test_reason_priority_earliest_ancestor_wins() -> None:
+    """The EARLIEST blocking ancestor's reason wins across the SB's own nodes.
+
+    On ``||p|b100r600c1500c`` the SB acts at TWO own nodes — the root ``||p|``
+    (i=0) and ``||p|b100r600`` (i=2). A hand that folds 100% at the root and
+    would shove 100% at the later own node reports ``folded`` (the earlier
+    block), not ``all_in``."""
+    by_line = {
+        "||p|": {"X": {"fold": 1.0, "call": 0.0, "open_2": 0.0, "all_in": 0.0}},
+        "||p|b100": {"X": {"fold": 0.0, "call": 1.0}},
+        # Later SB own node — all-in, but the earlier root fold is reported.
+        "||p|b100r600": {"X": {"fold": 0.0, "call": 0.0, "all_in": 1.0}},
+        "||p|b100r600c": {"X": {"fold": 0.0, "call": 1.0}},
+        "||p|b100r600c1500": {"X": {"fold": 0.0, "call": 1.0}},
+        "||p|b100r600c1500c": {"X": {"fold": 0.0, "call": 1.0}},
+    }
+    reasons = mark_off_path_with_reason(by_line, "||p|b100r600c1500c", ["X"])
+    assert reasons["X"] == "folded"
+
+
+def test_reason_failsafe_missing_node_is_none() -> None:
+    """FAIL-SAFE: a missing prior gating node yields reason ``None`` for all.
+
+    Dropping the SB's root node makes the walk incomputable for the SB-gated
+    line, so nothing is marked (matching the boolean ``mark_off_path``
+    fail-safe)."""
+    by_line = _reason_by_line()
+    del by_line["||p|"]  # drop the SB's gating node
+    reasons = mark_off_path_with_reason(by_line, _SYNTH_LINE, ["AGGRO", "CALLER"])
+    assert all(v is None for v in reasons.values())
+
+
+def test_reason_root_line_all_none() -> None:
+    """The root line has no gating ancestors -> every class is on-path
+    (reason None)."""
+    by_line = _reason_by_line()
+    reasons = mark_off_path_with_reason(
+        by_line, "||p|", ["FOLDER", "SHOVER", "CALLER", "MIXER", "AGGRO"]
+    )
+    assert all(v is None for v in reasons.values())
+
+
+# --------------------------------------------------------------------------- #
+# Rule 2 REGRESSION: real 200BB blueprint (K3s / A3o called_closed)
+# --------------------------------------------------------------------------- #
+#
+# At 200BB the BB flat-calls the SB open ~100% with K3s / A3o (and many other
+# hands), so they CLOSE the action and are off-path on the subsequent 4-bet
+# line ``||p|b500r2100r5300`` with reason ``called_closed``. AA likewise traps
+# by calling the open at 200BB (it does NOT 3-bet), so it is also off-path here.
+
+
+def _real_blueprint_by_line_200() -> (
+    dict[str, dict[str, dict[str, float]]] | None
+):
+    """Load the 200BB / anteNone blueprint via the same GUI path."""
+    try:
+        from ui.blueprint_router import BlueprintRouter, default_asset_dir
+    except Exception:  # noqa: BLE001
+        return None
+    router = BlueprintRouter.from_asset_dir(default_asset_dir())
+    if router is None:
+        return None
+    by_line = router.extract_all_lines(stack_bb=200, ante="None")
+    return by_line or None
+
+
+_REAL_BY_LINE_200 = _real_blueprint_by_line_200()
+_REAL_LINE_200 = "||p|b500r2100r5300"
+_pytestmark_real_200 = __import__("pytest").mark.skipif(
+    _REAL_BY_LINE_200 is None or _REAL_LINE_200 not in _REAL_BY_LINE_200,
+    reason=(
+        "no 200BB preflop blueprint bundle on disk "
+        "(assets/blueprints/manifest.json) or line absent"
+    ),
+)
+
+
+@_pytestmark_real_200
+def test_regression_k3s_a3o_called_closed_200bb() -> None:
+    """K3s and A3o flat-call the open ~100% at 200BB -> off-path with reason
+    ``called_closed`` on the 4-bet line (they closed the action)."""
+    by_line = _REAL_BY_LINE_200
+    assert by_line is not None
+    node = by_line[_REAL_LINE_200]
+    reasons = mark_off_path_with_reason(by_line, _REAL_LINE_200, list(node.keys()))
+    off = mark_off_path(by_line, _REAL_LINE_200, list(node.keys()))
+    for cls in ("K3s", "A3o"):
+        assert off[cls] is True, f"{cls} should be off-path on the 4-bet line"
+        assert reasons[cls] == "called_closed", (cls, reasons[cls])
+
+
+@_pytestmark_real_200
+def test_regression_flatcallers_off_path_200bb() -> None:
+    """82s / 72o are off-path on the 200BB 4-bet line (they never reach it)."""
+    by_line = _REAL_BY_LINE_200
+    assert by_line is not None
+    node = by_line[_REAL_LINE_200]
+    off = mark_off_path(by_line, _REAL_LINE_200, list(node.keys()))
+    for cls in ("82s", "72o"):
+        if cls in node:
+            assert off[cls] is True, f"{cls} should be off-path on the 4-bet line"
+
+
+@_pytestmark_real_200
+def test_regression_bet_labels_exclude_all_in_real_node_200bb() -> None:
+    """On a real blueprint node the bet/raise label set excludes ``all_in`` —
+    confirming all-in is never summed into the aggression aggregation."""
+    by_line = _REAL_BY_LINE_200
+    assert by_line is not None
+    node = by_line.get("||p|b500")
+    assert node is not None
+    labels = _bet_labels(node)
+    assert "all_in" not in labels
+    assert all(lbl.startswith(("open_", "raise_")) for lbl in labels)

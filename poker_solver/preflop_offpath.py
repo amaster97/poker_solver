@@ -364,12 +364,46 @@ _OFF_PATH_REACH_FRACTION: float = 0.005
 # walk multiplies in are the NON-fold actions, so we read the FOLD mass here.
 _FOLD_DOMINANT_THRESHOLD: float = 0.99
 
+# All-in-probability threshold above which a hand class is treated as
+# all-in-dominant at one of the displayed player's ancestor decision nodes.
+# Once a hand goes all-in ~100% at a node there is NO further voluntary action,
+# so every deeper line is off-path — it carries over exactly like fold-dominance
+# (the actor cannot act again after committing the stack). Mirrors
+# ``_FOLD_DOMINANT_THRESHOLD``. The all-in mass is read from the EXACT all-in
+# label (``_ALL_IN_LABEL``); it is NEVER summed into the bet/raise aggregation
+# (``_bet_labels`` excludes ``all_in`` — see ``_bet_labels``).
+_ALL_IN_DOMINANT_THRESHOLD: float = 0.99
+
+# Call/limp-probability threshold above which a hand class is treated as
+# call-dominant ("called & closed the action") at one of the displayed player's
+# ancestor decision nodes WHEN the line continues with further aggression. A
+# hand that calls ~100% has closed the action (continued passively) and cannot
+# face a later re-raise on this line — the A3o/K3s case (BB flat-calls the open
+# 100%, so it is not in range on the subsequent 4-bet line).
+_CALL_DOMINANT_THRESHOLD: float = 0.99
+
 # The engine's fold-action label in the per-class node-strategy maps. Verified
 # against the source-of-truth ``_action_labels_for_count`` (which the
 # projection uses to build ``by_line``): "fold" is canonically label index 0
 # for every node. Pinned as a constant so a future relabel is a one-line
 # change.
 _FOLD_LABEL: str = "fold"
+
+# The engine's all-in / call action labels in the per-class node-strategy maps
+# (canonical labels from ``_action_labels_for_count``). Pinned as constants so a
+# future relabel is a one-line change. ``_ALL_IN_LABEL`` is deliberately NOT in
+# ``_bet_labels`` (which only returns ``open_*`` / ``raise_*``), so all-in mass
+# is never folded into the bet/raise aggregation.
+_ALL_IN_LABEL: str = "all_in"
+_CALL_LABEL: str = "call"
+
+# Off-path reason codes returned by :func:`mark_off_path_with_reason`
+# (``None`` == on-path). Priority order when several could apply across the
+# ancestor walk: fold > all_in > called_closed > low_reach.
+REASON_FOLDED: str = "folded"
+REASON_ALL_IN: str = "all_in"
+REASON_CALLED_CLOSED: str = "called_closed"
+REASON_LOW_REACH: str = "low_reach"
 
 
 def _bet_labels(node_strat: dict[str, dict[str, float]]) -> list[str]:
@@ -449,12 +483,12 @@ def _is_bet_token(token: str) -> bool:
     return bool(token) and token[0] in "br"
 
 
-def reach_and_fold_dominant(
+def reach_and_reason(
     by_line: dict[str, dict[str, dict[str, float]]] | None,
     hand: str,
     target_hist: str | None,
-) -> tuple[float, bool] | None:
-    """Walk the displayed player's line once; return ``(reach, fold_dominant)``.
+) -> tuple[float, str | None] | None:
+    """Walk the displayed player's line once; return ``(reach, block_reason)``.
 
     Single pass over the DISPLAYED player's own ancestor decision nodes on this
     line (the same walk :func:`reach` does). Returns a tuple:
@@ -469,28 +503,41 @@ def reach_and_fold_dominant(
         exact (single, unambiguous actions). This fixes pure-size-mixers (e.g.
         AA at ``b300r700r1500`` 3-bets ~98% but almost purely to ``r900``, so the
         single-``r700`` reading was ~0 and falsely flagged it off-path).
-      * ``fold_dominant`` — ``True`` when, at ANY ancestor decision node of this
-        player on the line, the hand's FOLD probability is ≥
-        :data:`_FOLD_DOMINANT_THRESHOLD`. Once a hand folds ~100% at a node,
-        every deeper action is off-path regardless of how the normalized reach
-        lands at a sparse deep node, so this catches fold-dominant hands the
-        reach threshold alone can miss.
+      * ``block_reason`` — the reason code of the EARLIEST ancestor decision node
+        of this player on the line that DOMINANTLY blocks the deeper line, or
+        ``None`` when no single ancestor dominantly blocks. The codes (with their
+        per-node priority fold > all_in > called_closed):
+
+          - :data:`REASON_FOLDED` — fold prob ≥ :data:`_FOLD_DOMINANT_THRESHOLD`.
+            Once a hand folds ~100% at a node, every deeper action is off-path.
+          - :data:`REASON_ALL_IN` — all-in prob ≥
+            :data:`_ALL_IN_DOMINANT_THRESHOLD`. After going all-in there is NO
+            further voluntary action, so the hand carries OFF-PATH onto every
+            deeper line (this is the bug the all-in rule fixes: previously only
+            fold was checked, so an all-in-dominant hand was wrongly left
+            in-range on a size-raise continuation). The all-in mass is read from
+            the EXACT :data:`_ALL_IN_LABEL` — it is NEVER summed into the
+            bet/raise aggregation below (``_bet_labels`` excludes ``all_in``).
+          - :data:`REASON_CALLED_CLOSED` — at a node where the line CONTINUES
+            with further aggression (a bet/raise token) the hand's call prob is
+            ≥ :data:`_CALL_DOMINANT_THRESHOLD`: it flat-called and CLOSED the
+            action, so it cannot face the later re-raise on this line (the
+            A3o/K3s case — BB calls the open 100%, off-path on the 4-bet line).
 
     Returns ``None`` (FAIL-SAFE) when the walk can't be fully computed —
     ``by_line`` is missing, a prior node along the line isn't present, the hand
     class is absent at a gating node, or a token can't be mapped to a label.
     Callers must NOT mark anything off-path for a line when this is ``None`` for
-    any class. A missing FOLD label at a node does NOT trip the fail-safe and
-    does NOT mark fold-dominant (same posture as a missing continuing label that
-    contributes 0.0): we only set ``fold_dominant`` on an affirmative ≥
-    threshold reading.
+    any class. A missing dominance label at a node does NOT trip the fail-safe
+    and does NOT mark a block (same posture as a missing continuing label that
+    contributes 0.0): we only set a block on an affirmative ≥ threshold reading.
     """
     if by_line is None:
         return None
     toks = _LINE_TOKEN_RE.findall(_line_body(target_hist))
     actor = preflop_line_actor(target_hist)
     r = 1.0
-    fold_dominant = False
+    block_reason: str | None = None
     for i, tok in enumerate(toks):
         prefix = "||p|" + "".join(toks[:i])
         # Only the displayed player's OWN decisions gate their reach.
@@ -499,11 +546,31 @@ def reach_and_fold_dominant(
         node = by_line.get(prefix)
         if node is None or hand not in node:
             return None  # FAIL-SAFE: can't compute -> don't mark
-        # Fold-propagation rule: a ≥99% fold at any ancestor decision node makes
-        # everything downstream off-path. Missing fold label -> fail-safe (do
-        # not mark), matching the existing missing-label posture.
-        if node[hand].get(_FOLD_LABEL, 0.0) >= _FOLD_DOMINANT_THRESHOLD:
-            fold_dominant = True
+        node_strat = node[hand]
+        # Dominance checks. ``block_reason`` records the EARLIEST blocking
+        # ancestor only (the ``is None`` guard freezes the first hit); per-node
+        # priority is fold > all_in > called_closed. We do NOT ``break`` — the
+        # reach product below keeps its EXACT historical semantics (a fold-/
+        # call-dominant hand multiplies in ~0 at this node, so ``reach`` lands at
+        # ~0 just as before), and the deeper own-nodes still exist in ``by_line``
+        # (other hands reach them). A missing dominance label -> 0.0 (no block),
+        # matching the missing-continuing-label posture.
+        if block_reason is None:
+            # Fold-propagation: a ≥99% fold makes everything downstream off-path.
+            if node_strat.get(_FOLD_LABEL, 0.0) >= _FOLD_DOMINANT_THRESHOLD:
+                block_reason = REASON_FOLDED
+            # All-in carries over: no further voluntary action after committing
+            # the stack. Read the EXACT all-in label (never the bet aggregate).
+            elif node_strat.get(_ALL_IN_LABEL, 0.0) >= _ALL_IN_DOMINANT_THRESHOLD:
+                block_reason = REASON_ALL_IN
+            # Called-and-closed: the line continues with aggression (a bet/raise
+            # token) but the hand flat-called ~100% here, closing the action, so
+            # it cannot reach the deeper re-raise.
+            elif (
+                _is_bet_token(tok)
+                and node_strat.get(_CALL_LABEL, 0.0) >= _CALL_DOMINANT_THRESHOLD
+            ):
+                block_reason = REASON_CALLED_CLOSED
         label = _label_for_token(by_line, prefix, tok, node)
         if label is None:
             return None
@@ -525,10 +592,32 @@ def reach_and_fold_dominant(
         # sizes, so reach must sum over all bet/raise labels, never one size.
         if _is_bet_token(tok):
             bet_labels = _bet_labels(node)
-            r *= sum(node[hand].get(lbl, 0.0) for lbl in bet_labels)
+            r *= sum(node_strat.get(lbl, 0.0) for lbl in bet_labels)
         else:
-            r *= node[hand].get(label, 0.0)
-    return r, fold_dominant
+            r *= node_strat.get(label, 0.0)
+    return r, block_reason
+
+
+def reach_and_fold_dominant(
+    by_line: dict[str, dict[str, dict[str, float]]] | None,
+    hand: str,
+    target_hist: str | None,
+) -> tuple[float, bool] | None:
+    """Walk the line; return ``(reach, dominant_block)``.
+
+    Backward-compatible thin wrapper over :func:`reach_and_reason`. The boolean
+    is ``True`` when the hand is dominantly blocked at some ancestor (fold-,
+    all-in- or call-dominant). The name (and its historical ``fold_dominant``
+    semantics) is retained so existing call sites + re-exports stay green; the
+    all-in / called-closed blocks are NEW and also flip the boolean ``True``.
+
+    Returns ``None`` (FAIL-SAFE) when the walk can't be fully computed.
+    """
+    rr = reach_and_reason(by_line, hand, target_hist)
+    if rr is None:
+        return None
+    r, block_reason = rr
+    return r, (block_reason is not None)
 
 
 def reach(
@@ -563,6 +652,74 @@ def reach(
 # --------------------------------------------------------------------------- #
 
 
+def mark_off_path_with_reason(
+    by_line: dict[str, dict[str, dict[str, float]]] | None,
+    line: str | None,
+    hand_classes: list[str] | None = None,
+) -> dict[str, str | None]:
+    """Return ``{hand_class -> reason}`` for a single ``line`` in ``by_line``.
+
+    ``reason`` is ``None`` for ON-PATH classes, or one of the off-path codes:
+
+      * :data:`REASON_FOLDED` — fold-dominant at an ancestor (highest priority).
+      * :data:`REASON_ALL_IN` — all-in-dominant at an ancestor (carries over —
+        no voluntary action after committing the stack).
+      * :data:`REASON_CALLED_CLOSED` — the hand flat-called ~100% at a blocking
+        ancestor where the line continued with further aggression, closing the
+        action (the A3o/K3s case).
+      * :data:`REASON_LOW_REACH` — generic: normalized reach below
+        :data:`_OFF_PATH_REACH_FRACTION` with no single dominating ancestor.
+
+    The dominance reason is derived from the EARLIEST blocking ancestor; across
+    classes the priority is ``folded > all_in > called_closed > low_reach``
+    (a dominant block always outranks the generic reach rule).
+
+    Both signals come from a SINGLE walk per class via :func:`reach_and_reason`.
+    FAIL-SAFE: if that walk is ``None`` for ANY class (a prior node missing, e.g.
+    a partial live snapshot), nothing is marked — every class returns ``None``.
+    The root node has no gating nodes -> uniform reach + no dominance, so nothing
+    is marked there.
+
+    ``hand_classes`` defaults to the classes present at ``line`` in ``by_line``
+    (or the empty set when the line / map is absent).
+    """
+    if hand_classes is None:
+        node = (by_line or {}).get(line or "", {})
+        hand_classes = list(node.keys())
+    reaches: dict[str, float] = {}
+    block_reason: dict[str, str | None] = {}
+    for cls in hand_classes:
+        rr = reach_and_reason(by_line, cls, line)
+        if rr is None:
+            # Walk not fully computable for this line -> mark nothing.
+            return {cls: None for cls in hand_classes}
+        reaches[cls], block_reason[cls] = rr
+    # Normalize reach over the NON-dominantly-blocked classes only. A blocked
+    # hand's walk short-circuits at the blocking ancestor, so its ``reach`` is
+    # the pre-block product (often 1.0) — a meaningless artifact that must NOT
+    # inflate the denominator and drag genuine reachers below the threshold.
+    # (Pre-block hands that genuinely never reached carry reach 0 and are
+    # already excluded from the mass by value.)
+    total = sum(
+        reaches[cls]
+        for cls in hand_classes
+        if block_reason[cls] is None
+    )
+
+    def _reason_for(cls: str) -> str | None:
+        # A dominant blocking ancestor wins outright over the reach rule.
+        if block_reason[cls] is not None:
+            return block_reason[cls]
+        if total <= 0.0:
+            # Degenerate (all-zero) reach: the reach rule can't discriminate.
+            return None
+        if (reaches[cls] / total) < _OFF_PATH_REACH_FRACTION:
+            return REASON_LOW_REACH
+        return None
+
+    return {cls: _reason_for(cls) for cls in hand_classes}
+
+
 def mark_off_path(
     by_line: dict[str, dict[str, dict[str, float]]] | None,
     line: str | None,
@@ -573,40 +730,20 @@ def mark_off_path(
     A class is off-path when EITHER:
       * (reach rule) its normalized reach is below
         :data:`_OFF_PATH_REACH_FRACTION` (0.5% of the total reach mass), OR
-      * (fold rule) it is FOLD-DOMINANT — its fold probability is ≥
-        :data:`_FOLD_DOMINANT_THRESHOLD` at any of the displayed player's
-        ancestor decision nodes on this line.
+      * (dominance rule) it is dominantly blocked (fold-, all-in- or
+        call-dominant) at any of the displayed player's ancestor decision nodes
+        on this line.
 
-    Both signals come from a SINGLE walk per class via
-    :func:`reach_and_fold_dominant`. FAIL-SAFE: if that walk is ``None`` for ANY
-    class (a prior node missing, e.g. a partial live snapshot), nothing is
-    marked — every class returns ``off_path=False``. The root node has no gating
-    nodes -> uniform reach + no fold-dominance, so nothing is marked there.
+    Derived from :func:`mark_off_path_with_reason` so the boolean and the reason
+    map stay consistent (``off_path == reason is not None``). FAIL-SAFE: when the
+    walk isn't fully computable for any class, nothing is marked. The root node
+    has no gating nodes -> nothing is marked there.
 
     ``hand_classes`` defaults to the classes present at ``line`` in ``by_line``
     (or the empty set when the line / map is absent).
     """
-    if hand_classes is None:
-        node = (by_line or {}).get(line or "", {})
-        hand_classes = list(node.keys())
-    reaches: dict[str, float] = {}
-    fold_dominant: dict[str, bool] = {}
-    for cls in hand_classes:
-        rfd = reach_and_fold_dominant(by_line, cls, line)
-        if rfd is None:
-            # Walk not fully computable for this line -> mark nothing.
-            return {cls: False for cls in hand_classes}
-        reaches[cls], fold_dominant[cls] = rfd
-    total = sum(reaches.values())
-    if total <= 0.0:
-        # Degenerate (all-zero) reach: the reach rule can't discriminate, but
-        # the fold rule still can — keep any affirmative fold-dominant flags.
-        return {cls: fold_dominant[cls] for cls in hand_classes}
-    return {
-        cls: ((reaches[cls] / total) < _OFF_PATH_REACH_FRACTION)
-        or fold_dominant[cls]
-        for cls in hand_classes
-    }
+    reasons = mark_off_path_with_reason(by_line, line, hand_classes)
+    return {cls: reason is not None for cls, reason in reasons.items()}
 
 
 def _fold_overwrite(node_strat: dict[str, float]) -> dict[str, float]:

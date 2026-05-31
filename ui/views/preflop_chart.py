@@ -69,6 +69,7 @@ from poker_solver.preflop_offpath import (  # noqa: F401  (re-exported)
     _line_body,
     _sibling_bet_tokens,
     mark_off_path,
+    mark_off_path_with_reason,
     preflop_line_actor,
     reach,
     reach_and_fold_dominant,
@@ -643,6 +644,23 @@ def compute_off_path(
     return mark_off_path(by_line, target_hist, hand_classes)
 
 
+def compute_off_path_reasons(
+    state: AppState, hand_classes: list[str], target_hist: str | None
+) -> dict[str, str | None]:
+    """Return ``{hand_class -> reason}`` for the selected line (``None`` ==
+    on-path).
+
+    Reason-aware sibling of :func:`compute_off_path`: a thin GUI shim over
+    :func:`poker_solver.preflop_offpath.mark_off_path_with_reason`. ``reason``
+    is one of ``"folded"`` / ``"all_in"`` / ``"called_closed"`` / ``"low_reach"``
+    (or ``None`` for on-path). FAIL-SAFE: when the walk isn't fully computable
+    for any class (a prior node missing, no ``_by_line`` map), every class is
+    ``None`` (nothing greyed) — exactly matching :func:`compute_off_path`.
+    """
+    by_line = _by_line_map(state)
+    return mark_off_path_with_reason(by_line, target_hist, hand_classes)
+
+
 def _chart_status(state: AppState) -> str:
     runner = getattr(state, "runner", None)
     if runner is None:
@@ -1115,6 +1133,11 @@ def _render_grid(state: AppState) -> None:
     # isn't fully computable — see compute_off_path.
     all_classes = [hand_class_at(r, c) for r in range(13) for c in range(13)]
     off_path = compute_off_path(state, all_classes, selected_line)
+    # Reason-aware off-path: drives a precise tooltip (already-all-in / folded /
+    # called-&-closed / generic low-reach). Shares the SAME walk + fail-safe as
+    # ``compute_off_path``; ``off_path[cls]`` is true exactly when the reason is
+    # not None, so the grey-"—" rendering is unchanged.
+    off_reasons = compute_off_path_reasons(state, all_classes, selected_line)
 
     with ui.element("div").style(
         f"display:grid;grid-template-columns:repeat(13, {_CELL_PX}px);"
@@ -1130,6 +1153,7 @@ def _render_grid(state: AppState) -> None:
                     summary,
                     is_open_root=is_open_root,
                     off_path=off_path.get(cls, False),
+                    off_path_reason=off_reasons.get(cls),
                 )
 
 
@@ -1140,6 +1164,7 @@ def _render_cell(
     *,
     is_open_root: bool = False,
     off_path: bool = False,
+    off_path_reason: str | None = None,
 ) -> None:
     """Render a single matrix cell.
 
@@ -1149,6 +1174,10 @@ def _render_cell(
     background, ``"—"`` tag, dim label, "not in range here" tooltip — rather
     than the misleading raw fold/call/raise blend. It stays inside the existing
     color scheme (no new colors) and is visually distinct from a semantic fold.
+
+    ``off_path_reason`` (``"folded"`` / ``"all_in"`` / ``"called_closed"`` /
+    ``"low_reach"`` / ``None``) refines the off-path tooltip wording only; the
+    grey-"—" rendering is identical regardless of the reason.
     """
     ui = _import_nicegui()
     color = cell_color_css(summary)
@@ -1205,7 +1234,11 @@ def _render_cell(
             )
         ui.tooltip(
             _tooltip_text(
-                hand_class, summary, is_open_root=is_open_root, off_path=off_path
+                hand_class,
+                summary,
+                is_open_root=is_open_root,
+                off_path=off_path,
+                off_path_reason=off_path_reason,
             )
         )
 
@@ -1238,12 +1271,45 @@ def _cell_tag(
     return f"{letter}{pct}"
 
 
+def _off_path_tooltip(hand_class: str, reason: str | None = None) -> str:
+    """Render the off-path tooltip text, reason-aware.
+
+    The wording is tied to WHY the class is off-path on this line:
+      * ``all_in``        -> "already all-in earlier"
+      * ``folded``        -> "folded earlier on this line"
+      * ``called_closed`` -> "called & closed action earlier"
+      * ``low_reach`` / unknown -> the generic reach phrasing (NEVER asserts a
+        fold — size-mixers and flat-callers are off-path here without folding).
+    """
+    if reason == "all_in":
+        return (
+            f"{hand_class} — not in range on this line "
+            "(already all-in earlier)"
+        )
+    if reason == "folded":
+        return (
+            f"{hand_class} — not in range on this line "
+            "(folded earlier on this line)"
+        )
+    if reason == "called_closed":
+        return (
+            f"{hand_class} — not in range on this line "
+            "(called & closed action earlier)"
+        )
+    # low_reach / unknown: generic reach phrasing; never claim a fold.
+    return (
+        f"{hand_class} — not in range on this line "
+        "(doesn't reach this line; reach ≈ 0%)"
+    )
+
+
 def _tooltip_text(
     hand_class: str,
     summary: CellSummary,
     *,
     is_open_root: bool = False,
     off_path: bool = False,
+    off_path_reason: str | None = None,
 ) -> str:
     """Build the hover tooltip for one cell.
 
@@ -1253,16 +1319,13 @@ def _tooltip_text(
 
     Off-path classes (reach ~0 at the displayed node) get a "not in range on
     this line" tooltip instead of the per-action breakdown — that breakdown is
-    meaningless when the class never arrives at this node. Off-path hands didn't
-    take this line (folded earlier, limped/called, or simply never entered this
-    branch); the tooltip does NOT assert a fold, since size-mixers and flat-
-    callers are off-path here without ever folding.
+    meaningless when the class never arrives at this node. The exact wording is
+    reason-aware (see :func:`_off_path_tooltip`): all-in / folded / called-&-
+    closed / generic-low-reach. The generic fallback does NOT assert a fold,
+    since size-mixers and flat-callers are off-path here without ever folding.
     """
     if off_path:
-        return (
-            f"{hand_class} — not in range on this line "
-            "(didn't take this line; reach ≈ 0%)"
-        )
+        return _off_path_tooltip(hand_class, off_path_reason)
     if summary.empty:
         return f"{hand_class}: no chart data"
     parts = [hand_class]
@@ -1656,6 +1719,7 @@ __all__ = [
     "cell_color_rgb",
     "classify_action",
     "compute_off_path",
+    "compute_off_path_reasons",
     "hand_class_at",
     "parse_size_list",
     "project_chart",

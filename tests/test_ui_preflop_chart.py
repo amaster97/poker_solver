@@ -1446,11 +1446,125 @@ def test_cell_tag_and_tooltip_off_path() -> None:
 
     tip = pc._tooltip_text("82s", summary, off_path=True)
     assert "82s" in tip and "not in range on this line" in tip
+    # Generic (no reason) fallback uses the reach phrasing, never a fold.
+    assert "doesn't reach this line" in tip
     # The tooltip must NOT assert a fold: off-path hands may have limped/called
     # or never entered the branch (e.g. a pure-size-mixer that raised a different
     # size), not necessarily folded.
     assert "folded" not in tip.lower()
     assert "call" not in tip.lower(), "off-path tooltip must not imply a real action"
+
+
+# --------------------------------------------------------------------------- #
+# Reason-aware off-path tooltips + reasons shim (Rule 2 GUI wiring)
+# --------------------------------------------------------------------------- #
+
+
+def test_tooltip_reason_all_in() -> None:
+    """An already-all-in class tooltip says 'already all-in earlier'."""
+    from ui.views import preflop_chart as pc
+
+    summary = pc.aggregate_actions({"all_in": 1.0})
+    text = pc._tooltip_text("AA", summary, off_path=True, off_path_reason="all_in")
+    assert "already all-in earlier" in text
+    assert "folded" not in text.lower()
+
+
+def test_tooltip_reason_folded() -> None:
+    """A folded class tooltip says 'folded earlier on this line'."""
+    from ui.views import preflop_chart as pc
+
+    summary = pc.aggregate_actions({"fold": 1.0})
+    text = pc._tooltip_text("72o", summary, off_path=True, off_path_reason="folded")
+    assert "folded earlier on this line" in text
+
+
+def test_tooltip_reason_called_closed() -> None:
+    """A called-and-closed class tooltip says 'called & closed action earlier'
+    and does NOT assert a fold."""
+    from ui.views import preflop_chart as pc
+
+    summary = pc.aggregate_actions({"call": 1.0})
+    text = pc._tooltip_text(
+        "K3s", summary, off_path=True, off_path_reason="called_closed"
+    )
+    assert "called & closed action earlier" in text
+    assert "folded" not in text.lower()
+
+
+def test_tooltip_reason_low_reach_generic() -> None:
+    """A low-reach class falls back to the generic reach phrasing and NEVER
+    asserts a fold."""
+    from ui.views import preflop_chart as pc
+
+    summary = pc.aggregate_actions({"call": 0.5, "fold": 0.5})
+    text = pc._tooltip_text("J4o", summary, off_path=True, off_path_reason="low_reach")
+    assert "doesn't reach this line" in text
+    assert "reach ≈ 0%" in text
+    assert "folded" not in text.lower()
+
+
+def test_tooltip_reason_unknown_falls_back_generic() -> None:
+    """An unknown / absent reason uses the same generic phrasing (no fold
+    assertion) — the existing default behavior is preserved."""
+    from ui.views import preflop_chart as pc
+
+    summary = pc.aggregate_actions({"call": 0.5, "fold": 0.5})
+    text = pc._tooltip_text("J4o", summary, off_path=True, off_path_reason=None)
+    assert "not in range on this line" in text
+    assert "folded" not in text.lower()
+
+
+def test_off_path_tooltip_helper_matrix() -> None:
+    """The module-level helper renders one phrasing per reason code."""
+    from ui.views import preflop_chart as pc
+
+    assert "already all-in earlier" in pc._off_path_tooltip("AA", "all_in")
+    assert "folded earlier" in pc._off_path_tooltip("AA", "folded")
+    assert "called & closed action earlier" in pc._off_path_tooltip(
+        "AA", "called_closed"
+    )
+    assert "doesn't reach this line" in pc._off_path_tooltip("AA", "low_reach")
+    assert "doesn't reach this line" in pc._off_path_tooltip("AA", None)
+
+
+def test_compute_off_path_reasons_shim_matches_primitive() -> None:
+    """The reasons GUI shim returns exactly what the shared primitive does, and
+    its keys/values agree with the boolean ``compute_off_path`` shim.
+
+    Line ``||p|b100r600``: SB opens (b100), BB 3-bets (r600); the actor facing
+    the 3-bet is the SB (even token count), whose OWN gating node is the root
+    ``||p|``. CALLER limped 100% there (closed the action) -> off-path with
+    reason ``called_closed``; AGGRO opened 100% -> on-path.
+    """
+    from ui.views import preflop_chart as pc
+
+    by_line = {
+        "||p|": {
+            "CALLER": {"fold": 0.0, "call": 1.0, "open_2": 0.0},
+            "AGGRO": {"fold": 0.0, "call": 0.0, "open_2": 1.0},
+        },
+        "||p|b100": {
+            "CALLER": {"fold": 0.0, "call": 1.0},
+            "AGGRO": {"fold": 0.0, "call": 1.0},
+        },
+        "||p|b100r600": {
+            "CALLER": {"fold": 0.0, "call": 1.0},
+            "AGGRO": {"fold": 0.0, "call": 1.0},
+        },
+    }
+    classes = ["CALLER", "AGGRO"]
+    line = "||p|b100r600"
+    state = _fake_grid_state(by_line, line)
+    shim = pc.compute_off_path_reasons(state, classes, line)
+    direct = pc.mark_off_path_with_reason(by_line, line, classes)
+    assert shim == direct
+    assert shim["CALLER"] == "called_closed"
+    assert shim["AGGRO"] is None
+    # Boolean shim agrees: off-path exactly when the reason is not None.
+    bools = pc.compute_off_path(state, classes, line)
+    for cls in classes:
+        assert bools[cls] is (shim[cls] is not None)
 
 
 async def test_grid_renders_off_path_cells_for_deep_line(
