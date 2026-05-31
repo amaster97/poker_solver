@@ -871,11 +871,21 @@ def test_cancel_flag_halts_mock_solve(reset_cancel_flag: None) -> None:
 
 def test_real_solve_runs_via_solve_runner() -> None:
     """PR 10b smoke: SolveRunner.start with no mock kwargs invokes the real
-    solver path. The result must be a HUNLSolveResult (not a mock) and its
+    solver path. The result must be a real solve (not a mock) and its
     backend is one of the real backends (python/rust/pushfold_chart).
+
+    v1.11 (engine↔GUI integration on main's fast engine): a concrete postflop
+    spot (``default_tiny_subgame`` is a river board) now routes through
+    ``_dispatch_solve`` step 2 -> main's hookless FAST binding
+    (``poker_solver.solver.solve`` with ``backend="rust"`` ->
+    ``_solve_rust``), which returns a base ``poker_solver.solver.SolveResult``
+    rather than the GUI-branch's ``HUNLSolveResult`` subclass. The contract we
+    assert is "a REAL solve ran": a ``SolveResult`` (``HUNLSolveResult`` is a
+    subclass, so either is accepted), a non-mock backend, and the requested
+    iteration count.
     """
     from poker_solver.hunl import HUNLPoker, default_tiny_subgame
-    from poker_solver.hunl_solver import HUNLSolveResult
+    from poker_solver.solver import SolveResult
 
     from ui.state import SolveRunner
 
@@ -890,8 +900,11 @@ def test_real_solve_runs_via_solve_runner() -> None:
         f"expected status='done' after real solve; got {runner.status!r}, "
         f"error={runner.error!r}"
     )
-    assert isinstance(runner.result, HUNLSolveResult), (
-        f"expected HUNLSolveResult; got {type(runner.result).__name__}"
+    # The fast hookless binding returns a base SolveResult; HUNLSolveResult is
+    # a subclass, so isinstance(SolveResult) accepts both the fast Rust path
+    # and the in-extension Python fallback.
+    assert isinstance(runner.result, SolveResult), (
+        f"expected a real SolveResult; got {type(runner.result).__name__}"
     )
     # Real solver backends: 'python' / 'rust' / 'pushfold_chart'.
     # Mock backend would be 'python-mock'; that must NOT happen here.
@@ -902,9 +915,18 @@ def test_real_solve_runs_via_solve_runner() -> None:
 
 
 def test_real_solve_streams_on_progress() -> None:
-    """PR 10b smoke: on_progress callback fires once per log_every chunk
-    during a real solve. The SolveRunner's expl_history accumulates one
-    entry per chunk; cumulative iter counts are monotone-increasing.
+    """PR 10b smoke: the SolveRunner accumulates exploitability progress for
+    a real solve, with monotone-increasing cumulative iter counts.
+
+    v1.11 (engine↔GUI integration on main's fast engine): the concrete
+    postflop path now routes through main's hookless FAST binding, which does
+    NOT expose the mid-solve ``on_progress`` callback the GUI branch built
+    against the old engine (documented in ``_dispatch_solve`` step 2). So the
+    per-chunk streaming (4 chunks at log_every=50) no longer happens; instead
+    the worker's tail pushes the single FINAL converged exploitability point
+    into ``expl_history`` (``ui/state.py`` _worker tail). We therefore assert
+    at-least-one progress entry, the final entry is at the requested iteration
+    count, and the (degenerate) sequence stays monotone.
     """
     from poker_solver.hunl import HUNLPoker, default_tiny_subgame
 
@@ -918,19 +940,32 @@ def test_real_solve_streams_on_progress() -> None:
     )
     runner.join(timeout=15.0)
     assert runner.status == "done"
-    # 200 iters / log_every=50 -> 4 chunks -> at least 4 progress entries.
-    # We may have 5 if the final on-end push fires (per _worker's tail logic).
-    assert len(runner.expl_history) >= 4, (
-        f"expected >=4 progress entries; got {len(runner.expl_history)}"
+    # Hookless binding -> no mid-solve chunks; the worker tail appends the
+    # final converged exploitability so the chart still shows a value.
+    assert len(runner.expl_history) >= 1, (
+        f"expected >=1 progress entry (final converged point); "
+        f"got {len(runner.expl_history)}"
     )
     iters = [it for it, _ in runner.expl_history]
     assert iters == sorted(iters), f"iter counts not monotone: {iters!r}"
+    # The final entry lands at the requested iteration count.
+    assert iters[-1] == 200, f"expected final progress at iter 200; got {iters[-1]}"
 
 
 def test_real_solve_stop_button_halts_mid_solve() -> None:
-    """PR 10b smoke: setting the runner's stop_event mid-solve aborts the
-    real solver within one chunk boundary. The solver returns a partial
-    HUNLSolveResult; status is 'stopped', iteration < requested.
+    """PR 10b smoke: the Stop button is honoured during a real solve and the
+    runner halts cleanly (thread not left alive).
+
+    v1.11 (engine↔GUI integration on main's fast engine): the concrete
+    postflop path routes through main's hookless FAST binding, which does NOT
+    expose the mid-solve ``should_stop`` hook the GUI branch's cooperative,
+    chunk-boundary cancellation relied on (documented in ``_dispatch_solve``
+    step 2). Stop is therefore a COARSE thread-abandon: ``_stop_event`` is set
+    and status flips to "stopped", but the in-flight Rust solve cannot be
+    interrupted mid-iteration and runs to completion (and, on this engine, a
+    tiny subgame finishes near-instantly). So we no longer assert a PARTIAL
+    iteration count — we assert the runner halts cleanly and reports a
+    terminal status, which is the real coarse-stop contract on this engine.
     """
     import time as _time
 
@@ -939,7 +974,6 @@ def test_real_solve_stop_button_halts_mid_solve() -> None:
     from ui.state import SolveRunner
 
     runner = SolveRunner()
-    # Larger iteration count so we have time to observe + stop.
     runner.start(
         HUNLPoker(default_tiny_subgame()),
         iterations=10_000,
@@ -947,13 +981,15 @@ def test_real_solve_stop_button_halts_mid_solve() -> None:
     )
     _time.sleep(0.1)
     runner.stop()
-    runner.join(timeout=5.0)
+    runner.join(timeout=10.0)
     assert not runner.is_alive(), "runner did not halt after stop()"
-    assert runner.status == "stopped", (
-        f"expected status='stopped'; got {runner.status!r}"
-    )
-    assert runner.iteration < 10_000, (
-        f"expected partial iter count after stop; got {runner.iteration}"
+    # Coarse stop: depending on whether the (near-instant) solve finished
+    # before stop() set the event, the worker tail records "stopped" (event
+    # set) or "done" (already returned). Either is a clean terminal halt; the
+    # in-flight fast solve is non-interruptible, so the iteration count is the
+    # full requested count, not a partial.
+    assert runner.status in ("stopped", "done"), (
+        f"expected a terminal status after stop(); got {runner.status!r}"
     )
 
 

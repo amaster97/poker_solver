@@ -75,13 +75,12 @@ def isolated_state_dir(
 
 
 def _tractable_flop_config() -> Any:
-    """A preflop ``HUNLConfig`` whose synthesized flop subgame is tractable.
+    """A preflop ``HUNLConfig`` with a small (single-bet, no-all-in) flop menu.
 
-    The chained-tab flop guard (``ui.state.chained_flop_too_large``) blocks
-    a flop solve when the synthesized flop tree exceeds ``TREE_SIZE_BUDGET``.
-    The DEFAULT bet menu (5 sizes + all-in) is intentionally over-budget for
-    a flop (the real solve hangs), so tests that want ``solve_postflop`` to
-    FIRE pin a single-bet-size, no-all-in config that passes the guard.
+    v1.11: the chained-tab flop tractability guard was REMOVED (main's fast
+    engine solves flops), so no config is "blocked" any more. This narrow menu
+    is retained simply as a lightweight, deterministic abstraction for the
+    smoke tests that drive ``solve_postflop`` through the stub.
     """
     from poker_solver.hunl import HUNLConfig, Street
 
@@ -96,10 +95,12 @@ def _tractable_flop_config() -> Any:
 
 
 def _wide_flop_config() -> Any:
-    """A preflop ``HUNLConfig`` whose synthesized flop subgame is OVER-budget.
+    """A preflop ``HUNLConfig`` with the full default 5-bet-size + all-in menu.
 
-    The default 5-bet-size + all-in menu makes a flop tree the guard rejects
-    — used by the flop-guard test to confirm ``solve_postflop`` never fires.
+    Under the OLD engine this synthesized an over-budget flop tree the
+    now-removed guard refused; on main's fast engine the flop step proceeds to
+    a solve. Used by ``test_wide_range_flop_proceeds_to_solve_no_guard`` to
+    confirm a wide config is no longer blocked.
     """
     from poker_solver.hunl import HUNLConfig, Street
 
@@ -118,8 +119,10 @@ def _fake_chained_result(config: Any | None = None) -> Any:
     preflop strategy for AA / KK, one flop-reaching terminal (the SB-limp /
     BB-check line ``("c", "x")``), an empty postflop cache. The
     ``_config_template`` carries the bet abstraction the chained-tab flop
-    guard inspects; pass a tractable config to let ``solve_postflop`` fire,
-    or a wide config to exercise the guard. Defaults to tractable.
+    step builds the subgame from; the v1.11 guard removal means any config
+    proceeds to a solve, so the ``tractable`` vs ``wide`` distinction is now
+    just about the abstraction size, not whether the step is blocked.
+    Defaults to tractable.
 
     The orchestrator's ``solve_postflop`` is bypassed by patching the
     result's method to return a canned :class:`RangeVsRangeNashResult`.
@@ -724,15 +727,25 @@ async def test_advance_preflop_to_flop_reaching_terminal(
     assert user.find(marker="chained-tab-legal-action-deal_flop").elements
 
 
-async def test_flop_guard_blocks_wide_range_no_solve(
+async def test_wide_range_flop_proceeds_to_solve_no_guard(
     user: User, isolated_state_dir: pathlib.Path
 ) -> None:
-    """On a wide-range (default bet menu) chained solve, the flop step
-    BLOCKS with a "ranges too wide" message and NEVER calls
-    ``solve_postflop`` — the mandatory anti-hang guard.
+    """On a wide-range (default bet menu) chained solve, the flop step now
+    PROCEEDS to a solve — it does NOT block.
 
-    Chain-solve "b" plan §"Flop solve can HANG": the guard is required so a
-    wide flop pick cannot hang the synchronous chained solve.
+    v1.11 (engine↔GUI integration on main's fast engine): the GUI-branch
+    flop tractability guard (``chained_flop_too_large`` / the
+    ``chained-tab-flop-too-large`` marker) was REMOVED. It existed only
+    because the old engine hung for minutes building a wide flop tree; main's
+    fast engine (rayon + suit-iso + inclusion-exclusion terminal eval) solves
+    flops, so the wide config must now flow straight through to the flop solve
+    rather than being refused.
+
+    This is the inverse of the old ``test_flop_guard_blocks_wide_range_no_solve``:
+    same wide config + same flop pick, but we assert the guard marker is GONE
+    and ``solve_postflop`` FIRES (and its strategy rows render). We keep the
+    ``solve_postflop`` stub so this stays a UI-wiring test — it does not run a
+    heavy real flop solve.
     """
     from poker_solver.card import Card
     from ui.state import get_state
@@ -742,8 +755,9 @@ async def test_flop_guard_blocks_wide_range_no_solve(
     state.current_spot.stacks_bb = (50, 50)
     state.current_spot.board = []
 
-    # WIDE config (default 5-bet menu + all-in) -> the synthesized flop tree
-    # is over-budget -> the guard must block.
+    # WIDE config (default 5-bet menu + all-in). Under the OLD engine this
+    # synthesized an over-budget flop tree that the now-removed guard refused;
+    # on main's fast engine it must proceed to a solve.
     result = _fake_chained_result(_wide_flop_config())
     state.runner.chained_result = result  # type: ignore[attr-defined]
     state.runner._mode = "chained"  # type: ignore[attr-defined]
@@ -765,20 +779,25 @@ async def test_flop_guard_blocks_wide_range_no_solve(
 
     with patch.object(result, "solve_postflop", _fake_solve_postflop):
         await user.open("/")
-        # Pick a 3-card flop.
+        # Pick a 3-card flop that does NOT block AA (no aces): 7c 5d 2h.
         user.find(marker="chained-tab-board-cell-7c").click()
         user.find(marker="chained-tab-board-cell-5d").click()
         user.find(marker="chained-tab-board-cell-2h").click()
         await user.open("/")
 
-        # The guard message rendered, and solve_postflop NEVER fired.
-        assert user.find(marker="chained-tab-flop-too-large").elements, (
-            "wide-range flop guard message missing"
+        # The guard is GONE: no "too large" marker is ever rendered.
+        await user.should_not_see(marker="chained-tab-flop-too-large")
+        # The flop step proceeded — solve_postflop fired (via result.query).
+        assert postflop_calls["count"] >= 1, (
+            f"wide-range flop must now PROCEED to a solve (guard removed); "
+            f"solve_postflop fired {postflop_calls['count']} time(s)"
         )
-        assert postflop_calls["count"] == 0, (
-            f"solve_postflop must NOT fire on a guard-blocked wide flop; "
-            f"got {postflop_calls['count']} call(s)"
-        )
+        # ... and the per-action flop strategy rows materialized (AA: check
+        # 0.4 / bet_75 0.6 from the fake postflop result).
+        check_rows = user.find(marker="chained-tab-postflop-row-check").elements
+        bet_rows = user.find(marker="chained-tab-postflop-row-bet_75").elements
+        assert len(check_rows) >= 1, "flop check row missing after wide solve"
+        assert len(bet_rows) >= 1, "flop bet_75 row missing after wide solve"
 
 
 async def test_turn_river_render_pending_placeholder(

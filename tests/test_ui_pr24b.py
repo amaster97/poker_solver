@@ -113,12 +113,17 @@ def test_node_lock_dialog_writes_spot_locked_strategies() -> None:
 def test_locked_strategies_threads_through_solve_runner_start() -> None:
     """Smoke 2: ``SolveRunner.start(..., locked_strategies={...})``
     forwards the dict to the worker, which threads it through
-    ``_dispatch_solve`` -> ``solve_hunl_postflop(locked_strategies=...)``.
+    ``_dispatch_solve`` -> ``canonical_solve(locked_strategies=...)``.
 
-    We monkey-patch ``solve_hunl_postflop`` to capture the kwarg without
-    actually solving. The smoke is on the kwarg routing, not on the
-    solver's lock-honouring semantics (which is covered by
-    ``tests/test_node_locking.py`` on the engine side).
+    v1.11 (engine↔GUI integration on main's fast engine): ``_dispatch_solve``
+    no longer calls the Python ``solve_hunl_postflop`` for a concrete postflop
+    spot. The postflop branch now routes through main's hookless FAST binding
+    via ``poker_solver.solver.solve`` (imported in ``_dispatch_solve`` as
+    ``canonical_solve``) with ``backend="rust"`` — see ``ui/state.py`` step 2
+    of ``_dispatch_solve``. So we patch ``poker_solver.solver.solve`` (the
+    symbol the dispatcher actually invokes) and capture the kwargs. The smoke
+    is on the kwarg routing, not on the solver's lock-honouring semantics
+    (covered by ``tests/test_node_locking.py`` on the engine side).
     """
     from unittest.mock import patch
 
@@ -128,7 +133,7 @@ def test_locked_strategies_threads_through_solve_runner_start() -> None:
 
     captured: dict[str, Any] = {}
 
-    def _fake_solve_postflop(*args: Any, **kwargs: Any) -> SolveResult:
+    def _fake_canonical_solve(*args: Any, **kwargs: Any) -> SolveResult:
         captured.update(kwargs)
         return SolveResult(
             average_strategy={"root": [1.0]},
@@ -148,7 +153,7 @@ def test_locked_strategies_threads_through_solve_runner_start() -> None:
     game = HUNLPoker(cfg)
     locks = {"root/0_bet75pct": [0.6, 0.0, 0.4]}
 
-    with patch("poker_solver.hunl_solver.solve_hunl_postflop", _fake_solve_postflop):
+    with patch("poker_solver.solver.solve", _fake_canonical_solve):
         from ui.state import SolveRunner
 
         runner = SolveRunner()
@@ -208,8 +213,16 @@ def test_pushfold_plus_locks_raises_value_error_without_force() -> None:
 def test_force_tree_solve_flag_threads_through_runner() -> None:
     """Smoke 4: ``SolveRunner.start(force_tree_solve=True)`` propagates
     the override through ``_dispatch_solve`` so the next solve skips the
-    push/fold short-circuit even with locks set. We patch the postflop
-    solver and confirm the dispatcher reaches it.
+    push/fold short-circuit even with locks set. We patch the canonical
+    solver and confirm the dispatcher reaches it with the flag threaded.
+
+    v1.11 (engine↔GUI integration on main's fast engine): the concrete
+    postflop branch of ``_dispatch_solve`` now routes through main's hookless
+    FAST binding via ``poker_solver.solver.solve`` (imported as
+    ``canonical_solve``), forwarding BOTH ``locked_strategies`` and
+    ``force_tree_solve`` — see ``ui/state.py`` step 2. The old Python
+    ``solve_hunl_postflop`` is no longer on this path, so we patch
+    ``poker_solver.solver.solve`` and assert the flag round-trips.
     """
     from unittest.mock import patch
 
@@ -241,7 +254,7 @@ def test_force_tree_solve_flag_threads_through_runner() -> None:
     )
     game = HUNLPoker(cfg)
 
-    with patch("poker_solver.hunl_solver.solve_hunl_postflop", _fake_solve):
+    with patch("poker_solver.solver.solve", _fake_solve):
         from ui.state import SolveRunner
 
         runner = SolveRunner()
@@ -255,12 +268,13 @@ def test_force_tree_solve_flag_threads_through_runner() -> None:
         )
         runner.join(timeout=5.0)
 
-    # Postflop branch reached -> force_tree_solve correctly bypassed
-    # any push/fold lookup. The kwarg is consumed by the dispatcher
-    # before the postflop solver is called, so it doesn't appear in
-    # the captured kwargs — but the fact that the solver was called at
-    # all (with the locks kwarg threaded) proves the path.
+    # Postflop branch reached -> the dispatcher forwarded both the locks and
+    # the ``force_tree_solve`` override into ``canonical_solve``. The flag is
+    # now a real ``canonical_solve`` kwarg (not consumed by the dispatcher),
+    # so it appears in the captured kwargs alongside the locks.
     assert "locked_strategies" in captured
+    assert captured["locked_strategies"] == {"k": [0.5, 0.5]}
+    assert captured.get("force_tree_solve") is True
 
 
 # ---------------------------------------------------------------------------
