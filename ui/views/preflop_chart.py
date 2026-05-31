@@ -633,6 +633,22 @@ def _by_line_map(state: AppState) -> dict[str, dict[str, dict[str, float]]] | No
 # below this) while genuine 3-bet hands sit well above it.
 _OFF_PATH_REACH_FRACTION: float = 0.005
 
+# Fold-probability threshold above which a hand class is treated as
+# fold-dominant at one of the displayed player's ancestor decision nodes.
+# Once a hand folds ~100% at a node, every deeper action on this line is
+# off-path regardless of how the normalized reach lands at a sparse deep node
+# — this complements the pure reach threshold for fold-dominant hands it can
+# miss (e.g. a node where only a handful of classes survive can inflate the
+# survivors' normalized share). The continuing-action probabilities the reach
+# walk multiplies in are the NON-fold actions, so we read the FOLD mass here.
+_FOLD_DOMINANT_THRESHOLD: float = 0.99
+
+# The engine's fold-action label in the per-class node-strategy maps. Verified
+# against the source-of-truth ``ui.state._action_labels_for_count`` (which the
+# worker uses to build ``_by_line``): "fold" is canonically label index 0 for
+# every node. Pinned as a constant so a future relabel is a one-line change.
+_FOLD_LABEL: str = "fold"
+
 
 def _bet_labels(node_strat: dict[str, dict[str, float]]) -> list[str]:
     """Return a node's bet/raise action labels in menu order.
@@ -706,6 +722,60 @@ def _label_for_token(
     return None
 
 
+def reach_and_fold_dominant(
+    by_line: dict[str, dict[str, dict[str, float]]] | None,
+    hand: str,
+    target_hist: str | None,
+) -> tuple[float, bool] | None:
+    """Walk the displayed player's line once; return ``(reach, fold_dominant)``.
+
+    Single pass over the DISPLAYED player's own ancestor decision nodes on this
+    line (the same walk :func:`reach` does). Returns a tuple:
+
+      * ``reach`` — the product of this player's continuing-action probabilities
+        (root / no gating nodes -> ``1.0``). This is the EXISTING reach signal.
+      * ``fold_dominant`` — ``True`` when, at ANY ancestor decision node of this
+        player on the line, the hand's FOLD probability is ≥
+        :data:`_FOLD_DOMINANT_THRESHOLD`. Once a hand folds ~100% at a node,
+        every deeper action is off-path regardless of how the normalized reach
+        lands at a sparse deep node, so this catches fold-dominant hands the
+        reach threshold alone can miss.
+
+    Returns ``None`` (FAIL-SAFE) when the walk can't be fully computed —
+    ``by_line`` is missing, a prior node along the line isn't present, the hand
+    class is absent at a gating node, or a token can't be mapped to a label.
+    Callers must NOT grey anything for a line when this is ``None`` for any
+    class. A missing FOLD label at a node does NOT trip the fail-safe and does
+    NOT mark fold-dominant (same posture as a missing continuing label that
+    contributes 0.0): we only set ``fold_dominant`` on an affirmative ≥
+    threshold reading.
+    """
+    if by_line is None:
+        return None
+    toks = _LINE_TOKEN_RE.findall(_line_body(target_hist))
+    actor = preflop_line_actor(target_hist)
+    r = 1.0
+    fold_dominant = False
+    for i, tok in enumerate(toks):
+        prefix = "||p|" + "".join(toks[:i])
+        # Only the displayed player's OWN decisions gate their reach.
+        if preflop_line_actor(prefix) != actor:
+            continue
+        node = by_line.get(prefix)
+        if node is None or hand not in node:
+            return None  # FAIL-SAFE: can't compute -> don't grey
+        # Fold-propagation rule: a ≥99% fold at any ancestor decision node makes
+        # everything downstream off-path. Missing fold label -> fail-safe (do
+        # not mark), matching the existing missing-label posture.
+        if node[hand].get(_FOLD_LABEL, 0.0) >= _FOLD_DOMINANT_THRESHOLD:
+            fold_dominant = True
+        label = _label_for_token(by_line, prefix, tok, node)
+        if label is None:
+            return None
+        r *= node[hand].get(label, 0.0)
+    return r, fold_dominant
+
+
 def reach(
     by_line: dict[str, dict[str, dict[str, float]]] | None,
     hand: str,
@@ -724,25 +794,14 @@ def reach(
     present, the hand class is absent at a gating node, or a token can't be
     mapped to a label. Callers must NOT grey anything for a line when reach is
     ``None`` for any class.
+
+    Thin wrapper over :func:`reach_and_fold_dominant` that drops the
+    fold-dominant flag, preserving the historical ``float | None`` contract.
     """
-    if by_line is None:
+    rfd = reach_and_fold_dominant(by_line, hand, target_hist)
+    if rfd is None:
         return None
-    toks = _LINE_TOKEN_RE.findall(_line_body(target_hist))
-    actor = preflop_line_actor(target_hist)
-    r = 1.0
-    for i, tok in enumerate(toks):
-        prefix = "||p|" + "".join(toks[:i])
-        # Only the displayed player's OWN decisions gate their reach.
-        if preflop_line_actor(prefix) != actor:
-            continue
-        node = by_line.get(prefix)
-        if node is None or hand not in node:
-            return None  # FAIL-SAFE: can't compute -> don't grey
-        label = _label_for_token(by_line, prefix, tok, node)
-        if label is None:
-            return None
-        r *= node[hand].get(label, 0.0)
-    return r
+    return rfd[0]
 
 
 def compute_off_path(
@@ -750,27 +809,40 @@ def compute_off_path(
 ) -> dict[str, bool]:
     """Return ``{hand_class -> off_path}`` for the selected line.
 
-    Computes reach for every class ONCE, normalizes by the total reach mass,
-    and marks a class off-path when its normalized reach is below
-    :data:`_OFF_PATH_REACH_FRACTION`. FAIL-SAFE: if reach is ``None`` for ANY
-    class (a prior node missing, e.g. a partial live result), nothing is
-    greyed — every class returns ``off_path=False`` so the chart renders
-    normally. The root node yields uniform reach, so nothing is greyed there.
+    A class is off-path when EITHER:
+      * (reach rule) its normalized reach is below
+        :data:`_OFF_PATH_REACH_FRACTION` (0.5% of the total reach mass), OR
+      * (fold rule) it is FOLD-DOMINANT — its fold probability is ≥
+        :data:`_FOLD_DOMINANT_THRESHOLD` at any of the displayed player's
+        ancestor decision nodes on this line. Once a hand folds ~100% at a
+        node, everything downstream is off-path even if the normalized reach at
+        a sparse deep node lands above the 0.5% bar.
+
+    Both signals come from a SINGLE walk per class via
+    :func:`reach_and_fold_dominant`. FAIL-SAFE: if that walk is ``None`` for ANY
+    class (a prior node missing, e.g. a partial live result), nothing is greyed
+    — every class returns ``off_path=False`` so the chart renders normally. The
+    root node has no gating nodes -> uniform reach + no fold-dominance, so
+    nothing is greyed there.
     """
     by_line = _by_line_map(state)
     reaches: dict[str, float] = {}
+    fold_dominant: dict[str, bool] = {}
     for cls in hand_classes:
-        r = reach(by_line, cls, target_hist)
-        if r is None:
-            # Reach not fully computable for this line -> show everything.
+        rfd = reach_and_fold_dominant(by_line, cls, target_hist)
+        if rfd is None:
+            # Walk not fully computable for this line -> show everything.
             return {cls: False for cls in hand_classes}
-        reaches[cls] = r
+        reaches[cls], fold_dominant[cls] = rfd
     total = sum(reaches.values())
     if total <= 0.0:
-        # Degenerate (all-zero) reach -> can't discriminate; show everything.
-        return {cls: False for cls in hand_classes}
+        # Degenerate (all-zero) reach: the reach rule can't discriminate, but
+        # the fold rule still can — keep any affirmative fold-dominant flags.
+        return {cls: fold_dominant[cls] for cls in hand_classes}
     return {
-        cls: (r / total) < _OFF_PATH_REACH_FRACTION for cls, r in reaches.items()
+        cls: ((reaches[cls] / total) < _OFF_PATH_REACH_FRACTION)
+        or fold_dominant[cls]
+        for cls in hand_classes
     }
 
 

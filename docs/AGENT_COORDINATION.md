@@ -157,6 +157,31 @@ dominated-hand EVs that pin at 0 / >pot under-convergence (§5), so they must be
 run at convergence-grade iters to be trustworthy. Pairs with §3b (perf) + §3c
 (validation).
 
+### 3e. Bake off-path→fold into blueprint generation (LOW priority)
+
+The blueprint shards carry CFR's untrained **off-path** strategies: a hand can
+store e.g. `call 99%` at a node it reaches with ≈ 0 probability (it folded out
+earlier on that line), because CFR never trains the regret at a node the hand
+doesn't reach, leaving leftover noise. The GUI now **display-filters** these in
+the preflop chart (`ui/views/preflop_chart.py`): a class is greyed "not in
+range" when its **normalized reach < 0.5%** OR it is **fold-dominant** (fold
+probability ≥ 99% at one of the displayed player's ancestor decision nodes on
+the line). That fixes the *chart*, but the shipped shards themselves still
+contain the noise at the source.
+
+**Ask (engine track):** if you want the shards clean at the SOURCE, add a
+post-process step to the blueprint-generation pipeline that, once a hand is
+fold-dominant / reach ≈ 0 at a node, **propagates fold downstream** — i.e. sets
+its stored strategy at every off-path node to pure fold. **Important caveat:
+regenerating the shards ALONE will NOT fix this — CFR reproduces the same
+off-path noise on every solve.** It needs the explicit post-process pass; a
+re-solve without it changes nothing.
+
+**Priority: LOW.** The display filter already handles the chart, and other
+consumers read on-path lines (where the strategy is trained and correct), so
+the source noise is currently inert. This is a cleanliness/correctness-at-source
+nicety, not a blocker.
+
 ---
 
 ## 4. GIT COORDINATION (important)

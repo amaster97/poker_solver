@@ -1546,3 +1546,171 @@ def test_reach_real_engine_82s_72o_off_path_at_4bet() -> None:
     assert any(
         (reaches[h] / total) >= pc._OFF_PATH_REACH_FRACTION for h in classes
     ), "at least one class must be in-range at a reachable node"
+
+
+# ===========================================================================
+# Fold-propagation rule: a hand that folds ≥99% at an ancestor decision node is
+# off-path downstream EVEN IF the normalized-reach threshold alone would miss
+# it (a sparse deep node can inflate a fold-dominant survivor's normalized
+# share above 0.5%). This is the complementary rule layered onto the reach
+# threshold via the OR in compute_off_path.
+# ===========================================================================
+
+
+def _fold_dominant_sparse_by_line() -> dict[str, dict[str, dict[str, float]]]:
+    """4-bet line where the FOLD rule catches what the reach threshold MISSES.
+
+    Display line ``||p|b200r400r1000`` (BB facing a 4-bet). The BB's ONLY gating
+    decision node on this line is the 3-bet node ``||p|b200`` (the reach walk
+    consumes the ``r400`` token there, which rank-maps to ``open_2``); the SB's
+    open and the SB's 4-bet are skipped (opponent nodes). At ``||p|b200``:
+
+      * ``82s`` is FOLD-DOMINANT: it folds 99%, and its remaining 1% continue is
+        put ENTIRELY into ``open_2`` (the r400 3-bet that defines the line) ->
+        reach = 0.01. Because nearly every OTHER class has ``open_2 == 0`` (they
+        fold or flat-call -> reach 0 at the 4-bet node), the TOTAL reach mass is
+        tiny, so 82s's NORMALIZED reach lands ABOVE 0.5% — the reach rule alone
+        would NOT grey it. The fold rule (fold ≥ 0.99) MUST still mark it
+        off-path. This is the case the pure reach threshold can miss.
+      * ``72o`` folds 80% (< 99%) and 3-bets (``open_2``) 20% -> healthy reach,
+        NOT fold-dominant -> stays in-range.
+      * ``AA`` 3-bets heavily (fold 0%, ``open_2`` 0.6) -> clearly in-range.
+      * all remaining classes flat-call the open (``open_2 == 0``) -> reach 0,
+        keeping the total mass small so 82s's normalized share clears 0.5%.
+
+    The displayed 4-bet node's own stored strategy is irrelevant to off-path
+    detection (the walk only reads the BB's gating node ``||p|b200``).
+    """
+    classes = _all_169_classes()
+    # Sibling raise tokens at ||p|b200 must exist so r400 rank-maps to open_2.
+
+    def node_b200(cls: str) -> dict[str, float]:
+        if cls == "AA":
+            # Clearly in-range: heavy 3-bet, no fold.
+            return {"fold": 0.0, "call": 0.4, "open_2": 0.6, "open_3": 0.0}
+        if cls == "82s":
+            # Fold-dominant (99%) but the 1% continue all goes to the r400 3-bet
+            # (open_2) -> reach 0.01, which the sparse total inflates above 0.5%.
+            return {"fold": 0.99, "call": 0.0, "open_2": 0.01, "open_3": 0.0}
+        if cls == "72o":
+            # Folds < 99% and 3-bets 20% -> NOT fold-dominant, in-range.
+            return {"fold": 0.8, "call": 0.0, "open_2": 0.2, "open_3": 0.0}
+        # Everyone else: flat-call the open -> open_2 == 0 -> reach 0.
+        return {"fold": 0.0, "call": 1.0, "open_2": 0.0, "open_3": 0.0}
+
+    root = {c: {"fold": 0.0, "call": 0.2, "open_2": 0.5, "open_3": 0.3} for c in classes}
+    return {
+        "||p|": root,
+        "||p|b200": {c: node_b200(c) for c in classes},
+        # Sibling raise tokens (existence drives the r400 -> open_2 rank map).
+        "||p|b200r400": {c: {"fold": 0.0, "call": 1.0} for c in classes},
+        "||p|b200r500": {c: {"fold": 0.0, "call": 1.0} for c in classes},
+        "||p|b200r600": {c: {"fold": 0.0, "call": 1.0} for c in classes},
+        "||p|b200r700": {c: {"fold": 0.0, "call": 1.0} for c in classes},
+        # The displayed 4-bet line (its own strategy is NOT read for off-path).
+        "||p|b200r400r1000": {
+            c: {"fold": 0.0, "call": 0.99, "open_2": 0.01} for c in classes
+        },
+    }
+
+
+def test_fold_rule_catches_what_reach_threshold_misses() -> None:
+    """The reach threshold ALONE would leave 82s in-range here (its normalized
+    reach lands above 0.5% at this sparse 4-bet node), but the fold rule (fold
+    ≥99% at the BB's 3-bet gating node) marks it off-path. 72o (fold 80%) and AA
+    stay in-range. This is the exact case the pure reach threshold can miss."""
+    from ui.views import preflop_chart as pc
+
+    by_line = _fold_dominant_sparse_by_line()
+    target = "||p|b200r400r1000"
+    classes = _all_169_classes()
+
+    # --- Establish the premise: reach ALONE would NOT grey 82s here. ---
+    reaches = {h: pc.reach(by_line, h, target) for h in classes}
+    assert all(v is not None for v in reaches.values())
+    total = sum(reaches.values())
+    assert total > 0.0
+    reach_norm_82s = reaches["82s"] / total
+    assert reach_norm_82s >= pc._OFF_PATH_REACH_FRACTION, (
+        "premise: 82s's normalized reach must land ABOVE 0.5% so the reach rule "
+        f"alone would MISS it (reach_norm={reach_norm_82s:.4f})"
+    )
+
+    # --- The fold rule must flag 82s fold-dominant via the single walk. ---
+    rfd_82s = pc.reach_and_fold_dominant(by_line, "82s", target)
+    assert rfd_82s is not None and rfd_82s[1] is True, "82s must be fold-dominant"
+    rfd_72o = pc.reach_and_fold_dominant(by_line, "72o", target)
+    assert rfd_72o is not None and rfd_72o[1] is False, "72o folds <99% -> not dominant"
+
+    # --- compute_off_path ORs them: 82s off-path via fold rule, 72o/AA not. ---
+    state = _fake_grid_state(by_line, target)
+    off = pc.compute_off_path(state, classes, target)
+    assert off["82s"] is True, "82s must be off-path via the fold rule"
+    assert off["72o"] is False, "72o folds <99% with healthy reach -> in-range"
+    assert off["AA"] is False, "AA 3-bets fully -> in-range"
+
+
+def test_fold_rule_healthy_hand_not_off_path() -> None:
+    """A hand that folds < 99% at EVERY ancestor and carries healthy reach is
+    NOT off-path under either rule."""
+    from ui.views import preflop_chart as pc
+
+    by_line = _fold_dominant_sparse_by_line()
+    target = "||p|b200r400r1000"
+
+    rfd = pc.reach_and_fold_dominant(by_line, "72o", target)
+    assert rfd is not None
+    r, fold_dominant = rfd
+    assert fold_dominant is False, "72o never folds ≥99% -> not fold-dominant"
+    assert r > 0.0, "72o 3-bets 20% -> nonzero reach"
+
+    state = _fake_grid_state(by_line, target)
+    off = pc.compute_off_path(state, _all_169_classes(), target)
+    assert off["72o"] is False
+
+
+def test_fold_rule_root_uniform_nothing_greyed() -> None:
+    """The root open node has NO gating decision nodes for the displayed-actor
+    walk, so neither the reach rule nor the fold rule greys anything."""
+    from ui.views import preflop_chart as pc
+
+    state = _fake_grid_state(_fold_dominant_sparse_by_line(), "||p|")
+    off = pc.compute_off_path(state, _all_169_classes(), "||p|")
+    assert not any(off.values()), "root node must not grey any class"
+
+
+def test_reach_wrapper_matches_walk_reach_component() -> None:
+    """``reach`` is a thin wrapper over ``reach_and_fold_dominant`` and returns
+    exactly its reach component (or None on fail-safe)."""
+    from ui.views import preflop_chart as pc
+
+    by_line = _synthetic_by_line()
+    target = "||p|b200r400r1000"
+    for h in ("AA", "KK", "82s", "72o", "QJo"):
+        rfd = pc.reach_and_fold_dominant(by_line, h, target)
+        assert rfd is not None
+        assert pc.reach(by_line, h, target) == rfd[0]
+
+    # Fail-safe parity: drop a gating node -> both return None.
+    broken = _synthetic_by_line()
+    del broken["||p|b200"]
+    assert pc.reach_and_fold_dominant(broken, "AA", target) is None
+    assert pc.reach(broken, "AA", target) is None
+
+
+def test_fold_rule_missing_fold_label_failsafe() -> None:
+    """FAIL-SAFE posture: a gating node whose per-class strategy LACKS the fold
+    label must NOT mark the hand fold-dominant (we only flag on an affirmative
+    ≥99% reading), and the reach component is unaffected."""
+    from ui.views import preflop_chart as pc
+
+    by_line = _fold_dominant_sparse_by_line()
+    # Strip the fold key from the BB's 3-bet gating node for 82s only.
+    node = by_line["||p|b200"]["82s"]
+    node.pop("fold", None)
+    rfd = pc.reach_and_fold_dominant(by_line, "82s", "||p|b200r400r1000")
+    assert rfd is not None
+    r, fold_dominant = rfd
+    assert fold_dominant is False, "missing fold label must not assert dominance"
+    # Reach still flows from the open_2 (r400 3-bet) continue probability.
+    assert r == 0.01
