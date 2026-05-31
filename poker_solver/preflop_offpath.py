@@ -444,6 +444,11 @@ def _label_for_token(
     return None
 
 
+def _is_bet_token(token: str) -> bool:
+    """``True`` for a bet/open/raise history token (``b<amt>`` / ``r<amt>``)."""
+    return bool(token) and token[0] in "br"
+
+
 def reach_and_fold_dominant(
     by_line: dict[str, dict[str, dict[str, float]]] | None,
     hand: str,
@@ -456,6 +461,14 @@ def reach_and_fold_dominant(
 
       * ``reach`` — the product of this player's continuing-action probabilities
         (root / no gating nodes -> ``1.0``). This is the EXISTING reach signal.
+        SIZE-AGNOSTIC at the player's OWN raise nodes: when the continuing token
+        is a bet/raise (``b…``/``r…``) we credit the hand's TOTAL aggression mass
+        (summed over EVERY bet/raise label at that node), NOT just the single
+        matched-size label — a hand that raised by ANY size took this aggressive
+        action and is in this branch. Call/limp (``c``) and all-in (``A``) stay
+        exact (single, unambiguous actions). This fixes pure-size-mixers (e.g.
+        AA at ``b300r700r1500`` 3-bets ~98% but almost purely to ``r900``, so the
+        single-``r700`` reading was ~0 and falsely flagged it off-path).
       * ``fold_dominant`` — ``True`` when, at ANY ancestor decision node of this
         player on the line, the hand's FOLD probability is ≥
         :data:`_FOLD_DOMINANT_THRESHOLD`. Once a hand folds ~100% at a node,
@@ -494,7 +507,27 @@ def reach_and_fold_dominant(
         label = _label_for_token(by_line, prefix, tok, node)
         if label is None:
             return None
-        r *= node[hand].get(label, 0.0)
+        # SIZE-AGNOSTIC reach crediting. The blueprint's raise nodes offer
+        # MULTIPLE sizes (e.g. at ``||p|b300`` the BB's 3-bet menu is
+        # ``r600``/``r700``/``r900``). The continuing token records the size the
+        # CHART LINE took (``r700`` on ``b300r700r1500``), but the hand may put
+        # almost all of its aggression on a DIFFERENT size of the same action
+        # (AA 3-bets ~98% but almost purely to ``r900``, P(r700)≈0.006). The
+        # size siblings are NOT mutually-exclusive paths for the off-path
+        # question — a hand that raised by ANY size took this aggressive action
+        # and is in this branch; only genuine folds/limps (never raised) are
+        # off-path. So when the continuing action is a bet/raise we credit the
+        # hand's TOTAL aggression mass (sum over EVERY bet/raise label at this
+        # node), not just the single matched-size label. Call/limp (``c``) and
+        # all-in (``A``) stay exact — they are single, unambiguous actions.
+        # NOTE: the forthcoming postflop off-path module MUST apply the same
+        # principle — postflop bets/raises are likewise offered at multiple
+        # sizes, so reach must sum over all bet/raise labels, never one size.
+        if _is_bet_token(tok):
+            bet_labels = _bet_labels(node)
+            r *= sum(node[hand].get(lbl, 0.0) for lbl in bet_labels)
+        else:
+            r *= node[hand].get(label, 0.0)
     return r, fold_dominant
 
 

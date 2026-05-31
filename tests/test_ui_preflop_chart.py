@@ -1432,7 +1432,9 @@ def test_compute_off_path_failsafe_no_by_line() -> None:
 
 def test_cell_tag_and_tooltip_off_path() -> None:
     """An off-path cell shows the em-dash tag (not F/C/R/J) and a 'not in
-    range here' tooltip, regardless of the stored (meaningless) strategy."""
+    range on this line' tooltip, regardless of the stored (meaningless)
+    strategy. The tooltip must not assert a fold (off-path hands may have
+    limped/called or never entered the branch, e.g. a pure-size-mixer)."""
     from ui.views import preflop_chart as pc
 
     # Stored strategy says 'call 99%' — but the cell is off-path.
@@ -1443,7 +1445,11 @@ def test_cell_tag_and_tooltip_off_path() -> None:
     assert pc._cell_tag(summary, off_path=False).startswith("C")
 
     tip = pc._tooltip_text("82s", summary, off_path=True)
-    assert "82s" in tip and "not in range here" in tip
+    assert "82s" in tip and "not in range on this line" in tip
+    # The tooltip must NOT assert a fold: off-path hands may have limped/called
+    # or never entered the branch (e.g. a pure-size-mixer that raised a different
+    # size), not necessarily folded.
+    assert "folded" not in tip.lower()
     assert "call" not in tip.lower(), "off-path tooltip must not imply a real action"
 
 

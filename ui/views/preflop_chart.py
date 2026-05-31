@@ -1251,14 +1251,17 @@ def _tooltip_text(
     "limp (complete the SB)" since completing the small blind is a limp, not a
     call; facing-action charts leave the raw "call" label untouched.
 
-    Off-path classes (reach ~0 at the displayed node) get a "not in range here"
-    tooltip instead of the per-action breakdown — that breakdown is meaningless
-    when the class never arrives at this node.
+    Off-path classes (reach ~0 at the displayed node) get a "not in range on
+    this line" tooltip instead of the per-action breakdown — that breakdown is
+    meaningless when the class never arrives at this node. Off-path hands didn't
+    take this line (folded earlier, limped/called, or simply never entered this
+    branch); the tooltip does NOT assert a fold, since size-mixers and flat-
+    callers are off-path here without ever folding.
     """
     if off_path:
         return (
-            f"{hand_class} — not in range here "
-            "(folded earlier on this line; reach ≈ 0%)"
+            f"{hand_class} — not in range on this line "
+            "(didn't take this line; reach ≈ 0%)"
         )
     if summary.empty:
         return f"{hand_class}: no chart data"
