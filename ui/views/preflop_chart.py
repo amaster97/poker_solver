@@ -605,6 +605,175 @@ def _line_chart_result(state: AppState) -> dict[str, Any] | None:
     return spliced
 
 
+def _by_line_map(state: AppState) -> dict[str, dict[str, dict[str, float]]] | None:
+    """Return the full per-line, per-class node-strategy map for this result.
+
+    This is the ``"_by_line"`` projection stashed by
+    ``SolveRunner._build_preflop_chart_summary`` — keyed by the FULL history
+    suffix (``"||p|"``, ``"||p|b200"``, ``"||p|b200r400r1000"``, …) and shaped
+    ``{ line -> { hand_class -> { action_label -> prob } } }``. It is the data
+    source the reach walk needs: every node along a line, not just the leaf.
+
+    Returns ``None`` when there is no result or the map isn't present (an older
+    result shape / a partial live snapshot) — the caller treats that as
+    "reach not computable" and FAILs SAFE (greys nothing).
+    """
+    result = _current_chart_result(state)
+    if not result:
+        return None
+    by_line = result.get("_by_line")
+    if not isinstance(by_line, dict) or not by_line:
+        return None
+    return by_line
+
+
+# Threshold (fraction of total reach mass) below which a hand class is treated
+# as "off-path" / not-in-range at the displayed node. 0.5% — see the module
+# tests: at a 4-bet node folded-out hands carry reach ≈ 0 (orders of magnitude
+# below this) while genuine 3-bet hands sit well above it.
+_OFF_PATH_REACH_FRACTION: float = 0.005
+
+
+def _bet_labels(node_strat: dict[str, dict[str, float]]) -> list[str]:
+    """Return a node's bet/raise action labels in menu order.
+
+    The engine reuses the same menu-position labels (``open_2 … open_5``,
+    plus any ``raise_N`` placeholders) for opens AND re-raises. Fold / call /
+    all_in are excluded — those are mapped from their own tokens. Order is the
+    insertion order of the per-class action dict, which is the canonical menu
+    order from ``_action_labels_for_count``.
+    """
+    if not node_strat:
+        return []
+    sample = next(iter(node_strat.values()))
+    return [lbl for lbl in sample if lbl.startswith(("open_", "raise_"))]
+
+
+def _sibling_bet_tokens(
+    by_line: dict[str, dict[str, dict[str, float]]], prefix: str
+) -> list[str]:
+    """Return the bet/raise child tokens one ply below ``prefix``, sorted by size.
+
+    e.g. for ``prefix == "||p|b200"`` this returns ``["r400", "r500", "r600",
+    "r700"]`` (the BB's re-raise sizes). Sorted ascending by the embedded
+    amount so the k-th sibling lines up with the k-th bet/raise label — the
+    menu labels are also size-ordered, so rank-matching is size-matching.
+    """
+    body = _line_body(prefix)
+    plen = len(_LINE_TOKEN_RE.findall(body))
+    sibs: set[str] = set()
+    for line in by_line:
+        toks = _LINE_TOKEN_RE.findall(_line_body(line))
+        if (
+            len(toks) == plen + 1
+            and "".join(toks[:plen]) == body
+            and toks[plen]
+            and toks[plen][0] in "br"
+        ):
+            sibs.add(toks[plen])
+    return sorted(sibs, key=lambda t: int(t[1:]))
+
+
+def _label_for_token(
+    by_line: dict[str, dict[str, dict[str, float]]],
+    prefix: str,
+    token: str,
+    node_strat: dict[str, dict[str, float]],
+) -> str | None:
+    """Map a history token to the continuing-action label at ``prefix``.
+
+    * ``c`` -> ``"call"`` (limp / flat / check — the engine's call label)
+    * ``A`` -> ``"all_in"``
+    * ``b<amt>`` / ``r<amt>`` -> the bet/raise label at the token's RANK among
+      its same-node siblings. The engine emits menu-position labels
+      (``open_2 … open_5``), NOT amount-suffixed ones, so we match by size rank:
+      the smallest sibling bet maps to the first bet label, etc. (verified
+      against the live ``solve_hunl_preflop_rvr`` binding).
+
+    Returns ``None`` when the token can't be resolved (unknown grammar / the
+    sibling set is missing) so the reach walk FAILs SAFE.
+    """
+    if token == "c":
+        return "call"
+    if token == "A":
+        return "all_in"
+    sibs = _sibling_bet_tokens(by_line, prefix)
+    labels = _bet_labels(node_strat)
+    if token in sibs:
+        k = sibs.index(token)
+        if k < len(labels):
+            return labels[k]
+    return None
+
+
+def reach(
+    by_line: dict[str, dict[str, dict[str, float]]] | None,
+    hand: str,
+    target_hist: str | None,
+) -> float | None:
+    """Compute a hand class's reach probability at node ``target_hist``.
+
+    Walks the action line token-by-token, multiplying in only the DISPLAYED
+    player's own continuing-action probabilities (the opponent's decisions
+    don't gate this player's reach to one of *their own* nodes). The root
+    (no tokens) has reach 1.0 for every class — uniform, so nothing is greyed.
+
+    ``by_line`` is the ``{ line -> { hand_class -> { label -> prob } } }`` map
+    from :func:`_by_line_map`. Returns ``None`` (FAIL-SAFE) when reach can't be
+    fully computed — ``by_line`` is missing, a prior node along the line isn't
+    present, the hand class is absent at a gating node, or a token can't be
+    mapped to a label. Callers must NOT grey anything for a line when reach is
+    ``None`` for any class.
+    """
+    if by_line is None:
+        return None
+    toks = _LINE_TOKEN_RE.findall(_line_body(target_hist))
+    actor = preflop_line_actor(target_hist)
+    r = 1.0
+    for i, tok in enumerate(toks):
+        prefix = "||p|" + "".join(toks[:i])
+        # Only the displayed player's OWN decisions gate their reach.
+        if preflop_line_actor(prefix) != actor:
+            continue
+        node = by_line.get(prefix)
+        if node is None or hand not in node:
+            return None  # FAIL-SAFE: can't compute -> don't grey
+        label = _label_for_token(by_line, prefix, tok, node)
+        if label is None:
+            return None
+        r *= node[hand].get(label, 0.0)
+    return r
+
+
+def compute_off_path(
+    state: AppState, hand_classes: list[str], target_hist: str | None
+) -> dict[str, bool]:
+    """Return ``{hand_class -> off_path}`` for the selected line.
+
+    Computes reach for every class ONCE, normalizes by the total reach mass,
+    and marks a class off-path when its normalized reach is below
+    :data:`_OFF_PATH_REACH_FRACTION`. FAIL-SAFE: if reach is ``None`` for ANY
+    class (a prior node missing, e.g. a partial live result), nothing is
+    greyed — every class returns ``off_path=False`` so the chart renders
+    normally. The root node yields uniform reach, so nothing is greyed there.
+    """
+    by_line = _by_line_map(state)
+    reaches: dict[str, float] = {}
+    for cls in hand_classes:
+        r = reach(by_line, cls, target_hist)
+        if r is None:
+            # Reach not fully computable for this line -> show everything.
+            return {cls: False for cls in hand_classes}
+        reaches[cls] = r
+    total = sum(reaches.values())
+    if total <= 0.0:
+        # Degenerate (all-zero) reach -> can't discriminate; show everything.
+        return {cls: False for cls in hand_classes}
+    return {
+        cls: (r / total) < _OFF_PATH_REACH_FRACTION for cls, r in reaches.items()
+    }
+
+
 def _chart_status(state: AppState) -> str:
     runner = getattr(state, "runner", None)
     if runner is None:
@@ -1068,7 +1237,15 @@ def _render_grid(state: AppState) -> None:
     # At the OPEN/root node the engine's "call" action is a *limp* (completing
     # the small blind), so the footer tag + tooltip read "L"/"Limp" there;
     # facing-action charts keep "C"/"Call" for a genuine call.
-    is_open_root = _is_open_root_line(_selected_line(state))
+    selected_line = _selected_line(state)
+    is_open_root = _is_open_root_line(selected_line)
+    # Off-path greying: a class whose reach at the displayed node is ~0 (it
+    # folded out earlier on this line) stores a meaningless strategy there, so
+    # mark it "not in range" rather than painting a misleading 99% call/raise.
+    # Computed ONCE for the whole grid; FAILs SAFE (no greying) when reach
+    # isn't fully computable — see compute_off_path.
+    all_classes = [hand_class_at(r, c) for r in range(13) for c in range(13)]
+    off_path = compute_off_path(state, all_classes, selected_line)
 
     with ui.element("div").style(
         f"display:grid;grid-template-columns:repeat(13, {_CELL_PX}px);"
@@ -1078,7 +1255,13 @@ def _render_grid(state: AppState) -> None:
             for col in range(13):
                 cls = hand_class_at(row, col)
                 summary = summaries.get(cls, CellSummary(label=cls, empty=True))
-                _render_cell(state, cls, summary, is_open_root=is_open_root)
+                _render_cell(
+                    state,
+                    cls,
+                    summary,
+                    is_open_root=is_open_root,
+                    off_path=off_path.get(cls, False),
+                )
 
 
 def _render_cell(
@@ -1087,20 +1270,31 @@ def _render_cell(
     summary: CellSummary,
     *,
     is_open_root: bool = False,
+    off_path: bool = False,
 ) -> None:
-    """Render a single matrix cell."""
+    """Render a single matrix cell.
+
+    ``off_path`` marks a class whose reach at the displayed node is ~0 (it
+    folded out earlier on this line). Such a cell stores a meaningless
+    strategy, so we render it like the faded/empty cell — ``var(--ps-faded)``
+    background, ``"—"`` tag, dim label, "not in range here" tooltip — rather
+    than the misleading raw fold/call/raise blend. It stays inside the existing
+    color scheme (no new colors) and is visually distinct from a semantic fold.
+    """
     ui = _import_nicegui()
     color = cell_color_css(summary)
     # F04: empty cells fall back to a NEUTRAL grey anchor (``_COLOR_EMPTY``)
     # — re-route that to the theme var so an unsolved chart isn't dark-on-dark
     # in light mode. Non-empty cells keep their semantic fold/call/raise/jam
     # blend (``cell_color_rgb`` is unit-tested).
-    if summary.empty:
+    if summary.empty or off_path:
         color = "var(--ps-faded)"
-    tag = _cell_tag(summary, is_open_root=is_open_root)
+    tag = _cell_tag(summary, is_open_root=is_open_root, off_path=off_path)
     selected = _selected_cell_label(state) == hand_class
     border = "var(--ps-cell-border-sel)" if selected else "var(--ps-cell-border)"
     cell_marker = f"preflop-chart-cell preflop-chart-cell-{hand_class}"
+    if off_path:
+        cell_marker = f"{cell_marker} preflop-chart-cell-offpath"
 
     def _on_click(_event: object = None, cls: str = hand_class) -> None:
         _set_selected_cell_label(state, cls)
@@ -1122,6 +1316,10 @@ def _render_cell(
         f"padding:2px 3px;font-size:10px;cursor:pointer;"
         f"font-family:'SF Pro',Inter,sans-serif"
     )
+    # Off-path classes get a dim label (same faded var the cell uses) so the
+    # cell reads as "not in range" rather than a real, actionable strategy.
+    label_color = "var(--ps-text-fainter)" if off_path else "var(--ps-cell-label)"
+    tag_color = "var(--ps-text-fainter)" if off_path else "var(--ps-cell-tag)"
     with (
         ui.element("div")
         .mark(cell_marker)
@@ -1129,23 +1327,35 @@ def _render_cell(
         .on("click", _on_click)
     ):
         ui.label(hand_class).style(
-            "font-weight:600;line-height:1;color:var(--ps-cell-label)"
+            f"font-weight:600;line-height:1;color:{label_color}"
         )
         if tag:
             ui.label(tag).style(
                 "font-family:Menlo,Consolas,monospace;font-size:9px;"
-                "align-self:flex-end;color:var(--ps-cell-tag)"
+                f"align-self:flex-end;color:{tag_color}"
             )
-        ui.tooltip(_tooltip_text(hand_class, summary, is_open_root=is_open_root))
+        ui.tooltip(
+            _tooltip_text(
+                hand_class, summary, is_open_root=is_open_root, off_path=off_path
+            )
+        )
 
 
-def _cell_tag(summary: CellSummary, *, is_open_root: bool = False) -> str:
+def _cell_tag(
+    summary: CellSummary, *, is_open_root: bool = False, off_path: bool = False
+) -> str:
     """Return the per-cell 1-letter+pct footer tag.
 
     On the OPEN/root chart (``is_open_root=True``) the engine's "call" action
     is a *limp* (completing the small blind), so it is tagged ``L`` rather than
     ``C``. Facing-action charts keep ``C`` for a genuine call.
+
+    Off-path classes (reach ~0 at the displayed node) get the em-dash ``"—"``
+    rather than F/C/R/J — the stored strategy is meaningless there, so we must
+    not imply a real fold/call/raise/jam decision.
     """
+    if off_path:
+        return "—"
     if summary.empty:
         return ""
     kind = summary.dominant_kind
@@ -1160,14 +1370,27 @@ def _cell_tag(summary: CellSummary, *, is_open_root: bool = False) -> str:
 
 
 def _tooltip_text(
-    hand_class: str, summary: CellSummary, *, is_open_root: bool = False
+    hand_class: str,
+    summary: CellSummary,
+    *,
+    is_open_root: bool = False,
+    off_path: bool = False,
 ) -> str:
     """Build the hover tooltip for one cell.
 
     On the OPEN/root chart the engine's "call" action is relabeled to
     "limp (complete the SB)" since completing the small blind is a limp, not a
     call; facing-action charts leave the raw "call" label untouched.
+
+    Off-path classes (reach ~0 at the displayed node) get a "not in range here"
+    tooltip instead of the per-action breakdown — that breakdown is meaningless
+    when the class never arrives at this node.
     """
+    if off_path:
+        return (
+            f"{hand_class} — not in range here "
+            "(folded earlier on this line; reach ≈ 0%)"
+        )
     if summary.empty:
         return f"{hand_class}: no chart data"
     parts = [hand_class]
@@ -1560,9 +1783,11 @@ __all__ = [
     "cell_color_css",
     "cell_color_rgb",
     "classify_action",
+    "compute_off_path",
     "hand_class_at",
     "parse_size_list",
     "project_chart",
+    "reach",
     "render",
     "_DEFAULT_ITERATIONS",
     "_DEFAULT_OPEN_SIZES_BB",

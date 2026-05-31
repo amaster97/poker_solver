@@ -1237,3 +1237,312 @@ async def test_ante_selector_end_to_end_blueprint_route(
     assert seen["live"] == 0, "half-ante full-range spot must hit the blueprint"
     info = state.runner.preflop_route_info
     assert info is not None and "half-ante" in info.confidence
+
+
+# ===========================================================================
+# Off-path greying: classes whose reach at the displayed node is ~0 (they
+# folded out earlier on this line) store a meaningless strategy there, so the
+# chart marks them "not in range" rather than painting a misleading 99% call.
+# ===========================================================================
+
+# A 13x13 grid's worth of canonical class labels (the universe the grid paints).
+def _all_169_classes() -> list[str]:
+    from ui.views.preflop_chart import hand_class_at
+
+    return [hand_class_at(r, c) for r in range(13) for c in range(13)]
+
+
+def _synthetic_by_line() -> dict[str, dict[str, dict[str, float]]]:
+    """Hand-crafted per-line node map for the 4-bet line ``||p|b200r400r1000``.
+
+    Deterministic (no live solve) so the precise per-class assertions don't
+    drift with CFR convergence. Models a 200BB-style tree where the BB acts on
+    this line and their only gating decision is the 3-bet node ``||p|b200``:
+      * AA / KK / QJo 3-bet (``open_2``) some of the time  -> nonzero reach;
+      * every other class flat-calls (``call`` 100%)         -> reach 0.
+
+    The sibling raise tokens ``r400 < r500 < …`` must exist as keys so the
+    token->label rank-mapping resolves ``r400`` to the smallest raise label
+    (``open_2``). Their bodies are irrelevant to the BB's reach.
+    """
+    classes = _all_169_classes()
+    raisers = {"AA", "KK", "QJo"}
+
+    def node_b200(cls: str) -> dict[str, float]:
+        if cls in raisers:
+            return {
+                "fold": 0.0,
+                "call": 0.4,
+                "open_2": 0.5,  # the 3-bet (r400) -> nonzero BB reach
+                "open_3": 0.1,
+                "open_4": 0.0,
+                "open_5": 0.0,
+                "all_in": 0.0,
+            }
+        return {
+            "fold": 0.0,
+            "call": 1.0,  # flat-calls the open -> never reaches the 4-bet node
+            "open_2": 0.0,
+            "open_3": 0.0,
+            "open_4": 0.0,
+            "open_5": 0.0,
+            "all_in": 0.0,
+        }
+
+    root = {
+        c: {"fold": 0.0, "call": 0.2, "open_2": 0.5, "open_3": 0.3} for c in classes
+    }
+    return {
+        "||p|": root,
+        "||p|b200": {c: node_b200(c) for c in classes},
+        # Sibling raise tokens (existence drives the rank->label mapping).
+        "||p|b200r400": {c: {"fold": 0.0, "call": 1.0} for c in classes},
+        "||p|b200r500": {c: {"fold": 0.0, "call": 1.0} for c in classes},
+        "||p|b200r600": {c: {"fold": 0.0, "call": 1.0} for c in classes},
+        "||p|b200r700": {c: {"fold": 0.0, "call": 1.0} for c in classes},
+        # The 4-bet line we display (its own strategy is what would mislead).
+        "||p|b200r400r1000": {
+            c: {"fold": 0.0, "call": 0.99, "open_2": 0.01} for c in classes
+        },
+    }
+
+
+def _fake_grid_state(
+    by_line: dict[str, dict[str, dict[str, float]]], selected_line: str
+) -> Any:
+    """Build an AppState-shaped fake whose grid renders ``selected_line``.
+
+    Wires the runner accessors the grid + reach walk consume:
+      * ``preflop_chart_result`` carries the ``_by_line`` map (reach source);
+      * ``available_preflop_lines`` / ``preflop_chart_summary_for_line`` feed
+        ``_line_chart_result`` (the displayed-node cell summaries);
+      * ``preflop_chart_selected_line`` pins the displayed node.
+    """
+    from types import SimpleNamespace
+
+    lines = sorted(by_line, key=lambda h: (len(h), h))
+    result = {
+        "per_class": by_line.get(lines[0], {}),
+        "actions": ["fold", "call", "open_2", "open_3", "open_4", "open_5", "all_in"],
+        "iterations": 100,
+        "wallclock_seconds": 0.5,
+        "available_lines": lines,
+        "_by_line": by_line,
+    }
+    runner = SimpleNamespace(
+        preflop_chart_result=result,
+        preflop_route_info=None,
+        status="done",
+        _mode="preflop_chart",
+        available_preflop_lines=lambda: lines,
+        preflop_chart_summary_for_line=lambda ln: dict(by_line.get(ln, {})),
+    )
+    prefs = SimpleNamespace(
+        preflop_chart_selected_line=selected_line,
+        preflop_chart_selected_class=None,
+    )
+    return SimpleNamespace(runner=runner, prefs=prefs)
+
+
+def test_reach_known_case_offpath_vs_inrange() -> None:
+    """At the 4-bet node ``||p|b200r400r1000`` (BB facing a 4-bet), hands that
+    flat-called the open carry reach ~0 (off-path) while the genuine 3-bet
+    hands carry real reach mass."""
+    from ui.views import preflop_chart as pc
+
+    by_line = _synthetic_by_line()
+    target = "||p|b200r400r1000"
+    classes = _all_169_classes()
+    reaches = {h: pc.reach(by_line, h, target) for h in classes}
+    # No class should be incomputable here (fully specified tree).
+    assert all(v is not None for v in reaches.values())
+    total = sum(reaches.values())
+    assert total > 0.0
+
+    # Off-path: 82s / 72o flat-called -> reach exactly 0.
+    for h in ("82s", "72o"):
+        assert reaches[h] == 0.0
+        assert (reaches[h] / total) < pc._OFF_PATH_REACH_FRACTION
+
+    # In-range: AA / KK / QJo 3-bet -> reach well above the 0.5% threshold.
+    for h in ("AA", "KK", "QJo"):
+        assert reaches[h] > 0.0
+        assert (reaches[h] / total) >= pc._OFF_PATH_REACH_FRACTION
+
+
+def test_compute_off_path_marks_deep_line() -> None:
+    """``compute_off_path`` flags 82s/72o off-path and the real 3-bet hands
+    in-range for the 4-bet line."""
+    from ui.views import preflop_chart as pc
+
+    state = _fake_grid_state(_synthetic_by_line(), "||p|b200r400r1000")
+    classes = _all_169_classes()
+    off = pc.compute_off_path(state, classes, "||p|b200r400r1000")
+    assert off["82s"] is True and off["72o"] is True
+    assert off["AA"] is False and off["KK"] is False and off["QJo"] is False
+
+
+def test_compute_off_path_root_uniform_nothing_greyed() -> None:
+    """The root open node has uniform reach (1.0 for every class), so NOTHING
+    is greyed there."""
+    from ui.views import preflop_chart as pc
+
+    state = _fake_grid_state(_synthetic_by_line(), "||p|")
+    classes = _all_169_classes()
+    off = pc.compute_off_path(state, classes, "||p|")
+    assert not any(off.values()), "root node must not grey any class"
+
+
+def test_compute_off_path_failsafe_missing_prior_node() -> None:
+    """FAIL-SAFE: when a prior node along the line is missing from ``_by_line``
+    (e.g. a partial live snapshot), reach is incomputable, so NOTHING is greyed
+    — the chart renders normally."""
+    from ui.views import preflop_chart as pc
+
+    by_line = _synthetic_by_line()
+    # Drop the BB's gating node so reach can't be computed for the deep line.
+    del by_line["||p|b200"]
+    state = _fake_grid_state(by_line, "||p|b200r400r1000")
+    classes = _all_169_classes()
+    # reach() returns None for the gated classes...
+    assert pc.reach(by_line, "AA", "||p|b200r400r1000") is None
+    # ...so compute_off_path greys NOTHING.
+    off = pc.compute_off_path(state, classes, "||p|b200r400r1000")
+    assert not any(off.values()), "missing prior node must disable greying"
+
+
+def test_compute_off_path_failsafe_no_by_line() -> None:
+    """FAIL-SAFE: a result with no ``_by_line`` map at all -> nothing greyed."""
+    from types import SimpleNamespace
+
+    from ui.views import preflop_chart as pc
+
+    runner = SimpleNamespace(
+        preflop_chart_result={"per_class": {"AA": {"call": 1.0}}},
+        available_preflop_lines=lambda: ["||p|"],
+        preflop_chart_summary_for_line=lambda ln: {"AA": {"call": 1.0}},
+    )
+    state = SimpleNamespace(
+        runner=runner,
+        prefs=SimpleNamespace(preflop_chart_selected_line="||p|"),
+    )
+    off = pc.compute_off_path(state, ["AA", "72o"], "||p|")
+    assert off == {"AA": False, "72o": False}
+
+
+def test_cell_tag_and_tooltip_off_path() -> None:
+    """An off-path cell shows the em-dash tag (not F/C/R/J) and a 'not in
+    range here' tooltip, regardless of the stored (meaningless) strategy."""
+    from ui.views import preflop_chart as pc
+
+    # Stored strategy says 'call 99%' — but the cell is off-path.
+    summary = pc.aggregate_actions({"call": 0.99, "fold": 0.01})
+    summary.label = "82s"
+    assert pc._cell_tag(summary, off_path=True) == "—"
+    # In-range path still renders the real tag.
+    assert pc._cell_tag(summary, off_path=False).startswith("C")
+
+    tip = pc._tooltip_text("82s", summary, off_path=True)
+    assert "82s" in tip and "not in range here" in tip
+    assert "call" not in tip.lower(), "off-path tooltip must not imply a real action"
+
+
+async def test_grid_renders_off_path_cells_for_deep_line(
+    user: User, isolated_state_dir: pathlib.Path
+) -> None:
+    """End-to-end render: the deep 4-bet line marks 82s/72o cells off-path
+    (``preflop-chart-cell-offpath`` marker + em-dash tag) while real 3-bet
+    hands render a normal action tag."""
+    from ui.state import get_state
+    from ui.views import preflop_chart as pc
+
+    await user.open("/")
+    state = get_state()
+    by_line = _synthetic_by_line()
+    lines = sorted(by_line, key=lambda h: (len(h), h))
+    state.runner.preflop_chart_result = {
+        "per_class": by_line[lines[0]],
+        "actions": ["fold", "call", "open_2", "open_3", "open_4", "open_5", "all_in"],
+        "iterations": 100,
+        "wallclock_seconds": 0.5,
+        "available_lines": lines,
+        "_by_line": by_line,
+    }
+    state.runner._mode = "preflop_chart"
+    state.runner.status = "done"
+    state.prefs.preflop_chart_selected_line = "||p|b200r400r1000"
+
+    # Direct render-fn check: which classes does the grid mark off-path?
+    off = pc.compute_off_path(state, _all_169_classes(), "||p|b200r400r1000")
+    assert off["82s"] and off["72o"]
+    assert not off["AA"] and not off["QJo"]
+
+    await user.open("/")
+    # The off-path cells carry the dedicated marker.
+    offpath_cells = user.find(marker="preflop-chart-cell-offpath").elements
+    assert len(offpath_cells) >= 1, "expected at least one off-path cell marker"
+    # 82s / 72o cells exist (the per-class markers are always emitted).
+    assert user.find(marker="preflop-chart-cell-82s").elements
+    assert user.find(marker="preflop-chart-cell-72o").elements
+
+
+def test_reach_real_engine_82s_72o_off_path_at_4bet() -> None:
+    """REAL ENGINE: hands that fold/flat pre-3bet (82s, 72o) carry reach ~0 at
+    the 4-bet node and are off-path.
+
+    This is the convergence-ROBUST invariant: 82s/72o essentially never 3-bet,
+    so their reach to a 4-bet node is orders of magnitude below the threshold
+    regardless of iteration count (verified at 120 AND 400 iters). We do NOT
+    assert on which premium hands are 'in range' there — that flips with CFR
+    convergence at 200BB (memory: under-convergence makes deep-node strategies
+    degenerate) — only that the never-3-bet hands are excluded.
+
+    Uses the fast class169 kernel (~1.3s at 120 iters, 200BB).
+    """
+    import poker_solver._rust as _rust
+    from poker_solver.hunl import HUNLConfig, Street, _serialize_hunl_config
+    from ui.state import SolveRunner
+    from ui.views import preflop_chart as pc
+
+    config = HUNLConfig(
+        starting_stack=200 * 100,
+        small_blind=50,
+        big_blind=100,
+        ante=0,
+        starting_street=Street.PREFLOP,
+        initial_board=(),
+        initial_pot=0,
+        initial_contributions=(0, 0),
+        initial_hole_cards=(),
+        abstraction=None,
+    )
+    config_json = _serialize_hunl_config(config)
+    repo_root = pathlib.Path(__file__).resolve().parents[1]
+    equity_path = repo_root / "assets" / "preflop_equity_169x169.npz"
+    assert equity_path.exists()
+
+    out = _rust.solve_hunl_preflop_rvr_class169(
+        config_json, str(equity_path), 120, 1.5, 0.0, 2.0, None, None, None, None
+    )
+    by_line = SolveRunner._project_preflop_by_line(out, class169=True)
+    target = "||p|b200r400r1000"
+    assert target in by_line, "expected the 4-bet line to be reachable at 200BB"
+
+    classes = _all_169_classes()
+    reaches = {h: pc.reach(by_line, h, target) for h in classes}
+    assert all(v is not None for v in reaches.values()), (
+        "reach must be fully computable for a complete live solve"
+    )
+    total = sum(reaches.values())
+    assert total > 0.0
+
+    for h in ("82s", "72o"):
+        norm = reaches[h] / total
+        assert norm < pc._OFF_PATH_REACH_FRACTION, (
+            f"{h} should be off-path at the 4-bet node; reach_norm={norm:.6f}"
+        )
+
+    # Sanity: SOME class must carry real reach (the line is genuinely reached).
+    assert any(
+        (reaches[h] / total) >= pc._OFF_PATH_REACH_FRACTION for h in classes
+    ), "at least one class must be in-range at a reachable node"
