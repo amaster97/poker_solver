@@ -1,5 +1,7 @@
 # GUI Campaign — Living Plan / TODO
 
+> **Cross-track handoff:** [`../AGENT_COORDINATION.md`](../AGENT_COORDINATION.md) — shipped state, GUI vs engine ownership, the engine-track asks (chain-solve Tier B, flop perf, validation), and git coordination. Read it first.
+
 > **STATUS (a9e92ea, 2026-05-31): engine↔GUI integration + UI polish SHIPPED to public+mirror; all 15 original issues done. Outstanding: chain-solve Tier B (turn/river), validation items — see OTHER ASPECTS.**
 
 Working checklist for the NiceGUI GUI test+fix campaign. **Maintain this continuously** —
