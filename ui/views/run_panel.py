@@ -146,6 +146,60 @@ def render(
 
             custom.on_value_change(_on_custom_change)
 
+        # The flat checkboxes above are the PREFLOP / fallback opening menu
+        # (used by any street without its own per-street override below).
+
+        ui.separator()
+        # ----- Per-street opening-bet menus (C1) -----
+        # Each street can override the flat menu with its OWN opening-bet
+        # sizes. Leaving a street with NO sizes checked means it inherits
+        # the flat menu (the Spot field stays ``None``). These write
+        # ``state.current_spot.{flop,turn,river}_bet_fractions``.
+        ui.label("Per-street opening sizes (% pot)").classes("font-medium")
+        ui.label(
+            "Override the flat menu for a specific street. No boxes checked "
+            "= inherit the flat menu above."
+        ).classes("text-xs text-gray-600 dark:text-gray-400")
+        for street_name in ("flop", "turn", "river"):
+            active = _street_fractions(state, street_name)
+            with ui.row().classes("gap-2 items-center"):
+                ui.label(f"{street_name.capitalize()}:").classes(
+                    "text-xs font-medium w-12"
+                )
+                for size, label in zip(_BET_SIZES, _BET_SIZE_LABELS):
+                    checked = active is not None and size in active
+
+                    def _toggle_street(
+                        e: Any,
+                        s: float = size,
+                        st: str = street_name,
+                    ) -> None:
+                        _on_street_bet_toggle(state, st, s, bool(e.value))
+
+                    scb = ui.checkbox(
+                        label, value=checked, on_change=_toggle_street
+                    )
+                    scb.mark(f"{street_name}-bet-checkbox-{int(size * 100)}")
+
+        ui.separator()
+        # ----- Raise size (C2): MULTIPLIERS of the bet faced, NOT % pot -----
+        # Writes ``state.current_spot.raise_size_xs``. Default (3.0,) = raise
+        # to 3x the bet. Comma-separated for multiple raise sizes.
+        with ui.row().classes("gap-2 items-center"):
+            ui.label("Raise size (× the bet):").classes("text-xs font-medium")
+            raise_input = ui.input(
+                value=", ".join(
+                    _fmt_x(x) for x in state.current_spot.raise_size_xs
+                ),
+                placeholder="3.0  (multiplier of the bet, comma-separated)",
+            ).classes("w-48 text-xs")
+            raise_input.mark("raise-size-input")
+
+            def _on_raise_change(e: Any) -> None:
+                _apply_raise_sizes(state, str(e.value))
+
+            raise_input.on_value_change(_on_raise_change)
+
         ui.separator()
         # ----- Raise caps -----
         with ui.row().classes("gap-2 items-center"):
@@ -654,6 +708,84 @@ def _apply_custom_bet_sizes(state: AppState, raw: str) -> None:
         return
     merged = sorted(set(state.current_spot.bet_sizes_checked) | set(sizes))
     state.current_spot.bet_sizes_checked = tuple(merged)
+    save_state()
+
+
+_STREET_FIELD: dict[str, str] = {
+    "flop": "flop_bet_fractions",
+    "turn": "turn_bet_fractions",
+    "river": "river_bet_fractions",
+}
+
+
+def _street_fractions(state: AppState, street: str) -> tuple[float, ...] | None:
+    """Read the per-street opening-bet menu for ``street`` off the spot.
+
+    Returns ``None`` when the street inherits the flat menu.
+    """
+    return getattr(state.current_spot, _STREET_FIELD[street])
+
+
+def _on_street_bet_toggle(
+    state: AppState, street: str, size: float, checked: bool
+) -> None:
+    """Toggle a size in/out of a per-street opening menu (C1).
+
+    Writes ``state.current_spot.{flop,turn,river}_bet_fractions``. When the
+    last checked size is removed, the street's field is reset to ``None`` so
+    it inherits the flat menu again (``HUNLConfig`` treats ``None`` that
+    way). The first time a size is checked for a street it seeds the menu
+    from the empty set (a per-street override that is INDEPENDENT of the
+    flat menu).
+    """
+    field_name = _STREET_FIELD[street]
+    current = getattr(state.current_spot, field_name)
+    sizes = set(current) if current is not None else set()
+    if checked:
+        sizes.add(size)
+    else:
+        sizes.discard(size)
+    new_value: tuple[float, ...] | None = tuple(sorted(sizes)) if sizes else None
+    setattr(state.current_spot, field_name, new_value)
+    save_state()
+
+
+def _fmt_x(x: float) -> str:
+    """Render a raise multiplier without a trailing ``.0`` when integral."""
+    return str(int(x)) if float(x).is_integer() else str(x)
+
+
+def _apply_raise_sizes(state: AppState, raw: str) -> None:
+    """Parse comma-separated raise MULTIPLIERS (× the bet) into the spot (C2).
+
+    Writes ``state.current_spot.raise_size_xs``. Values are interpreted as
+    raw multipliers of the bet faced (e.g. ``"2.5, 3"`` -> raise to 2.5x
+    then 3x). Empty / unparseable / all-non-positive input leaves the
+    existing value untouched (the engine requires a non-empty raise menu).
+    """
+    if not raw.strip():
+        return
+    try:
+        parts = [p.strip() for p in raw.split(",") if p.strip()]
+        xs: list[float] = []
+        for p in parts:
+            v = float(p)
+            if v <= 0.0:
+                continue
+            xs.append(v)
+    except ValueError:
+        return
+    if not xs:
+        return
+    # Dedupe while preserving order; the engine treats raise slots
+    # positionally so we keep the user's first-seen ordering.
+    seen: set[float] = set()
+    ordered: list[float] = []
+    for v in xs:
+        if v not in seen:
+            seen.add(v)
+            ordered.append(v)
+    state.current_spot.raise_size_xs = tuple(ordered)
     save_state()
 
 

@@ -959,6 +959,28 @@ def _spot_from_config(config: Any) -> Spot:
         ante=config.ante / big_blind if big_blind else 0.0,
         bet_sizes=tuple(config.bet_size_fractions),
         bet_sizes_checked=tuple(config.bet_size_fractions),
+        # C1/C2 bet-size menu fields. Carry per-street opening menus and the
+        # raise multiplier menu over from the preset config so a preset that
+        # defines them is faithfully reflected in the run panel. Per-street
+        # ``None`` (inherit the flat menu) is preserved. ``raise_size_xs``
+        # falls back to the HUNLConfig default ``(3.0,)`` if the config
+        # object predates the field.
+        flop_bet_fractions=(
+            tuple(config.flop_bet_fractions)
+            if getattr(config, "flop_bet_fractions", None) is not None
+            else None
+        ),
+        turn_bet_fractions=(
+            tuple(config.turn_bet_fractions)
+            if getattr(config, "turn_bet_fractions", None) is not None
+            else None
+        ),
+        river_bet_fractions=(
+            tuple(config.river_bet_fractions)
+            if getattr(config, "river_bet_fractions", None) is not None
+            else None
+        ),
+        raise_size_xs=tuple(getattr(config, "raise_size_xs", (3.0,))),
         include_all_in=config.include_all_in,
         preflop_raise_cap=config.preflop_raise_cap,
         postflop_raise_cap=config.postflop_raise_cap,

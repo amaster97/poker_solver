@@ -72,6 +72,7 @@ solves: 2 aggregator + 2 Nash).
 from __future__ import annotations
 
 import importlib
+import re
 import time
 
 import pytest
@@ -356,9 +357,36 @@ def test_nash_aa_kk_bets_vs_weak_pairs() -> None:
 def test_nash_weak_pairs_fold_vs_aa_kk() -> None:
     """Nash path: villain low pairs must fold heavily facing hero ``{AA, KK}``.
 
-    Hero air {22, 33} at P0; villain {AA, KK} at P1 acts first and bets.
-    Air faces the bet — first-decision projection is fold/call/raise.
-    Air should fold near-100%.
+    Hero air {22, 33} at P0; villain {AA, KK} at P1 acts first. When the
+    air FACES a bet, it must fold near-100%.
+
+    **Why we assert on ``per_history_strategy`` (the bet-facing nodes)
+    rather than the modal-walk ``per_class_strategy`` projection.**
+
+    On this dry last-street spot, {AA, KK} vs pure air ({22, 33} with 0%
+    equity that folds to any bet) are EV-INDIFFERENT between check and
+    bet: villain never calls and there is no future street, so AA/KK win
+    exactly the pot whether they check or bet. That is a genuine Nash
+    *indifference manifold* — multiple optimal strategies. The v1.11
+    perf paths (suit-iso + inclusion-exclusion, both ON by default) land
+    on the *uniform* {check, bet_50, bet_100} = 1/3 each Nash strategy;
+    the legacy path landed on *pure check*. (Confirmed NOT an engine bug:
+    when villain holds a hand with real equity/calling range, e.g. a set,
+    the AA/KK root trains to a *strict* pure check — the indifference
+    appears ONLY against 0-equity air.)
+
+    Because the ``per_class_strategy`` modal-walk follows villain's modal
+    action, and "check" is (weakly) modal here, the projected hero node
+    is "22 faces a CHECK" (check/bet) — which structurally has no fold
+    action, so a "fold rate > 0.8" assertion on it is non-falsifiable.
+
+    To keep this a meaningful *wrapper-hazard* gate (player-swap /
+    suit-encoding / hand-string bugs) AND poker-correct, we assert on the
+    actual bet-facing infosets in ``per_history_strategy``: every
+    ``...|r|b<size>`` node (P0 = 22/33 facing P1's bet) must put ~all of
+    its mass on FOLD (action index 0). A player-swap bug would route the
+    strong range to these nodes and they'd call/raise for value instead
+    of folding, failing the assertion.
     """
     cfg = _build_config()
 
@@ -374,15 +402,33 @@ def test_nash_weak_pairs_fold_vs_aa_kk() -> None:
     elapsed = time.perf_counter() - t0
     assert elapsed < 15.0, f"Nash reverse path took {elapsed:.1f}s; budget 15s"
 
+    # Bet-facing infosets: hero (22/33, P0) acting after villain (P1) bets.
+    # Key format: ``<hole>|<board>|r|b<size>`` (history ends in a bet token
+    # with no further hero action). Action ordering at a facing-bet node is
+    # [fold, call, raise...]; index 0 is fold.
+    bet_facing = {
+        k: v
+        for k, v in result.per_history_strategy.items()
+        if re.search(r"\|r\|b\d+$", k)
+    }
+    assert bet_facing, (
+        "expected at least one bet-facing 22/33 infoset in "
+        f"per_history_strategy; got keys: "
+        f"{sorted(result.per_history_strategy)[:5]!r}"
+    )
+    for key, row in bet_facing.items():
+        fold_prob = float(row[0])
+        assert fold_prob > VILLAIN_FOLD_FREQ_THRESHOLD, (
+            f"Nash bet-facing fold rate at {key!r} = {fold_prob:.4f}; "
+            f"expected > {VILLAIN_FOLD_FREQ_THRESHOLD} (row: "
+            f"{[round(x, 4) for x in row]})"
+        )
+
+    # Sanity: both weak classes are present in the projection (the
+    # modal-walk node still exists — it is just a check node here).
     for cls in NASH_VILLAIN_WEAK_RANGE:
         assert cls in result.per_class_strategy, (
             f"{cls} missing from Nash per_class_strategy; warnings: {result.warnings}"
-        )
-        fold = _fold_frequency(result.per_class_strategy[cls])
-        assert fold > VILLAIN_FOLD_FREQ_THRESHOLD, (
-            f"Nash {cls} fold rate = {fold:.4f}; "
-            f"expected > {VILLAIN_FOLD_FREQ_THRESHOLD} "
-            f"(strategy: {result.per_class_strategy[cls]})"
         )
 
     assert result.position == "aggressor", (

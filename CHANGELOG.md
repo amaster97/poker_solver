@@ -9,6 +9,19 @@ and this project adheres to [semantic versioning](https://semver.org/spec/v2.0.0
 
 In-flight on feature branches; not yet merged to `main`.
 
+### Added — Configurable bet menu (v1.11)
+- **Per-street opening-bet menus + lean raise multipliers.** `HUNLConfig`
+  gains `flop_bet_fractions` / `turn_bet_fractions` / `river_bet_fractions`
+  (`tuple | None`; `None` falls back to the flat `bet_size_fractions` for
+  that street) and `raise_size_xs` (raise sizes as **multipliers of the bet
+  faced**, default `(3.0,)`; raises no longer draw from `bet_size_fractions`).
+- **CLI flags** on `solve --hunl-mode postflop`: `--flop-bet-sizes` /
+  `--turn-bet-sizes` / `--river-bet-sizes` (per-street pot-fraction %
+  overrides) and `--raise-sizes` (raise multipliers). `--bet-sizes` remains
+  the flat / fallback menu.
+- Node-lock invalidation now reports that a length mismatch can stem from
+  any of `bet_size_fractions`, a per-street menu, or `raise_size_xs`.
+
 ### In progress
 - v1.5/v2 follow-ups (Q3 exploitability slider reframe; range-based
   dealing; Rust callbacks; full-tree preflop).

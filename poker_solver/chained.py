@@ -722,8 +722,9 @@ def _extract_first_decision_row(
         probs = strategy.get(key)
         if probs is None or len(probs) != len(actions):
             probs = [1.0 / len(actions)] * len(actions)
+        ctx = game._action_context(state)
         return {
-            _label_for_action(action, config.bet_size_fractions): float(p)
+            _label_for_action(action, ctx=ctx): float(p)
             for action, p in zip(actions, probs, strict=True)
         }
     return None

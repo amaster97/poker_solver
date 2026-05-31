@@ -361,8 +361,8 @@ def test_action_label_decoder_for_all_token_kinds() -> None:
         # C2 raises are multipliers of the bet faced (not pot-fractions). The
         # default menu has a single 3.0x slot, so ACTION_RAISE_75 (slot index 1)
         # would index past it; give all 5 raise slots so every ACTION_RAISE_*
-        # decodes. The "(75% pot)" display tag is a fixed per-slot label from
-        # _RAISE_FRACTIONS and is independent of these multiplier values.
+        # decodes. The raise display tag is the MULTIPLIER from this menu (slot
+        # 1 == 3.0 -> "3.0x"), NOT a pot-fraction.
         raise_size_xs=(2.0, 3.0, 4.0, 5.0, 6.0),
         preflop_raise_cap=4,
         postflop_raise_cap=4,
@@ -385,10 +385,13 @@ def test_action_label_decoder_for_all_token_kinds() -> None:
     label_b75 = decode_action_label(ACTION_BET_75, ctx)
     assert "bet 75%" in label_b75
     assert "BB" in label_b75
-    # ACTION_RAISE_75 → "raise to NN BB (75% pot)"
+    # ACTION_RAISE_75 → "raise to NN BB (3.0x)" — raise slot 1 maps to the
+    # multiplier raise_size_xs[1] == 3.0, rendered as an "x" multiplier (NOT a
+    # pot-fraction).
     label_r75 = decode_action_label(ACTION_RAISE_75, ctx)
     assert "raise to" in label_r75
-    assert "75% pot" in label_r75
+    assert "3.0x" in label_r75
+    assert "75% pot" not in label_r75
     assert "BB" in label_r75
 
 

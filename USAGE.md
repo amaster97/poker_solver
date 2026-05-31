@@ -166,6 +166,24 @@ lists each infoset with a probability vector across its legal actions.
 To solve your own river spot, build a custom `HUNLConfig` in Python
 (see §5).
 
+**Postflop bet-size flags (`--hunl-mode postflop`, v1.11).** The ad-hoc
+postflop solve path accepts a configurable bet menu:
+
+```bash
+poker-solver solve --game hunl --hunl-mode postflop --board "As 7c 2d" \
+    --bet-sizes "33,75,150" \
+    --flop-bet-sizes "33" --turn-bet-sizes "75,150" \
+    --raise-sizes "2.5,3"
+```
+
+- `--bet-sizes` — comma-separated pot-fraction **percentages**; the
+  flat/fallback opening-bet menu for any street without an override.
+- `--flop-bet-sizes` / `--turn-bet-sizes` / `--river-bet-sizes` —
+  per-street pot-fraction % overrides (omit to inherit `--bet-sizes`).
+- `--raise-sizes` — comma-separated raise **multipliers** of the bet faced
+  (e.g. `2.5,3` = 2.5x / 3x), NOT pot-fraction percentages. Default `3.0`;
+  at most 5.
+
 ### 3c. Equity calculations
 
 Use this for any preflop, flop, turn, or river all-in equity question.
@@ -273,6 +291,14 @@ Field notes (from `poker_solver.hunl.HUNLConfig`):
 - `initial_hole_cards` — leave as `()` for range vs. range; pass a
   `((c0, c1), (c2, c3))` tuple to pin both hands (this is what
   `default_tiny_subgame` does).
+- `bet_size_fractions` — pot fractions for opening bets; flat/fallback menu.
+  Default `(0.33, 0.75, 1.00, 1.50, 2.00)`.
+- `flop_bet_fractions` / `turn_bet_fractions` / `river_bet_fractions`
+  (v1.11) — optional per-street bet menus; `None` (default) falls back to
+  `bet_size_fractions` for that street.
+- `raise_size_xs` (v1.11) — raise sizes as **multipliers of the bet faced**
+  (default `(3.0,)`), NOT pot fractions; raises no longer use
+  `bet_size_fractions`.
 - `rake_rate` / `rake_cap` — must remain `0.0` / `0` in v1.0.0;
   non-zero values raise `ValueError` (rake lands in PR 9).
 

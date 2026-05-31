@@ -47,6 +47,8 @@ from poker_solver.action_abstraction import (
     ACTION_RAISE_150,
     ACTION_RAISE_200,
     ActionContext,
+    _bet_menu,
+    _raise_menu,
     compute_bet_amount,
     compute_raise_to,
 )
@@ -57,38 +59,63 @@ from poker_solver.hunl import HUNLPoker, HUNLState
 # Action label decoder
 # ---------------------------------------------------------------------------
 
-_BET_FRACTIONS = {
-    ACTION_BET_33: ("33%", 0),
-    ACTION_BET_75: ("75%", 1),
-    ACTION_BET_100: ("100%", 2),
-    ACTION_BET_150: ("150%", 3),
-    ACTION_BET_200: ("200%", 4),
+# Action-id -> bet/raise *slot index* (positional). The concrete size each
+# slot maps to is context-dependent: bet slots index the per-street pot-fraction
+# menu (``_bet_menu(ctx)``), raise slots index the multiplier menu
+# (``_raise_menu(ctx)``). The display tag is derived from that menu, NOT
+# hardcoded here, so a per-street menu like flop ``(0.33, 0.75, 1.25)`` labels
+# slot 2 as ``125%`` (not ``100%``) and a raise slot prints ``3.0x`` (multiplier)
+# rather than a bogus pot-fraction.
+_BET_SLOT_IDX = {
+    ACTION_BET_33: 0,
+    ACTION_BET_75: 1,
+    ACTION_BET_100: 2,
+    ACTION_BET_150: 3,
+    ACTION_BET_200: 4,
 }
-_RAISE_FRACTIONS = {
-    ACTION_RAISE_33: ("33%", 0),
-    ACTION_RAISE_75: ("75%", 1),
-    ACTION_RAISE_100: ("100%", 2),
-    ACTION_RAISE_150: ("150%", 3),
-    ACTION_RAISE_200: ("200%", 4),
+_RAISE_SLOT_IDX = {
+    ACTION_RAISE_33: 0,
+    ACTION_RAISE_75: 1,
+    ACTION_RAISE_100: 2,
+    ACTION_RAISE_150: 3,
+    ACTION_RAISE_200: 4,
 }
+
+
+def _format_raise_x(mult: float) -> str:
+    """Format a raise multiplier as ``"<x>x"`` (e.g. ``"3.0x"``)."""
+    f = float(mult)
+    if f == int(f):
+        return f"{f:.1f}x"
+    return f"{f:g}x"
 
 
 def decode_action_label(action_id: int, ctx: ActionContext) -> str:
     """Pretty-print a single action ID given the current decision context.
 
     v1.9.0 — BB-native output. Every chip amount is rendered as a BB amount
-    with at most 1 decimal place; bet/raise labels carry BOTH the %-pot tag
-    (so the user can read the bet-menu parameterization at a glance) AND
-    the BB amount (so they don't need to do mental math against a 100-chip
-    BB). All-in labels show the BB amount + the BB pot for context.
+    with at most 1 decimal place. Bet/raise labels carry the size *tag* the
+    slot maps to **in this context** (so the user can read the bet-menu
+    parameterization at a glance) AND the BB amount (so they don't need to do
+    mental math against a 100-chip BB). All-in labels show the BB amount + the
+    BB pot for context.
 
-    Output format examples (post-v1.9.0):
+    C bet-size feature — the size tag is now context-dependent:
+
+    * **Bets** show the per-street pot-fraction from ``_bet_menu(ctx)`` (the
+      flop/turn/river menu by ``ctx.street``, or the flat fallback), e.g.
+      ``"bet 125% pot (...)"`` for a flop slot of 1.25.
+    * **Raises** show the multiplier-of-the-bet-faced from ``_raise_menu(ctx)``
+      (``raise_size_xs``), formatted as an ``x`` multiplier, NOT a pot-fraction,
+      e.g. ``"raise to 25 BB (3.0x)"``.
+
+    Output format examples:
 
     * ``ACTION_FOLD`` → ``"fold"``
     * ``ACTION_CHECK`` → ``"check"``
     * ``ACTION_CALL`` → ``"call (2.5 BB)"`` (chip amount = to_call rendered)
     * ``ACTION_BET_75`` → ``"bet 75% pot (7.5 BB)"``
-    * ``ACTION_RAISE_100`` → ``"raise to 25 BB (100% pot)"``
+    * ``ACTION_RAISE_*`` (3.0x slot) → ``"raise to 25 BB (3.0x)"``
     * ``ACTION_ALL_IN`` (opening) → ``"all-in (95 BB into 10 BB pot)"``
 
     The BB rendering goes through :func:`poker_solver.cli_bb_format.format_bb`
@@ -110,14 +137,19 @@ def decode_action_label(action_id: int, ctx: ActionContext) -> str:
             f"all-in ({format_bb(stack_chips)} BB into "
             f"{format_bb(ctx.pot)} BB pot)"
         )
-    if action_id in _BET_FRACTIONS:
-        label, _ = _BET_FRACTIONS[action_id]
+    if action_id in _BET_SLOT_IDX:
+        idx = _BET_SLOT_IDX[action_id]
+        menu = _bet_menu(ctx)
         amount = compute_bet_amount(action_id, ctx)
-        return f"bet {label} pot ({format_bb(amount)} BB)"
-    if action_id in _RAISE_FRACTIONS:
-        label, _ = _RAISE_FRACTIONS[action_id]
+        pct = int(round(menu[idx] * 100)) if idx < len(menu) else None
+        tag = f"{pct}%" if pct is not None else f"slot{idx}"
+        return f"bet {tag} pot ({format_bb(amount)} BB)"
+    if action_id in _RAISE_SLOT_IDX:
+        idx = _RAISE_SLOT_IDX[action_id]
+        menu = _raise_menu(ctx)
         raise_to = compute_raise_to(action_id, ctx)
-        return f"raise to {format_bb(raise_to)} BB ({label} pot)"
+        tag = _format_raise_x(menu[idx]) if idx < len(menu) else f"slot{idx}"
+        return f"raise to {format_bb(raise_to)} BB ({tag})"
     return f"action_{action_id}"
 
 

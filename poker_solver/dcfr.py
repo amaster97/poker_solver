@@ -287,8 +287,10 @@ class DCFRSolver:
         if len(vec) != num_actions:
             raise ValueError(
                 f"locked_strategies[{key!r}] has length {len(vec)} but the "
-                f"engine emits {num_actions} legal actions; usually means "
-                "bet_size_fractions changed since the lock was created."
+                f"engine emits {num_actions} legal actions; usually means the "
+                "bet menu changed since the lock was created (bet_size_fractions, "
+                "a per-street menu flop/turn/river_bet_fractions, or "
+                "raise_size_xs)."
             )
         if (vec < 0.0).any():
             raise ValueError(

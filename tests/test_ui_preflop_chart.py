@@ -202,6 +202,19 @@ async def test_solve_button_dispatches_rust_binding(
     fake_module = SimpleNamespace(solve_hunl_preflop_rvr=_fake_solve)
     monkeypatch.setattr(poker_solver, "_rust", fake_module, raising=False)
 
+    # Force the LIVE solve path. The default spot (100 BB / 0 ante) is an
+    # EXACT shard in the Premium-A blueprint bundle (assets/blueprints/
+    # manifest.json, shipped after this test was written in commit
+    # 1783bef), so ``_on_preflop_chart_solve`` would short-circuit on a
+    # blueprint hit and never dispatch the live binding. This test
+    # validates the *live* dispatch, so we stub the blueprint lookup to
+    # miss (returns False => fall through to start_preflop_chart).
+    from ui.state import SolveRunner
+
+    monkeypatch.setattr(
+        SolveRunner, "try_blueprint_preflop_chart", lambda self, **kw: False
+    )
+
     await user.open("/")
     # Click Solve directly (no need to navigate the tab — the button is
     # in the page DOM regardless of which tab is visible).

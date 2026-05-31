@@ -77,3 +77,7 @@ PLAN.md
 # Profiler artifacts (scripts/profile_flop_subgame.py output, regenerated on demand)
 .profile_logs/
 .profile_run.log
+
+# local harness state / throwaway bench (not for VCS)
+.claude/
+scripts/bench_flop_rvr.py

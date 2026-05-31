@@ -100,12 +100,19 @@ def _btn_vs_bb_config(stack_bb: int = 50) -> HUNLConfig:
 
 
 def _pushfold_config(stack_bb: int = 15) -> HUNLConfig:
-    """Degenerate {push, fold} config — only ALL_IN + FOLD legal for SB.
+    """Near-degenerate short-stack config for the pushfold regime.
 
-    Achieved by setting ``bet_size_fractions=()`` (no opening pot-fraction
-    bets), ``include_all_in=True``, and ``preflop_raise_cap=2`` (BB blind
-    counts as raise #1, so SB's push is the only legal raise — the cap
-    is reached immediately afterwards, preventing a re-raise loop).
+    Sets ``bet_size_fractions=()`` (no opening pot-fraction bets),
+    ``include_all_in=True``, and ``preflop_raise_cap=2`` (BB blind counts
+    as raise #1, so the SB's raise is the last legal one — the cap is
+    reached immediately afterwards, preventing a re-raise loop).
+
+    v1.11 NOTE: ``raise_size_xs`` is now mandatory (the C2 bet-size
+    engine change forbids an empty raise menu), so this is no longer a
+    strictly {ALL_IN, FOLD} tree — the SB also has a lean 3.0x open
+    (``raise_3.0x``). At a 15 BB stack a 3x open is itself a committing
+    line, so the equilibrium still has the premium pairs committing 100%
+    and folding 0% (see ``test_pushfold_equivalence_at_15bb``).
 
     At ≤15 BB the push/fold short-circuit (``solve_pushfold``) owns the
     chart; ``solve_chained`` exercises ``allow_pushfold_range=True``
@@ -236,12 +243,30 @@ def test_pushfold_equivalence_at_15bb() -> None:
         f"{sorted(result.preflop_result.per_class_strategy.keys())}"
     )
 
-    # AA must shove (the chart value at 15 BB SB is 1.0 for AA).
-    # In the chained solve, AA's action set is {fold, all_in}.
-    # We accept ≥ 0.85 because 500 iterations on a 4x4 grid is fewer
-    # than the chart's reference; the qualitative equilibrium is
-    # already locked.
-    jam_freq = aa_freqs.get("all_in", 0.0) + aa_freqs.get("call", 0.0)
+    # AA must commit at 15 BB SB (the chart value is 1.0 for AA).
+    #
+    # v1.11 lean-raise re-capture: the C2 bet-size-menu engine change
+    # (commit f69ec29) made ``raise_size_xs`` MANDATORY (must be
+    # non-empty), so a truly degenerate {fold, all_in}-only preflop tree
+    # is no longer constructible via config — the SB now also has a lean
+    # 3.0x open-raise (``raise_3.0x``). The observed AA equilibrium is
+    # ~{all_in: 0.75, raise_3.0x: 0.25, fold: 0, call: 0}: AA splits its
+    # mass between jamming and a 3x open (which at a 15 BB stack is itself
+    # a committing line — a 3x raise to 3 BB facing a re-jam gets the
+    # stack in), and NEVER folds or limps. That preserves the chart's
+    # qualitative fact (AA commits 100%, folds 0%); the only change is the
+    # commit mass is now split across two aggressive sizes instead of one.
+    #
+    # We therefore assert on AA's *commit* frequency = jam + open-raise +
+    # call (every non-fold action at this depth puts AA on a stack-off
+    # line), and separately pin fold ≈ 0. A player-swap / equity-inversion
+    # wrapper bug would surface as AA folding or limping here.
+    commit_freq = (
+        aa_freqs.get("all_in", 0.0)
+        + aa_freqs.get("call", 0.0)
+        + sum(p for label, p in aa_freqs.items() if label.startswith("raise_"))
+    )
+    fold_freq = aa_freqs.get("fold", 0.0)
     # Chart query for comparison (sanity check that the chart value
     # is what we think — AA at 15 BB SB).
     chart_jam = get_pushfold_strategy(15, "sb_jam", "AA")
@@ -249,11 +274,15 @@ def test_pushfold_equivalence_at_15bb() -> None:
         f"sanity check: chart says AA jam @ 15 BB SB = {chart_jam}; "
         f"expected ≈1.0 — chart may have changed."
     )
-    assert jam_freq >= 0.85, (
-        f"chained AA jam frequency = {jam_freq:.4f}, chart says "
-        f"{chart_jam:.4f}; expected ≥ 0.85 within the {1.0 - 0.85:.0%} "
-        f"tolerance for {result.preflop_result.iterations}-iter DCFR. "
-        f"AA freqs: {aa_freqs}"
+    assert commit_freq >= 0.85, (
+        f"chained AA commit frequency (jam+raise+call) = {commit_freq:.4f}, "
+        f"chart says {chart_jam:.4f}; expected ≥ 0.85 within the "
+        f"{1.0 - 0.85:.0%} tolerance for {result.preflop_result.iterations}"
+        f"-iter DCFR. AA freqs: {aa_freqs}"
+    )
+    assert fold_freq <= 0.05, (
+        f"chained AA fold frequency = {fold_freq:.4f}; AA must never fold "
+        f"at 15 BB SB (chart jam = {chart_jam:.4f}). AA freqs: {aa_freqs}"
     )
 
 

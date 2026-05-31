@@ -96,6 +96,26 @@ def _parse_bet_sizes(spec: str) -> tuple[float, ...]:
     return tuple(out)
 
 
+def _parse_raise_sizes(spec: str) -> tuple[float, ...]:
+    """Parse a comma-separated raise-multiplier list into floats.
+
+    Raise sizes are MULTIPLIERS of the bet being faced (not pot fractions),
+    matching ``HUNLConfig.raise_size_xs``. ``"2.5,3"`` → ``(2.5, 3.0)``. Used
+    for the ``--raise-sizes`` flag.
+    """
+    out: list[float] = []
+    for tok in spec.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        out.append(float(tok))
+    if not out:
+        raise ValueError(
+            f"--raise-sizes must list at least one multiplier; got {spec!r}"
+        )
+    return tuple(out)
+
+
 def _build_postflop_config(args: argparse.Namespace) -> HUNLConfig:
     """Build an ad-hoc postflop `HUNLConfig` from CLI args (PR 5 §6).
 
@@ -143,6 +163,19 @@ def _build_postflop_config(args: argparse.Namespace) -> HUNLConfig:
     initial_pot = 2 * big_blind  # SB + BB equivalents already in.
     bet_sizes_spec = getattr(args, "bet_sizes", None) or "33,75,100,150,200"
     bet_fractions = _parse_bet_sizes(bet_sizes_spec)
+    # C1 per-street opening-bet menus (pot-fraction %). Each defaults to None
+    # (the engine falls back to the flat ``bet_size_fractions`` menu).
+    flop_spec = getattr(args, "flop_bet_sizes", None)
+    turn_spec = getattr(args, "turn_bet_sizes", None)
+    river_spec = getattr(args, "river_bet_sizes", None)
+    flop_fractions = _parse_bet_sizes(flop_spec) if flop_spec else None
+    turn_fractions = _parse_bet_sizes(turn_spec) if turn_spec else None
+    river_fractions = _parse_bet_sizes(river_spec) if river_spec else None
+    # Raise multipliers (×bet faced); defaults to the engine's (3.0,).
+    raise_spec = getattr(args, "raise_sizes", None)
+    raise_xs: tuple[float, ...] = (
+        _parse_raise_sizes(raise_spec) if raise_spec else (3.0,)
+    )
     return HUNLConfig(
         starting_stack=starting_stack,
         small_blind=big_blind // 2,
@@ -152,6 +185,10 @@ def _build_postflop_config(args: argparse.Namespace) -> HUNLConfig:
         initial_pot=initial_pot,
         initial_contributions=(big_blind, big_blind),
         bet_size_fractions=bet_fractions,
+        flop_bet_fractions=flop_fractions,
+        turn_bet_fractions=turn_fractions,
+        river_bet_fractions=river_fractions,
+        raise_size_xs=raise_xs,
     )
 
 
@@ -2054,6 +2091,14 @@ def _cmd_parity(args: argparse.Namespace) -> int:
 
     brown_dump = run_brown_solver(spot, binary, iterations=iterations)
 
+    # Forward the C1 per-street bet menus + raise multipliers if the spot
+    # carries them (older RiverSpot fixtures don't; getattr keeps us tolerant
+    # of both). When absent, per-street menus stay None (engine falls back to
+    # the flat ``bet_size_fractions``) and raise sizes keep the engine default.
+    spot_raise_xs = getattr(spot, "raise_size_xs", None)
+    spot_raise_size_xs: tuple[float, ...] = (
+        tuple(float(x) for x in spot_raise_xs) if spot_raise_xs else (3.0,)
+    )
     cfg = HUNLConfig(
         starting_stack=spot.stack + spot.pot // 2,
         small_blind=50,
@@ -2063,8 +2108,12 @@ def _cmd_parity(args: argparse.Namespace) -> int:
         initial_pot=spot.pot,
         initial_contributions=(spot.pot // 2, spot.pot // 2),
         bet_size_fractions=spot.bet_sizes,
+        flop_bet_fractions=getattr(spot, "flop_bet_fractions", None),
+        turn_bet_fractions=getattr(spot, "turn_bet_fractions", None),
+        river_bet_fractions=getattr(spot, "river_bet_fractions", None),
         include_all_in=spot.include_all_in,
         postflop_raise_cap=spot.max_raises,
+        raise_size_xs=spot_raise_size_xs,
     )
     our_result = solve_hunl_postflop(cfg, iterations=iterations)
 
@@ -2220,8 +2269,48 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Comma-separated pot-fraction percentages (e.g. '33,75,100,150,200') "
-            "for postflop bet sizing. Default: the full 5-size menu. All-in "
-            "always available."
+            "for postflop bet sizing. Used as the flat/fallback menu for any "
+            "street without a per-street override. Default: the full 5-size "
+            "menu. All-in always available."
+        ),
+    )
+    sv.add_argument(
+        "--flop-bet-sizes",
+        type=str,
+        default=None,
+        help=(
+            "Per-street override for FLOP opening-bet sizing (comma-separated "
+            "pot-fraction percentages, e.g. '33,75'). When omitted, the flop "
+            "uses --bet-sizes."
+        ),
+    )
+    sv.add_argument(
+        "--turn-bet-sizes",
+        type=str,
+        default=None,
+        help=(
+            "Per-street override for TURN opening-bet sizing (comma-separated "
+            "pot-fraction percentages). When omitted, the turn uses --bet-sizes."
+        ),
+    )
+    sv.add_argument(
+        "--river-bet-sizes",
+        type=str,
+        default=None,
+        help=(
+            "Per-street override for RIVER opening-bet sizing (comma-separated "
+            "pot-fraction percentages). When omitted, the river uses "
+            "--bet-sizes."
+        ),
+    )
+    sv.add_argument(
+        "--raise-sizes",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated raise MULTIPLIERS of the bet being faced (e.g. "
+            "'2.5,3' = 2.5x/3x). Note: multipliers, NOT pot-fraction "
+            "percentages. Default: 3.0x. At most 5 raise sizes."
         ),
     )
     sv.add_argument(

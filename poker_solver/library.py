@@ -48,7 +48,15 @@ if TYPE_CHECKING:
     from poker_solver.solver import SolveResult
 
 
-_SCHEMA_VERSION = 1
+# schema_version 2 (C bet-size feature): the spot_id canonical dict and
+# the bet_menu_hash gained the per-street opening-bet menus
+# (flop/turn/river_bet_fractions) + the raise multiplier menu
+# (raise_size_xs). The id formula changed, so spots solved under different
+# menus now receive distinct ids/keys. Old (schema 1) payloads still read:
+# the missing keys default to None / (3.0,) via ``.get`` in
+# ``_dict_to_spot``, reproducing pre-C behaviour. We tolerate reading
+# on-disk schema 1 (``on_disk > _SCHEMA_VERSION`` is the only hard error).
+_SCHEMA_VERSION = 2
 _SCHEMA_FILE = Path(__file__).with_name("library_schema.sql")
 _DEFAULT_DB_PATH = Path.home() / ".poker_solver" / "library.db"
 _ENV_VAR = "POKER_SOLVER_LIBRARY_PATH"
@@ -194,6 +202,18 @@ def _canonicalize_spot(spot: SpotDescription) -> dict[str, Any]:
     else:
         initial_hole_serial = None
     sorted_bet_fracs = sorted(float(x) for x in cfg.bet_size_fractions)
+    # C1 per-street opening-bet menus. ``None`` (inherit the flat menu)
+    # canonicalizes STABLY as JSON null — distinct from an explicit menu
+    # equal to the flat one, since a per-street override changes the tree
+    # even when its values coincide with the flat menu's. Each present
+    # menu is sorted ascending (bet-slot order is positional in the enum
+    # but the menu's identity, like ``bet_size_fractions``, is order-free).
+    # C2 raise menu is multipliers of the bet faced; also order-free for
+    # identity, so sorted ascending.
+    flop_menu = _canonicalize_opt_menu(cfg.flop_bet_fractions)
+    turn_menu = _canonicalize_opt_menu(cfg.turn_bet_fractions)
+    river_menu = _canonicalize_opt_menu(cfg.river_bet_fractions)
+    sorted_raise_xs = sorted(float(x) for x in cfg.raise_size_xs)
 
     ranges_serial: list[list[str]] | None
     if not spot.initial_ranges:
@@ -219,6 +239,13 @@ def _canonicalize_spot(spot: SpotDescription) -> dict[str, Any]:
         "preflop_raise_cap": int(cfg.preflop_raise_cap),
         "postflop_raise_cap": int(cfg.postflop_raise_cap),
         "bet_size_fractions": sorted_bet_fracs,
+        # C1/C2 bet-size menu fields (schema_version 2). Per-street ``None``
+        # serializes as JSON null so two spots that differ ONLY in their
+        # per-street / raise menus receive DISTINCT spot_ids.
+        "flop_bet_fractions": flop_menu,
+        "turn_bet_fractions": turn_menu,
+        "river_bet_fractions": river_menu,
+        "raise_size_xs": sorted_raise_xs,
         "include_all_in": bool(cfg.include_all_in),
         "force_allin_threshold": int(cfg.force_allin_threshold),
         "min_bet_bb": int(cfg.min_bet_bb),
@@ -229,6 +256,35 @@ def _canonicalize_spot(spot: SpotDescription) -> dict[str, Any]:
         # A re-label is a rename, not a different spot.
     }
     return canonical
+
+
+def _canonicalize_opt_menu(menu: tuple[float, ...] | None) -> list[float] | None:
+    """Canonicalize an optional per-street bet menu (C1).
+
+    Returns ``None`` for a ``None`` (inherit-the-flat-menu) input so it
+    serializes as JSON null — a stable, order-free identity distinct from
+    any explicit menu. Present menus are sorted ascending and coerced to
+    plain floats, mirroring the ``bet_size_fractions`` canonicalization.
+    An empty tuple also canonicalizes to ``None`` (semantically "no
+    override").
+    """
+    if not menu:
+        return None
+    return sorted(float(x) for x in menu)
+
+
+def _opt_menu_from_payload(raw: Any) -> tuple[float, ...] | None:
+    """Decode an optional per-street bet menu from a spot payload (C1).
+
+    Inverse of the ``_spot_to_dict`` per-street emission. ``None`` (or a
+    missing / empty value) -> ``None`` (inherit the flat menu); a present
+    list -> a float tuple. Tolerant of old payloads (schema 1) that omit
+    the key entirely — the caller passes ``cfg_d.get(...)`` which yields
+    ``None``.
+    """
+    if not raw:
+        return None
+    return tuple(float(x) for x in raw)
 
 
 def _canonicalize_hand(hand: str) -> str:
@@ -361,6 +417,25 @@ def _spot_to_dict(spot: SpotDescription) -> dict[str, Any]:
             "preflop_raise_cap": int(cfg.preflop_raise_cap),
             "postflop_raise_cap": int(cfg.postflop_raise_cap),
             "bet_size_fractions": [float(x) for x in cfg.bet_size_fractions],
+            # C1/C2 bet-size menu fields. Per-street menus emit a list or
+            # null (preserving the inherit-the-flat-menu semantics);
+            # ``raise_size_xs`` always emits a list (default ``[3.0]``).
+            "flop_bet_fractions": (
+                [float(x) for x in cfg.flop_bet_fractions]
+                if cfg.flop_bet_fractions is not None
+                else None
+            ),
+            "turn_bet_fractions": (
+                [float(x) for x in cfg.turn_bet_fractions]
+                if cfg.turn_bet_fractions is not None
+                else None
+            ),
+            "river_bet_fractions": (
+                [float(x) for x in cfg.river_bet_fractions]
+                if cfg.river_bet_fractions is not None
+                else None
+            ),
+            "raise_size_xs": [float(x) for x in cfg.raise_size_xs],
             "include_all_in": bool(cfg.include_all_in),
             "force_allin_threshold": int(cfg.force_allin_threshold),
             "min_bet_bb": int(cfg.min_bet_bb),
@@ -408,6 +483,14 @@ def _dict_to_spot(payload: dict[str, Any]) -> SpotDescription:
         preflop_raise_cap=int(cfg_d.get("preflop_raise_cap", 4)),
         postflop_raise_cap=int(cfg_d.get("postflop_raise_cap", 3)),
         bet_size_fractions=tuple(float(x) for x in cfg_d.get("bet_size_fractions", ())),
+        # C1/C2 bet-size menu fields. Back-compat: old payloads (schema 1)
+        # lack these keys, so per-street menus default to ``None`` (inherit
+        # the flat menu) and ``raise_size_xs`` defaults to ``(3.0,)`` — the
+        # HUNLConfig defaults, preserving pre-C behaviour for old spots.
+        flop_bet_fractions=_opt_menu_from_payload(cfg_d.get("flop_bet_fractions")),
+        turn_bet_fractions=_opt_menu_from_payload(cfg_d.get("turn_bet_fractions")),
+        river_bet_fractions=_opt_menu_from_payload(cfg_d.get("river_bet_fractions")),
+        raise_size_xs=tuple(float(x) for x in cfg_d.get("raise_size_xs", (3.0,))),
         include_all_in=bool(cfg_d.get("include_all_in", True)),
         force_allin_threshold=int(cfg_d.get("force_allin_threshold", 1)),
         min_bet_bb=int(cfg_d.get("min_bet_bb", 1)),
@@ -440,6 +523,14 @@ def _bet_menu_hash(cfg: HUNLConfig) -> str:
     payload = json.dumps(
         {
             "bet_size_fractions": sorted_fracs,
+            # C1/C2 menu fields: per-street ``None`` -> JSON null (stable),
+            # so spots differing only in per-street / raise menus get
+            # distinct cache keys and a strategy solved under one menu is
+            # never served for another.
+            "flop_bet_fractions": _canonicalize_opt_menu(cfg.flop_bet_fractions),
+            "turn_bet_fractions": _canonicalize_opt_menu(cfg.turn_bet_fractions),
+            "river_bet_fractions": _canonicalize_opt_menu(cfg.river_bet_fractions),
+            "raise_size_xs": sorted(float(x) for x in cfg.raise_size_xs),
             "include_all_in": bool(cfg.include_all_in),
             "preflop_raise_cap": int(cfg.preflop_raise_cap),
             "postflop_raise_cap": int(cfg.postflop_raise_cap),

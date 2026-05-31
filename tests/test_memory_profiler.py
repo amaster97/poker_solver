@@ -678,6 +678,20 @@ def test_memory_profiler_golden_file_river_only() -> None:
     reflect the facing-all-in guard suppressing the degenerate ALL_IN
     action when ``stack <= to_call``. This shrinks the river action
     menu (mean 3.25 -> 2.75 actions) and the solver arrays accordingly.
+
+    v1.11 lean-raise re-capture: the C2 bet-size-menu engine change
+    (commit f69ec29) REPLACED the old "reuse the full bet menu for
+    raises" mechanism with a single lean PrevBetRelative multiplier
+    (``raise_size_xs`` default ``(3.0,)``). Facing a bet, a player now
+    has one raise size instead of the previous multi-size ladder, so the
+    river infoset count drops 16 -> 12 (the 4 collapsed infosets are the
+    extra raise-size branches), mean actions 2.75 -> 2.667, and the
+    solver arrays shrink proportionally (704 -> 512 bytes). ``max_actions``
+    stays 4 (the opening-bet node — check + 3 bet sizes — is unchanged;
+    only the *raise* fan-out shrank). The byte counts are internally
+    consistent: 12 infosets x 2.667 mean = 32 action slots x 8 B/f64 =
+    256 B regret + 256 B strategy = 512 B solver arrays.
+
     If they drift further, INVESTIGATE the cause before updating —
     the most likely cause is a real regression in either the profiler
     or the solver's infoset key format, NOT a "harmless" change.
@@ -707,17 +721,21 @@ def test_memory_profiler_golden_file_river_only() -> None:
     golden = {
         "iterations_at_snapshot": 10,
         "abstraction_table_bytes": 0,  # solve_hunl_postflop probes without abstraction
-        "solver_arrays_total_bytes": 704,
-        "other_overhead_bytes": 1398,
-        "grand_total_bytes": 2102,
+        # v1.11 lean-raise re-capture (commit f69ec29): single 3.0x raise
+        # multiplier replaces the old multi-size raise ladder, collapsing
+        # 4 extra raise-size infosets. See the docstring for the
+        # byte-arithmetic consistency check.
+        "solver_arrays_total_bytes": 512,  # was 704
+        "other_overhead_bytes": 1020,  # was 1398
+        "grand_total_bytes": 1532,  # was 2102
         "per_street_count": 1,  # river-only -> one entry
-        "river_infoset_count": 16,
-        "river_regret_bytes": 352,
-        "river_strategy_bytes": 352,
-        "river_other_bytes": 932,
-        "river_total_bytes": 1636,
-        "river_mean_actions": 2.75,
-        "river_max_actions": 4,
+        "river_infoset_count": 12,  # was 16 (-4 raise-size branches)
+        "river_regret_bytes": 256,  # was 352 (32 slots x 8 B)
+        "river_strategy_bytes": 256,  # was 352
+        "river_other_bytes": 680,  # was 932
+        "river_total_bytes": 1192,  # was 1636
+        "river_mean_actions": 2.6666666666666665,  # was 2.75
+        "river_max_actions": 4,  # unchanged (opening-bet node intact)
         "preflop_entry_is_none": True,
     }
 

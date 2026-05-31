@@ -111,9 +111,16 @@ class SpotHeader:
     starting_pot_chips: int
     board: str  # space-joined card glyphs, or "" pre-flop
     street: str | None  # "FLOP" / "TURN" / "RIVER" / "PREFLOP" or None to skip
-    bet_menu_pcts: tuple[float, ...]  # bet-size fractions, e.g. (0.33, 0.75)
+    bet_menu_pcts: tuple[float, ...]  # flat bet-size fractions, e.g. (0.33, 0.75)
     raise_cap: int
     include_all_in: bool = True
+    # C bet-size feature. Per-street opening-bet menus (None => that street
+    # falls back to the flat ``bet_menu_pcts``); ``raise_size_xs`` are
+    # multiples of the bet faced (NOT pot-fractions).
+    flop_bet_pcts: tuple[float, ...] | None = None
+    turn_bet_pcts: tuple[float, ...] | None = None
+    river_bet_pcts: tuple[float, ...] | None = None
+    raise_size_xs: tuple[float, ...] = (3.0,)
 
 
 def render_header(h: SpotHeader) -> str:
@@ -153,9 +160,35 @@ def render_header(h: SpotHeader) -> str:
     else:
         if h.street:
             lines.append(f"  Street:              {h.street}")
-    pct_tokens = [f"{int(round(p * 100))}%" for p in h.bet_menu_pcts]
     suffix = "  +  all-in" if h.include_all_in else ""
-    lines.append(f"  Bet menu:            [{', '.join(pct_tokens)}] pot{suffix}")
+
+    def _pct_row(fracs: tuple[float, ...]) -> str:
+        toks = [f"{int(round(p * 100))}%" for p in fracs]
+        return f"[{', '.join(toks)}] pot{suffix}"
+
+    # Per-street menus override the flat menu per street. When all three are
+    # None we keep the single legacy "Bet menu" line (back-compat); otherwise
+    # we list each street's effective menu (falling back to the flat menu for
+    # any street left at None).
+    has_per_street = any(
+        m is not None
+        for m in (h.flop_bet_pcts, h.turn_bet_pcts, h.river_bet_pcts)
+    )
+    if has_per_street:
+        flop = h.flop_bet_pcts if h.flop_bet_pcts is not None else h.bet_menu_pcts
+        turn = h.turn_bet_pcts if h.turn_bet_pcts is not None else h.bet_menu_pcts
+        river = (
+            h.river_bet_pcts if h.river_bet_pcts is not None else h.bet_menu_pcts
+        )
+        lines.append(f"  Flop bet menu:       {_pct_row(flop)}")
+        lines.append(f"  Turn bet menu:       {_pct_row(turn)}")
+        lines.append(f"  River bet menu:      {_pct_row(river)}")
+    else:
+        lines.append(f"  Bet menu:            {_pct_row(h.bet_menu_pcts)}")
+    # Raises are multiples of the bet faced (C2), not pot-fractions.
+    raise_toks = [_format_node_mult(x) + "x" for x in h.raise_size_xs]
+    raise_suffix = "  +  all-in" if h.include_all_in else ""
+    lines.append(f"  Raise menu:          [{', '.join(raise_toks)}]{raise_suffix}")
     lines.append(f"  Raise cap:           {h.raise_cap}")
     lines.append(bar)
     return "\n".join(lines) + "\n"
@@ -198,10 +231,11 @@ class _Token:
     """A single normalized step parsed from a user --node string."""
 
     kind: str  # one of "x" "c" "f" "A" "b" "r"
-    # For "b" / "r", exactly ONE of (chips, bb, pct) is non-None:
+    # For "b" / "r", exactly ONE of (chips, bb, pct, mult) is non-None:
     chips: int | None = None
     bb: float | None = None
-    pct: float | None = None  # 0.75 means "75% pot"
+    pct: float | None = None  # 0.75 means "75% pot" (bets only)
+    mult: float | None = None  # 3.0 means "3.0x the bet faced" (raises only)
 
 
 def parse_user_node(s: str) -> list[_Token]:
@@ -211,15 +245,18 @@ def parse_user_node(s: str) -> list[_Token]:
 
     * Raw chip tokens (legacy):     ``xb750``, ``b750r3125``, ``r3125``
     * BB notation:                  ``b7.5bb``, ``r31.25bb``
-    * % pot notation:               ``b75%``, ``b75pct``
-    * Verbose action names:         ``check``, ``bet75%``, ``raise75pct``,
+    * % pot notation (bets):        ``b75%``, ``b75pct``
+    * ``x`` multiplier (raises):    ``r3x``, ``r3.0x`` (multiple of the bet
+                                    faced; the C2 raise parameterization)
+    * Verbose action names:         ``check``, ``bet75%``, ``raise3x``,
                                     ``fold``, ``call``, ``allin``, ``all-in``
     * Separators (ignored):         ``:``, ``.``, ``/`` (e.g. ``check.bet75pct``,
                                     ``x:b7.5bb``, ``check/bet/3.3bb``)
 
     Returns a list of :class:`_Token` with EXACTLY ONE of ``chips`` / ``bb``
-    / ``pct`` populated on bet/raise tokens. Raises ``ValueError`` for
-    malformed strings.
+    / ``pct`` / ``mult`` populated on bet/raise tokens. Raises ``ValueError``
+    for malformed strings (including a ``%`` suffix on a raise — raises are
+    multipliers, not pot-fractions — or an ``x`` suffix on a bet).
 
     Empty input string returns ``[]`` (root node).
     """
@@ -268,7 +305,8 @@ def parse_user_node(s: str) -> list[_Token]:
                     f"{ch!r}"
                 ) from exc
             i = j
-            # Unit suffix: "bb", "pct", "%", or none (= raw chips).
+            # Unit suffix: "bb", "pct"/"%", "x" (raise multiplier), or none
+            # (= raw chips).
             unit = ""
             if i < n and norm[i] == "%":
                 unit = "%"
@@ -279,18 +317,38 @@ def parse_user_node(s: str) -> list[_Token]:
             elif norm[i:i + 2] == "bb":
                 unit = "bb"
                 i += 2
+            elif i < n and norm[i] == "x":
+                unit = "x"
+                i += 1
             tok = _Token(kind=ch)
             if unit == "bb":
                 tok.bb = num
             elif unit == "%":
+                # Pot-fraction: only meaningful for opening bets. Raises are
+                # multiples of the bet faced (C2), not pot-fractions.
+                if ch == "r":
+                    raise ValueError(
+                        f"--node {s!r}: a raise size is a multiple of the bet "
+                        f"faced — use the ``x`` suffix (e.g. ``r3x``), not "
+                        f"``%``/``pct``."
+                    )
                 tok.pct = num / 100.0
+            elif unit == "x":
+                # Raise multiplier: only meaningful for raises.
+                if ch == "b":
+                    raise ValueError(
+                        f"--node {s!r}: a bet size is a pot-fraction — use the "
+                        f"``%``/``pct`` suffix (e.g. ``b75%``), not ``x``."
+                    )
+                tok.mult = num
             else:
                 # Raw chips. Must be an integer (the engine never produces
                 # fractional chip amounts).
                 if num != int(num):
                     raise ValueError(
                         f"--node {s!r}: raw chip amount {num!r} is not integer "
-                        f"(use ``bb`` or ``%`` suffix for fractional values)"
+                        f"(use ``bb`` / ``%`` / ``x`` suffix for fractional "
+                        f"values)"
                     )
                 tok.chips = int(num)
             tokens.append(tok)
@@ -403,13 +461,17 @@ def canonical_history_for_user_node(user_node: str, game, _action_ctx_at_history
             # Resolve via the same machinery the engine uses; the engine's
             # bet amounts respect min-bet + stack caps so we want the
             # _enumerate_legal_bets_ amount, not the raw pot * pct.
-            # Iterate the legal bet/raise action IDs, compute the chip
-            # amount for each, and pick the one whose pot-fraction is
-            # closest to the user's request. This handles the case where
-            # the user types "b75%" but the menu only contains 33%/100%.
+            # Iterate the legal bet action IDs, compute the chip amount for
+            # each, and pick the one whose pot-fraction is closest to the
+            # user's request. This handles the case where the user types
+            # "b75%" but the per-street menu only contains 33%/100%.
             target_chips = _chip_amount_for_pct(
                 tok.kind, tok.pct, legal, ctx,
             )
+        elif tok.mult is not None:
+            # Raise multiplier (C2): resolve against the raise menu. The
+            # parser guarantees mult is only set for raise tokens.
+            target_chips = _chip_amount_for_mult(tok.mult, legal, ctx)
         if target_chips is None:
             raise ValueError(
                 f"--node {user_node!r}: token #{idx + 1} ({tok.kind!r}) has no "
@@ -497,42 +559,59 @@ def canonical_history_for_user_node(user_node: str, game, _action_ctx_at_history
 def _chip_amount_for_pct(
     kind: str, pct: float, legal, ctx,
 ) -> int | None:
-    """Pick the legal bet/raise action whose pot-fraction matches ``pct``.
+    """Pick the legal *bet* action whose pot-fraction matches ``pct``.
 
-    Iterates the legal action IDs and computes each one's chip amount via
-    ``compute_bet_amount`` / ``compute_raise_to``. Returns the chip amount
-    whose pot-fraction is closest to the user's requested ``pct`` (so
-    ``b75%`` resolves to the menu's 75% bet even when the actual chips
-    differ from ``int(pot * 0.75)`` due to rounding).
+    Iterates the legal bet action IDs and computes each one's chip amount via
+    ``compute_bet_amount``. Returns the chip amount whose pot-fraction (read
+    from the active **per-street** bet menu, ``_bet_menu(ctx)`` — flop/turn/
+    river by ``ctx.street``, or the flat fallback) is closest to the user's
+    requested ``pct`` (so ``b75%`` resolves to the menu's 75% bet even when the
+    actual chips differ from ``int(pot * 0.75)`` due to rounding).
+
+    Raises (``kind == "r"``) are NOT pot-fractions in the C bet-size model —
+    they are multiples of the bet faced — so this helper only handles bets.
+    Raise resolution by multiplier lives in :func:`_chip_amount_for_mult`.
     """
-    from poker_solver.action_abstraction import (
-        compute_bet_amount,
-        compute_raise_to,
-    )
+    from poker_solver.action_abstraction import _bet_menu, compute_bet_amount
 
     if kind == "b":
+        menu = _bet_menu(ctx)
         candidates: list[tuple[int, float]] = []
         for aid in legal:
             if 3 <= aid <= 7:
                 idx = aid - 3
-                fraction = ctx.bet_size_fractions[idx]
-                candidates.append((compute_bet_amount(aid, ctx), fraction))
+                if idx < len(menu):
+                    candidates.append((compute_bet_amount(aid, ctx), menu[idx]))
         if not candidates:
             return None
         best = min(candidates, key=lambda c: abs(c[1] - pct))
         return best[0]
-    if kind == "r":
-        candidates_r: list[tuple[int, float]] = []
-        for aid in legal:
-            if 8 <= aid <= 12:
-                idx = aid - 8
-                fraction = ctx.bet_size_fractions[idx]
-                candidates_r.append((compute_raise_to(aid, ctx), fraction))
-        if not candidates_r:
-            return None
-        best_r = min(candidates_r, key=lambda c: abs(c[1] - pct))
-        return best_r[0]
     return None
+
+
+def _chip_amount_for_mult(mult: float, legal, ctx) -> int | None:
+    """Pick the legal raise action whose multiplier matches ``mult``.
+
+    Raises are C2 "multiple of the bet faced" sizes (``raise_size_xs``,
+    resolved per-context via ``_raise_menu(ctx)``). Returns the raise-to chip
+    amount whose multiplier is closest to the user's requested ``mult`` (so
+    ``r3x`` resolves to the menu's 3.0x raise even when the engine's raise-to
+    chips differ from ``round(bet_faced * 3.0)`` due to the min-raise floor /
+    all-in clamp).
+    """
+    from poker_solver.action_abstraction import _raise_menu, compute_raise_to
+
+    menu = _raise_menu(ctx)
+    candidates: list[tuple[int, float]] = []
+    for aid in legal:
+        if 8 <= aid <= 12:
+            idx = aid - 8
+            if idx < len(menu):
+                candidates.append((compute_raise_to(aid, ctx), menu[idx]))
+    if not candidates:
+        return None
+    best = min(candidates, key=lambda c: abs(c[1] - mult))
+    return best[0]
 
 
 def _nearest_legal_bet(target_chips: int, legal, ctx) -> tuple[int, int] | None:
@@ -583,22 +662,40 @@ def _nearest_legal_raise(target_chips: int, legal, ctx) -> tuple[int, int] | Non
 # ---------------------------------------------------------------------------
 
 
+def _format_node_mult(mult: float) -> str:
+    """Format a raise multiplier for a ``--node`` token (e.g. ``3.0``).
+
+    Integral multipliers keep one decimal (``3.0``) so the resulting ``r3.0x``
+    token reads unambiguously as a multiplier; fractional ones print their own
+    significant decimals (``2.5``). Round-trips through :func:`parse_user_node`
+    (which accepts ``r3.0x`` / ``r3x``).
+    """
+    f = float(mult)
+    if f == int(f):
+        return f"{f:.1f}"
+    return f"{f:g}"
+
+
 def canonical_node_id_for_history(history: str, game) -> str:
     """Translate an engine chip-token history into a BB-native ``--node`` id.
 
-    Walks the engine state to compute each step's % pot at decision time,
-    then emits a token using the % suffix (so the resulting string is
-    copy-paste-friendly into ``--node`` regardless of the absolute chip
-    amount). Single-decision tokens (check/call/fold/all-in) become their
-    verbose form; bet/raise tokens become ``b<pct>pct`` / ``r<pct>pct``
-    where ``<pct>`` is the engine's index into ``bet_size_fractions``.
+    Walks the engine state to compute each step's size at decision time, then
+    emits a copy-paste-friendly token (resilient to the absolute chip amount):
+
+    * **Bets** emit ``b<pct>pct`` where ``<pct>`` is the active **per-street**
+      pot-fraction (``_bet_menu(ctx)`` by ``ctx.street``) the slot maps to.
+    * **Raises** emit ``r<mult>x`` where ``<mult>`` is the multiplier from the
+      raise menu (``_raise_menu(ctx)`` = ``raise_size_xs``) — a multiple of the
+      bet faced, NOT a pot-fraction.
+
+    Single-decision tokens (check/call/fold/all-in) become their verbose form.
 
     Examples:
 
         ""        → ""                (root)
         "x"       → "check"
         "xb330"   → "check.bet33pct"
-        "b990r3300" → "bet33pct.raise75pct"
+        "b990r3300" → "bet33pct.raise3.0x"
         "A"       → "allin"
 
     Returns the original engine history if any token can't be mapped
@@ -612,6 +709,8 @@ def canonical_node_id_for_history(history: str, game) -> str:
             ACTION_CALL,
             ACTION_CHECK,
             ACTION_FOLD,
+            _bet_menu,
+            _raise_menu,
             compute_bet_amount,
             compute_raise_to,
         )
@@ -663,7 +762,8 @@ def canonical_node_id_for_history(history: str, game) -> str:
                         continue
                     return history
                 idx = match_aid - 3
-                pct = int(round(ctx.bet_size_fractions[idx] * 100))
+                bet_menu = _bet_menu(ctx)
+                pct = int(round(bet_menu[idx] * 100))
                 pieces.append(f"bet{pct}pct")
                 state = game.apply(state, match_aid)
                 continue
@@ -683,8 +783,8 @@ def canonical_node_id_for_history(history: str, game) -> str:
                         continue
                     return history
                 idx = match_aid - 8
-                pct = int(round(ctx.bet_size_fractions[idx] * 100))
-                pieces.append(f"raise{pct}pct")
+                raise_menu = _raise_menu(ctx)
+                pieces.append(f"raise{_format_node_mult(raise_menu[idx])}x")
                 state = game.apply(state, match_aid)
                 continue
         return ".".join(pieces)

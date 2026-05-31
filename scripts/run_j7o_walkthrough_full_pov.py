@@ -229,9 +229,8 @@ def specific_combo_strategy_at_root(
             continue
         # Hero's turn — look up the specific combo.
         actions = game.legal_actions(state)
-        action_labels = [
-            _label_for_action(a, postflop_cfg.bet_size_fractions) for a in actions
-        ]
+        ctx = game._action_context(state)
+        action_labels = [_label_for_action(a, ctx=ctx) for a in actions]
         hole_str = _hole_string_rust(hero_combo)
         key_suffix = _key_suffix_for_state(game, state, hero_player)
         row = avg.get(hole_str + key_suffix)
@@ -294,9 +293,8 @@ def bb_modal_action_at_root(
             return None
         # BB is current; aggregate their average across all hands.
         actions = game.legal_actions(state)
-        action_labels = [
-            _label_for_action(a, postflop_cfg.bet_size_fractions) for a in actions
-        ]
+        ctx = game._action_context(state)
+        action_labels = [_label_for_action(a, ctx=ctx) for a in actions]
         key_suffix = _key_suffix_for_state(game, state, cur)
         sums = [0.0] * len(actions)
         count = 0
@@ -368,9 +366,8 @@ def sb_strategy_facing_specific_bb_action(
             continue
         if cur != hero_player:
             actions = game.legal_actions(state)
-            action_labels = [
-                _label_for_action(a, postflop_cfg.bet_size_fractions) for a in actions
-            ]
+            ctx = game._action_context(state)
+            action_labels = [_label_for_action(a, ctx=ctx) for a in actions]
             if not bb_action_forced and bb_action_label in action_labels:
                 # Force BB's first action to the specified label.
                 idx = action_labels.index(bb_action_label)
@@ -395,9 +392,8 @@ def sb_strategy_facing_specific_bb_action(
             visited += 1
             continue
         actions = game.legal_actions(state)
-        action_labels = [
-            _label_for_action(a, postflop_cfg.bet_size_fractions) for a in actions
-        ]
+        ctx = game._action_context(state)
+        action_labels = [_label_for_action(a, ctx=ctx) for a in actions]
         hole_str = _hole_string_rust(hero_combo)
         key_suffix = _key_suffix_for_state(game, state, hero_player)
         row = avg.get(hole_str + key_suffix)
@@ -756,9 +752,8 @@ def test3_full(bp, hunl_template) -> dict:
                 break
             state = game.apply(state, chosen)
         actions = game.legal_actions(state)
-        action_labels = [
-            _label_for_action(a, postflop_cfg.bet_size_fractions) for a in actions
-        ]
+        ctx = game._action_context(state)
+        action_labels = [_label_for_action(a, ctx=ctx) for a in actions]
         if len(row) == len(action_labels):
             probs = dict(zip(action_labels, row, strict=True))
             facing_raise_summary = {

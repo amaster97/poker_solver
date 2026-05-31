@@ -151,9 +151,16 @@ def test_ak_vs_qq_river_off_path_classification() -> None:
         bet_size_fractions=(0.33, 0.75),
         postflop_raise_cap=3,
     )
-    # 50 DCFR iters is sufficient for the QQ-over-b750 line to drop
-    # below the engine reach threshold; we don't need full convergence.
-    result = solve_hunl_postflop(cfg, iterations=50)
+    # v1.11 lean-raise re-capture: the C2 bet-size-menu engine change
+    # (commit f69ec29) collapsed the multi-size raise ladder to a single
+    # 3.0x raise multiplier. The leaner river tree has fewer raise
+    # branches, so phantom lines decay toward zero reach MORE SLOWLY
+    # (less multiplicative dilution per phantom decision). At 50 iters the
+    # QQ-over-b750 line still sits at ~1e-5 (above the 1e-6 threshold);
+    # 300 iters lets the rare lines converge below it. Verified
+    # deterministic at 300 iters (off_path_keys stable across runs, and it
+    # contains the canonical ...|r|b750A QQ-shove-over-b750 phantom).
+    result = solve_hunl_postflop(cfg, iterations=300, seed=42)
 
     # Annotation populated.
     assert len(result.reach_probability) > 0, "reach map empty"
@@ -172,9 +179,16 @@ def test_ak_vs_qq_river_off_path_classification() -> None:
             f"on-path P1 root {k!r} has reach {result.reach_probability[k]}"
         )
 
-    # Off-path keys non-empty: phantom 5% lines exist.
+    # Off-path keys non-empty: phantom 5% lines exist. The canonical
+    # phantom is the QQ-shove-over-b750 line (``...|r|b750A``) the
+    # docstring describes — assert it specifically rather than just the
+    # count, so the test stays load-bearing on the exact phantom claimed.
     assert len(result.off_path_keys) > 0, (
         "expected at least one phantom (off-path) infoset"
+    )
+    assert any(k.endswith("b750A") for k in result.off_path_keys), (
+        "expected the QQ-shove-over-b750 phantom (...|r|b750A) in "
+        f"off_path_keys; got {sorted(result.off_path_keys)}"
     )
 
     # All off-path keys have reach < 1e-6 by construction.

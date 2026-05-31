@@ -459,6 +459,20 @@ class Spot:
     # Which bet sizes are checked (Q4 LOCKED: 33 / 75 / 100 / all-in default).
     # Stored explicitly because user may toggle 150% / 200% on.
     bet_sizes_checked: tuple[float, ...] = (0.33, 0.75, 1.0)
+    # C1 per-street opening-bet menus (pot fractions). ``None`` => fall back
+    # to ``bet_sizes_checked`` (the flat / preflop menu) for that street.
+    # When set, the corresponding street uses its own opening-bet sizes
+    # instead of the flat menu. Threaded into
+    # ``HUNLConfig.{flop,turn,river}_bet_fractions`` in ``to_hunl_config``;
+    # ``HUNLConfig`` treats per-street ``None`` as "inherit the flat
+    # ``bet_size_fractions``".
+    flop_bet_fractions: tuple[float, ...] | None = None
+    turn_bet_fractions: tuple[float, ...] | None = None
+    river_bet_fractions: tuple[float, ...] | None = None
+    # C2 raise menu — MULTIPLIERS of the bet faced (NOT pot fractions).
+    # ``(3.0,)`` means "raise to 3x the bet". Raises no longer reuse
+    # ``bet_sizes_checked``. Threaded into ``HUNLConfig.raise_size_xs``.
+    raise_size_xs: tuple[float, ...] = (3.0,)
     # PR 24a: range-vs-range solve mode (v1.3.0 Plan C Stage C1 surface).
     # When True, ``SolveRunner.start`` routes through
     # ``poker_solver.range_aggregator.solve_range_vs_range`` instead of
@@ -649,6 +663,26 @@ class Spot:
             preflop_raise_cap=self.preflop_raise_cap,
             postflop_raise_cap=self.postflop_raise_cap,
             bet_size_fractions=tuple(self.bet_sizes_checked),
+            # C1 per-street menus: ``None`` => HUNLConfig inherits the flat
+            # ``bet_size_fractions`` for that street. Tuples are coerced so
+            # frozen-dataclass validation sees the contract type.
+            flop_bet_fractions=(
+                tuple(self.flop_bet_fractions)
+                if self.flop_bet_fractions is not None
+                else None
+            ),
+            turn_bet_fractions=(
+                tuple(self.turn_bet_fractions)
+                if self.turn_bet_fractions is not None
+                else None
+            ),
+            river_bet_fractions=(
+                tuple(self.river_bet_fractions)
+                if self.river_bet_fractions is not None
+                else None
+            ),
+            # C2 raise multipliers (×bet faced).
+            raise_size_xs=tuple(self.raise_size_xs),
             include_all_in=self.include_all_in,
             abstraction=None,
         )

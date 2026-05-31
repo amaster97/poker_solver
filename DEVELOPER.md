@@ -291,10 +291,24 @@ exposes `ActionAbstractionConfig` (and a per-street variant
 set. Two fields drive the menu size:
 
 - `bet_size_fractions: tuple[float, ...]` — pot fractions the solver
-  exposes as bet / raise sizes. Default is `(0.33, 0.75, 1.00, 1.50, 2.00)`.
-  Set to `()` to drop discretionary bet sizes entirely.
+  exposes as **opening-bet** sizes. Default is `(0.33, 0.75, 1.00, 1.50, 2.00)`.
+  Set to `()` to drop discretionary bet sizes entirely. Acts as the flat /
+  fallback menu for any street without a per-street override.
+- `flop_bet_fractions` / `turn_bet_fractions` / `river_bet_fractions:
+  tuple[float, ...] | None` (v1.11) — per-street opening-bet menus. `None`
+  (the default) falls back to `bet_size_fractions` for that street; set a
+  tuple to override just that street.
+- `raise_size_xs: tuple[float, ...]` (v1.11) — raise sizes as
+  **multipliers of the bet faced** (e.g. `(3.0,)` = pot-relative 3x raise),
+  NOT pot fractions. Default `(3.0,)`; at most 5. Raises no longer draw from
+  `bet_size_fractions`.
 - `include_all_in: bool` — whether the menu includes the all-in size.
   Default `True`.
+
+The `solve --hunl-mode postflop` CLI surfaces these as `--bet-sizes`
+(flat/fallback, pot-fraction %), `--flop-bet-sizes` / `--turn-bet-sizes` /
+`--river-bet-sizes` (per-street pot-fraction % overrides), and
+`--raise-sizes` (comma-separated raise multipliers).
 
 Setting both to their minimal values produces a 2-action SB menu
 (check/fold + the single forced size, no raises) — useful for

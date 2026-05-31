@@ -75,6 +75,9 @@ from poker_solver.action_abstraction import (
     ACTION_RAISE_100,
     ACTION_RAISE_150,
     ACTION_RAISE_200,
+    ActionContext,
+    _bet_menu,
+    _raise_menu,
 )
 from poker_solver.card import RANK_VALUE, RANKS, Card, card_to_int
 from poker_solver.hunl import HUNLConfig, HUNLPoker, Street, _serialize_hunl_config
@@ -106,32 +109,86 @@ _FIXED_ACTION_LABELS: dict[int, str] = {
 }
 
 
-def _label_for_action(action_id: int, bet_size_fractions: tuple[float, ...]) -> str:
-    """Map an action id to a human-readable label.
+def _format_raise_multiplier(mult: float) -> str:
+    """Format a raise multiplier as a compact ``<x>x`` token, e.g. ``"3.0x"``.
 
-    Bet/raise action ids are positional: ``ACTION_BET_33`` is "the first
-    bet size in ``bet_size_fractions``", *not* "always 33% pot". The
-    action-id naming in the engine is a fixed enum independent of the
-    fraction it represents. We therefore decode the label from the
-    actual fraction the action corresponds to, so a config with
-    ``bet_size_fractions=(0.75,)`` produces a label of ``"bet_75"``
-    (the conceptual fraction) rather than ``"bet_33"`` (the enum-slot
-    name).
+    Raises are C2 "multiple of the bet faced" sizes (``raise_size_xs``), NOT
+    pot-fractions, so the label carries an ``x`` (multiplier) suffix rather
+    than a ``%`` (pot-fraction) one. Integral multipliers keep a single
+    trailing decimal (``3.0x``) to read unambiguously as a multiplier;
+    fractional ones print their own decimals (``2.5x``).
+    """
+    f = float(mult)
+    if f == int(f):
+        return f"{f:.1f}x"
+    # Strip insignificant trailing zeros (e.g. 2.50 -> "2.5") but keep at
+    # least one fractional digit.
+    return f"{f:g}x"
+
+
+def _label_for_action(
+    action_id: int,
+    bet_size_fractions: tuple[float, ...] | None = None,
+    *,
+    ctx: ActionContext | None = None,
+    raise_size_xs: tuple[float, ...] | None = None,
+) -> str:
+    """Map an action id to a human-readable label (also used as a dict key).
+
+    Bet/raise action ids are positional enum slots: ``ACTION_BET_33`` is "the
+    first bet *slot*", *not* "always 33% pot", and ``ACTION_RAISE_33`` is "the
+    first raise *slot*", *not* "33% pot". The concrete size each slot maps to is
+    context-dependent (C bet-size feature):
+
+      * **Bets** index the per-street pot-fraction menu (flop/turn/river, or the
+        flat ``bet_size_fractions`` fallback). The label is the conceptual
+        pot-fraction, e.g. a flop menu of ``(0.33, 0.75, 1.25)`` yields
+        ``"bet_33"`` / ``"bet_75"`` / ``"bet_125"``.
+      * **Raises** index ``raise_size_xs`` (MULTIPLIERS of the bet faced, C2),
+        so the label is a multiplier token, e.g. ``"raise_3.0x"`` for a 3.0x
+        slot — NOT a pot-fraction tag.
+
+    The size source is, in priority order:
+
+      1. ``ctx`` (an :class:`ActionContext`): the per-street bet menu is
+         resolved via :func:`action_abstraction._bet_menu` (by ``ctx.street``)
+         and the raise menu via :func:`action_abstraction._raise_menu`. This is
+         the correct, context-aware path and what every solver caller should
+         pass.
+      2. The explicit ``bet_size_fractions`` (bets) / ``raise_size_xs`` (raises)
+         keyword arguments (legacy / test convenience).
+
+    All non-``ctx`` parameters are keyword/optional so legacy call sites that
+    pass only ``bet_size_fractions`` positionally keep working without a
+    ``TypeError`` (they just lose per-street accuracy, falling back to the flat
+    menu for bets and ``raise_size_xs`` for raises).
     """
     fixed = _FIXED_ACTION_LABELS.get(action_id)
     if fixed is not None:
         return fixed
+    if ctx is not None:
+        bet_menu = _bet_menu(ctx)
+        raise_menu = _raise_menu(ctx)
+    else:
+        bet_menu = bet_size_fractions if bet_size_fractions is not None else ()
+        # No ctx: prefer an explicit raise menu; otherwise fall back to the
+        # bet menu so a single positional arg still produces *a* label (the
+        # legacy degenerate behavior) rather than crashing.
+        raise_menu = (
+            raise_size_xs
+            if raise_size_xs is not None
+            else (bet_size_fractions if bet_size_fractions is not None else ())
+        )
     if action_id in _BET_ACTION_IDS:
         idx = _BET_ACTION_IDS.index(action_id)
-        if idx < len(bet_size_fractions):
-            frac = bet_size_fractions[idx]
+        if idx < len(bet_menu):
+            frac = bet_menu[idx]
             return f"bet_{int(round(frac * 100))}"
         return f"bet_idx_{idx}"
     if action_id in _RAISE_ACTION_IDS:
         idx = _RAISE_ACTION_IDS.index(action_id)
-        if idx < len(bet_size_fractions):
-            frac = bet_size_fractions[idx]
-            return f"raise_{int(round(frac * 100))}"
+        if idx < len(raise_menu):
+            return f"raise_{_format_raise_multiplier(raise_menu[idx])}"
         return f"raise_idx_{idx}"
     return f"action_{action_id}"
 
@@ -717,8 +774,9 @@ def _extract_first_decision_freqs(
             # Hero never touched this infoset (subgame too short, or empty
             # strategy). Fall back to uniform.
             probs = [1.0 / len(actions)] * len(actions)
+        ctx = game._action_context(state)
         return {
-            _label_for_action(action, config.bet_size_fractions): float(prob)
+            _label_for_action(action, ctx=ctx): float(prob)
             for action, prob in zip(actions, probs, strict=True)
         }
     return None
@@ -1278,9 +1336,8 @@ def _project_to_hand_classes(
             continue
         # Hero's first decision — extract per-(combo, weight) rows and project.
         actions = game.legal_actions(state)
-        action_labels = [
-            _label_for_action(a, config.bet_size_fractions) for a in actions
-        ]
+        ctx = game._action_context(state)
+        action_labels = [_label_for_action(a, ctx=ctx) for a in actions]
         key_suffix = _key_suffix_for_state(game, state, hero_player)
         # Per class: list of (row, weight) tuples. Weight defaults to 1.0
         # so the legacy uniform-average path is identical bit-for-bit when

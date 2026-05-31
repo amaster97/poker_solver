@@ -431,6 +431,25 @@ def _on_preflop_chart_solve(state: AppState) -> None:
             preflop_raise_cap=spot.preflop_raise_cap,
             postflop_raise_cap=spot.postflop_raise_cap,
             bet_size_fractions=tuple(spot.bet_sizes_checked),
+            # C1/C2 bet-size menu fields. Forward the per-street opening
+            # menus + raise multipliers so the preflop config matches the
+            # spot exactly (per-street ``None`` => inherit the flat menu).
+            flop_bet_fractions=(
+                tuple(spot.flop_bet_fractions)
+                if spot.flop_bet_fractions is not None
+                else None
+            ),
+            turn_bet_fractions=(
+                tuple(spot.turn_bet_fractions)
+                if spot.turn_bet_fractions is not None
+                else None
+            ),
+            river_bet_fractions=(
+                tuple(spot.river_bet_fractions)
+                if spot.river_bet_fractions is not None
+                else None
+            ),
+            raise_size_xs=tuple(spot.raise_size_xs),
             include_all_in=spot.include_all_in,
             abstraction=None,
         )

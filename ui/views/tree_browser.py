@@ -43,6 +43,9 @@ from poker_solver.action_abstraction import (
     ACTION_RAISE_100,
     ACTION_RAISE_150,
     ACTION_RAISE_200,
+    ActionContext,
+    _bet_menu,
+    _raise_menu,
 )
 from poker_solver.hunl import HUNLPoker, HUNLState
 from poker_solver.solver import SolveResult
@@ -63,8 +66,13 @@ _GLOBAL_NODE_CEILING: int = 2000
 _DEFAULT_MIN_REACH: float = 0.01
 
 
-# Action label table for inline tree badges. Matches the action-abstraction
-# enum exactly (see ``poker_solver/action_abstraction.py``).
+# Context-FREE fallback label table — positional enum-slot names. These are
+# only correct when the bet menu is the legacy flat (0.33, 0.75, …) one and
+# raises were pot-fractions; under the C bet-size feature the concrete size a
+# slot maps to is context-dependent, so user-facing labels go through
+# :func:`_context_action_label` (which reads the per-node ActionContext). This
+# table survives as (a) the slug source for stable node-id generation
+# (``_action_token``) and (b) the fallback when no context is available.
 _ACTION_LABELS: dict[int, str] = {
     ACTION_FOLD: "fold",
     ACTION_CHECK: "check",
@@ -81,6 +89,92 @@ _ACTION_LABELS: dict[int, str] = {
     ACTION_RAISE_200: "raise200%",
     ACTION_ALL_IN: "all-in",
 }
+
+# Enum slot -> per-street bet-menu index / raise-menu index (positional).
+_BET_SLOT_BY_ACTION: dict[int, int] = {
+    ACTION_BET_33: 0,
+    ACTION_BET_75: 1,
+    ACTION_BET_100: 2,
+    ACTION_BET_150: 3,
+    ACTION_BET_200: 4,
+}
+_RAISE_SLOT_BY_ACTION: dict[int, int] = {
+    ACTION_RAISE_33: 0,
+    ACTION_RAISE_75: 1,
+    ACTION_RAISE_100: 2,
+    ACTION_RAISE_150: 3,
+    ACTION_RAISE_200: 4,
+}
+
+
+def _format_raise_x(mult: float) -> str:
+    """Format a raise multiplier as a terse ``<x>x`` tag (e.g. ``3.0x``)."""
+    f = float(mult)
+    if f == int(f):
+        return f"{f:.1f}x"
+    return f"{f:g}x"
+
+
+def _context_action_label(action: int, ctx: ActionContext | None) -> str:
+    """Terse, context-aware label for a single action id.
+
+    Mirrors the display style of the flat ``_ACTION_LABELS`` table (``bet75%``,
+    ``all-in`` …) but derives bet/raise sizes from the per-node
+    :class:`ActionContext` (the C bet-size feature):
+
+    * Bets index the per-street pot-fraction menu (``_bet_menu(ctx)`` by
+      ``ctx.street``): e.g. a flop slot of 1.25 renders ``bet125%``.
+    * Raises index the multiplier menu (``_raise_menu(ctx)`` = ``raise_size_xs``)
+      and render as an ``x`` multiplier (``raise3.0x``), NOT a pot-fraction.
+
+    Falls back to the context-free ``_ACTION_LABELS`` slot name when ``ctx`` is
+    None or the slot indexes past the active menu.
+    """
+    if ctx is None:
+        return _ACTION_LABELS.get(action, str(action))
+    if action in _BET_SLOT_BY_ACTION:
+        idx = _BET_SLOT_BY_ACTION[action]
+        menu = _bet_menu(ctx)
+        if idx < len(menu):
+            return f"bet{int(round(menu[idx] * 100))}%"
+        return _ACTION_LABELS.get(action, str(action))
+    if action in _RAISE_SLOT_BY_ACTION:
+        idx = _RAISE_SLOT_BY_ACTION[action]
+        menu = _raise_menu(ctx)
+        if idx < len(menu):
+            return f"raise{_format_raise_x(menu[idx])}"
+        return _ACTION_LABELS.get(action, str(action))
+    return _ACTION_LABELS.get(action, str(action))
+
+
+def _ctx_for_state(game: HUNLPoker, state: HUNLState) -> ActionContext | None:
+    """Best-effort per-node ActionContext for label derivation.
+
+    Returns None (so callers fall back to the context-free table) for chance /
+    terminal nodes or any unexpected engine state, so the tree UI never raises
+    while rendering a label.
+    """
+    try:
+        if state.cur_player == -1 or game.is_terminal(state):
+            return None
+        return game._action_context(state)
+    except Exception:
+        return None
+
+
+def _labels_for_node_state(
+    game: HUNLPoker, state: HUNLState, legal: tuple[object, ...]
+) -> tuple[str, ...]:
+    """Context-aware display labels for the legal actions at ``state``.
+
+    Aligned 1:1 with ``legal``. Empty input (chance / terminal node) yields an
+    empty tuple. Uses the per-decision :class:`ActionContext` so bets carry the
+    per-street pot-fraction and raises carry the ``x`` multiplier.
+    """
+    if not legal:
+        return ()
+    ctx = _ctx_for_state(game, state)
+    return tuple(_context_action_label(cast(int, a), ctx) for a in legal)
 
 
 # -- Tree node ---------------------------------------------------------------
@@ -107,6 +201,10 @@ class TreeNode:
     truncated: bool = False
     is_chance: bool = False
     is_terminal: bool = False
+    # Context-aware display labels aligned to ``legal_actions`` (per-street bet
+    # tags + x-multiplier raise tags; C bet-size feature). Empty => the badge
+    # renderer falls back to the context-free ``_ACTION_LABELS`` table.
+    action_labels: tuple[str, ...] = ()
 
 
 # -- SolveTree adapter --------------------------------------------------------
@@ -166,6 +264,7 @@ class SolveTree:
             legal_actions=legal,
             action_freqs=self._lookup_action_freqs(state, legal),
             action_evs=tuple(0.0 for _ in legal),
+            action_labels=_labels_for_node_state(self.game, state, legal),
             is_chance=(state.cur_player == -1 and not self.game.is_terminal(state)),
             is_terminal=self.game.is_terminal(state),
         )
@@ -301,6 +400,7 @@ class SolveTree:
                 legal_actions=legal,
                 action_freqs=self._lookup_action_freqs(next_state, legal),
                 action_evs=tuple(0.0 for _ in legal),
+                action_labels=_labels_for_node_state(self.game, next_state, legal),
                 is_chance=(
                     next_state.cur_player == -1
                     and not self.game.is_terminal(next_state)
@@ -315,6 +415,9 @@ class SolveTree:
         legal_actions = self.game.legal_actions(state)
         if not legal_actions:
             return []
+        # Per-decision context for context-aware (per-street bet / x-multiplier
+        # raise) action labels. Derived once from the parent decision state.
+        ctx = _ctx_for_state(self.game, state)
         freqs = parent.action_freqs or tuple(
             1.0 / len(legal_actions) for _ in legal_actions
         )
@@ -327,7 +430,7 @@ class SolveTree:
                 if next_state.cur_player != -1
                 else ()
             )
-            label = self._format_player_label(state.cur_player, action, next_state)
+            label = self._format_player_label(state.cur_player, action, ctx)
             child_id = f"{parent.id}/{state.cur_player}_{_action_token(action)}"
             children.append(
                 TreeNode(
@@ -341,6 +444,9 @@ class SolveTree:
                     legal_actions=legal_next,
                     action_freqs=self._lookup_action_freqs(next_state, legal_next),
                     action_evs=tuple(0.0 for _ in legal_next),
+                    action_labels=_labels_for_node_state(
+                        self.game, next_state, legal_next
+                    ),
                     is_chance=(
                         next_state.cur_player == -1
                         and not self.game.is_terminal(next_state)
@@ -352,10 +458,10 @@ class SolveTree:
 
     @staticmethod
     def _format_player_label(
-        cur_player: int, action: int, _next_state: HUNLState
+        cur_player: int, action: int, ctx: ActionContext | None
     ) -> str:
         position_label = "SB" if cur_player == 0 else "BB"
-        action_word = _ACTION_LABELS.get(action, str(action))
+        action_word = _context_action_label(action, ctx)
         return f"[{position_label}: {action_word}]"
 
     def get_node(self, node_id: str) -> TreeNode:
@@ -420,8 +526,13 @@ def _action_color(action: int) -> str:
     return _RAISE_COLOR
 
 
-def _format_action_badge(action: int, freq: float, ev_mbb: float) -> str:
-    label = _ACTION_LABELS.get(action, str(action))
+def _format_action_badge(
+    action: int, freq: float, ev_mbb: float, label: str | None = None
+) -> str:
+    # ``label`` is the context-aware tag (per-street bet %, x-multiplier raise)
+    # precomputed on the node; fall back to the context-free table when absent.
+    if label is None:
+        label = _ACTION_LABELS.get(action, str(action))
     color = _action_color(action)
     pct = int(round(freq * 100))
     return (
@@ -451,11 +562,18 @@ def tree_node_to_dict(
         for idx, action in enumerate(node.legal_actions):
             freq = node.action_freqs[idx] if idx < len(node.action_freqs) else 0.0
             ev = node.action_evs[idx] if idx < len(node.action_evs) else 0.0
+            label = (
+                node.action_labels[idx]
+                if idx < len(node.action_labels)
+                else None
+            )
             # ``legal_actions`` is typed as ``tuple[object, ...]`` per spec
             # to keep the dataclass generic across game types; cast back
             # to int here for the action-id arithmetic.
             badges.append(
-                _format_action_badge(cast(int, action), float(freq), float(ev))
+                _format_action_badge(
+                    cast(int, action), float(freq), float(ev), label
+                )
             )
     summary = (
         f"&nbsp;&nbsp;reach {node.reach_prob:.3f}"
@@ -584,8 +702,15 @@ def _open_lock_for_node(
             position="top",
         )
         return
-    # Build action labels via the existing _ACTION_LABELS table.
-    labels = [_ACTION_LABELS.get(cast(int, a), str(a)) for a in node.legal_actions]
+    # Use the node's context-aware labels (per-street bet % + x-multiplier
+    # raise; C bet-size feature), falling back to the context-free table for
+    # any action without a precomputed label.
+    if node.action_labels and len(node.action_labels) == len(node.legal_actions):
+        labels = list(node.action_labels)
+    else:
+        labels = [
+            _ACTION_LABELS.get(cast(int, a), str(a)) for a in node.legal_actions
+        ]
     # Pre-populate sliders with the current avg-strategy frequencies
     # (which is what the live tree row already shows).
     initial = list(node.action_freqs) if node.action_freqs else None
