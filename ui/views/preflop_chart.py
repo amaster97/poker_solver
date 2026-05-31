@@ -288,6 +288,29 @@ _DEFAULT_ITERATIONS: int = 500
 _DEFAULT_OPEN_SIZES_BB: tuple[float, ...] = (2.0, 3.0, 4.0, 5.0)
 _DEFAULT_RERAISE_MULTIPLIERS: tuple[float, ...] = (2.0, 3.0, 4.0, 5.0)
 
+# Ante selector options (Fix 2): BB-value -> user-facing label. The three
+# values are exactly the precomputed blueprint shard cells (anteNone /
+# anteHalf / anteFull). Insertion order is the dropdown order.
+_ANTE_OPTIONS: dict[float, str] = {
+    0.0: "None (0 bb)",
+    0.5: "Half (0.5 bb)",
+    1.0: "Full (1.0 bb)",
+}
+
+
+def _coerce_ante_bb(value: Any) -> float:
+    """Map a selector value (or stored spot ante) to a valid ante-BB.
+
+    Returns one of ``{0.0, 0.5, 1.0}`` (the blueprint shard cells); junk /
+    out-of-set input falls back to ``0.0`` (None). Shared by the ante select's
+    initial value and its change handler so the two never diverge.
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return v if v in _ANTE_OPTIONS else 0.0
+
 
 def parse_size_list(value: str) -> list[float]:
     """Parse a comma-separated float list (action-menu input control).
@@ -893,31 +916,19 @@ def preflop_line_actor_color(actor: str) -> str:
     return _ACTOR_COLOR.get(actor, "var(--ps-text)")
 
 
-_FULL_RANGE_COMBO_COUNT = 1326
-
-
 def _range_is_restricted(range_with_freqs: Any) -> bool:
     """True when ``range_with_freqs`` is a real restriction (not all-169).
 
     A restriction forces the live path (the blueprint asset is full-range
-    only). Mirrors ``ui.app._preflop_holes_from_range``'s full-vs-restricted
-    test: the full 1326-combo deck (or a defensively over-full count) is NOT a
-    restriction; anything fewer (and non-empty) is.
+    only). Delegates to ``ui.app._range_is_effectively_full`` — the single
+    source of truth for the full-vs-restricted decision — so the route
+    predictor (iteration greying) and the engine dispatch
+    (``ui.app._preflop_holes_from_range``) never disagree. A full (or
+    effectively-full / empty) range is NOT a restriction; anything fewer is.
     """
-    if range_with_freqs is None:
-        return False
-    base = getattr(range_with_freqs, "base_range", None)
-    if base is None:
-        return False
-    try:
-        n = sum(
-            1
-            for combo in base
-            if range_with_freqs.frequency_of(combo.cards) > 0.0
-        )
-    except Exception:  # noqa: BLE001
-        return False
-    return 0 < n < _FULL_RANGE_COMBO_COUNT
+    from ui.app import _range_is_effectively_full
+
+    return not _range_is_effectively_full(range_with_freqs)
 
 
 def _next_solve_hits_blueprint(state: AppState) -> bool:
@@ -1287,6 +1298,32 @@ def _render_input_panel(
                 state.current_spot.preflop_chart_iterations = val  # type: ignore[attr-defined]
 
             iter_input.on_value_change(_on_iter_change)
+
+        # Ante selector (None / Half / Full = 0 / 0.5 / 1.0 bb). The spot ante
+        # feeds BOTH the blueprint router (it picks the matching precomputed
+        # shard: anteNone / anteHalf / anteFull) AND the live HUNLConfig. Today
+        # the panel had no ante control and the default ante is 0, so only the
+        # no-ante chart was reachable here; this exposes all three.
+        with ui.row().style("gap:8px;align-items:center"):
+            current_ante = _coerce_ante_bb(getattr(spot, "ante", 0.0))
+            ante_select = (
+                ui.select(
+                    options=dict(_ANTE_OPTIONS),
+                    value=current_ante,
+                    label="Ante",
+                )
+                .classes("w-40")
+                .mark("preflop-chart-ante-select")
+            )
+
+            def _on_ante_change(e: Any) -> None:
+                state.current_spot.ante = _coerce_ante_bb(e.value)
+                # Editing the ante flips which blueprint shard is served (and
+                # thus whether the iter input is a no-op) — re-sync the route.
+                _sync_iter_route()
+                refresh_after_change()
+
+            ante_select.on_value_change(_on_ante_change)
 
         # Fix 5: when the next solve would be served from the (instant)
         # blueprint, iterations are ignored — grey the input + annotate so it

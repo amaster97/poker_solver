@@ -155,9 +155,9 @@ async def test_solve_button_dispatches_rust_binding(
     isolated_state_dir: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Clicking Solve with CUSTOM action sizes invokes
-    ``_rust.solve_hunl_preflop_rvr`` (mocked here) with the iteration count
-    + the edited action menu.
+    """Clicking Solve with CUSTOM action sizes on a FULL range invokes the
+    fast 169-class kernel ``_rust.solve_hunl_preflop_rvr_class169`` (mocked
+    here) with the iteration count + the edited action menu.
 
     The default ``(100BB, no-ante)`` spot is covered by the Premium-A
     blueprint asset, so a *default*-sizes click is correctly served from the
@@ -165,11 +165,16 @@ async def test_solve_button_dispatches_rust_binding(
     assert the LIVE dispatch this test edits the open sizes to a non-default
     value (``2.5,3.5,4.5``), which diverges from the FIXED menu the blueprint
     was solved against. Per U05 that divergence MUST bypass the blueprint and
-    route to a live ``solve_hunl_preflop_rvr`` solve — which is exactly what
-    we verify here."""
-    calls: dict[str, Any] = {"count": 0, "args": None}
+    route to a live solve.
 
-    def _fake_solve(
+    Fix 1b: a FULL-range live solve (both holes None) routes to the 169-class
+    kernel (~30-60x faster), NOT the 1326-combo ``solve_hunl_preflop_rvr``.
+    The class169 kernel takes per-class root-reach 169-vectors (None == full)
+    in the last two positional slots instead of explicit holes, and emits
+    ``"<class_label>||p|<history>"`` keys."""
+    calls: dict[str, Any] = {"count": 0, "args": None, "legacy_count": 0}
+
+    def _fake_solve_class169(
         config_json: str,
         equity_path: str,
         iterations: int,
@@ -178,37 +183,46 @@ async def test_solve_button_dispatches_rust_binding(
         gamma: float,
         opens: Any = None,
         mults: Any = None,
-        p0_holes: Any = None,
-        p1_holes: Any = None,
+        root_reach_p0: Any = None,
+        root_reach_p1: Any = None,
     ) -> dict[str, Any]:
         calls["count"] += 1
         calls["args"] = {
             "iterations": iterations,
             "opens": opens,
             "mults": mults,
+            "root_reach_p0": root_reach_p0,
+            "root_reach_p1": root_reach_p1,
         }
-        # Minimal output the worker's projection can consume.
+        # Minimal class-169-keyed output the worker's projection can consume:
+        # "<class_label>||p|<history>" with empty history = root SB decision.
         return {
             "average_strategy": {
-                # "AsAh" + suffix "||p|" (root SB decision)
-                "AsAh||p|": [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+                "AA||p|": [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
             },
             "iterations": iterations,
             "wallclock_seconds": 0.01,
             "decision_node_count": 1,
             "strategy_entry_count": 1,
-            "hand_count_per_player": [1, 1],
-            "backend": "rust_preflop_rvr",
+            "backend": "rust_preflop_rvr_class169",
+            "hand_resolution": "class_169",
         }
 
-    # Inject the fake binding by adding it onto the _rust module attr.
-    # Use SimpleNamespace so attribute access does NOT engage descriptor
-    # protocol (a plain function on a class becomes a bound method and
-    # adds an unwanted ``self`` arg).
+    def _fake_solve_legacy(*_a: Any, **_k: Any) -> dict[str, Any]:
+        # The 1326-combo kernel must NOT be called for a full range.
+        calls["legacy_count"] += 1
+        return {"average_strategy": {}, "iterations": 0, "wallclock_seconds": 0.0}
+
+    # Inject the fake bindings onto the _rust module attr. Use SimpleNamespace
+    # so attribute access does NOT engage descriptor protocol (a plain function
+    # on a class becomes a bound method and adds an unwanted ``self`` arg).
     import poker_solver
     from types import SimpleNamespace
 
-    fake_module = SimpleNamespace(solve_hunl_preflop_rvr=_fake_solve)
+    fake_module = SimpleNamespace(
+        solve_hunl_preflop_rvr_class169=_fake_solve_class169,
+        solve_hunl_preflop_rvr=_fake_solve_legacy,
+    )
     monkeypatch.setattr(poker_solver, "_rust", fake_module, raising=False)
 
     # Force the LIVE solve path. The default spot (100 BB / 0 ante) is an
@@ -241,7 +255,13 @@ async def test_solve_button_dispatches_rust_binding(
         await asyncio.sleep(step)
         waited += step
     assert calls["count"] == 1, (
-        f"expected solve_hunl_preflop_rvr called once; got {calls['count']}"
+        "expected solve_hunl_preflop_rvr_class169 called once; got "
+        f"{calls['count']}"
+    )
+    # The slow 1326-combo kernel must NOT have been used for a full range.
+    assert calls["legacy_count"] == 0, (
+        "full-range live solve must use the fast 169-class kernel, not "
+        f"solve_hunl_preflop_rvr (called {calls['legacy_count']}x)"
     )
     # Iteration count was forwarded.
     assert calls["args"]["iterations"] >= 1
@@ -251,6 +271,10 @@ async def test_solve_button_dispatches_rust_binding(
     assert isinstance(calls["args"]["opens"], list)
     assert isinstance(calls["args"]["mults"], list)
     assert calls["args"]["opens"] == [2.5, 3.5, 4.5]
+    # Full range -> default (None) per-class root reach (combo-weighted in the
+    # engine), NOT explicit holes.
+    assert calls["args"]["root_reach_p0"] is None
+    assert calls["args"]["root_reach_p1"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -913,3 +937,303 @@ def test_real_engine_one_sided_no_value_error() -> None:
     # The bug was a ValueError before reaching here; a returned result proves
     # the one-sided case is accepted by the real binding.
     assert rust_out is not None
+
+
+# ---------------------------------------------------------------------------
+# Fix 1a: a full / effectively-full range routes to the (instant) blueprint,
+# never the catastrophically slow 1326-combo live kernel.
+# ---------------------------------------------------------------------------
+
+
+def test_effectively_full_range_routes_to_blueprint() -> None:
+    """A near-full range (full minus a few combos) is NOT a restriction: it
+    converts to None (blueprint route), not an explicit-hole live solve."""
+    from ui import app
+    from ui.state import RangeWithFreqs, _full_range_combos
+
+    # Exactly full -> None (blueprint), as before.
+    assert app._preflop_holes_from_range(RangeWithFreqs.full()) is None
+
+    # Full minus 5 combos (1321) is still "effectively full" -> blueprint.
+    near_full = RangeWithFreqs.full()
+    for combo in _full_range_combos()[:5]:
+        near_full.set_frequency(combo, 0.0)
+    present = sum(
+        1
+        for c in near_full.base_range
+        if near_full.frequency_of(c.cards) > 0.0
+    )
+    assert present == 1326 - 5, f"expected 1321 combos, got {present}"
+    assert app._range_is_effectively_full(near_full) is True
+    assert app._preflop_holes_from_range(near_full) is None, (
+        "a near-full range must route to the blueprint, not a 1326-combo live "
+        "solve"
+    )
+
+    # A genuine restriction (well below the threshold) is still live.
+    real_subset = RangeWithFreqs.from_string("AA, KK, AKs")
+    assert app._range_is_effectively_full(real_subset) is False
+    assert app._preflop_holes_from_range(real_subset) is not None
+
+
+def test_effectively_full_predictor_and_restricted_agree() -> None:
+    """The route predictor (iter greying) and engine dispatch share one
+    source of truth: a near-full range predicts a blueprint route."""
+    from types import SimpleNamespace
+
+    from ui.state import RangeWithFreqs, Spot, _full_range_combos
+    from ui.views import preflop_chart
+
+    spot = Spot()
+    near_full = RangeWithFreqs.full()
+    for combo in _full_range_combos()[:5]:
+        near_full.set_frequency(combo, 0.0)
+    spot.ranges = (near_full, RangeWithFreqs.full())
+    runner = SimpleNamespace(
+        _pending_preflop_chart_opens=None,
+        _pending_preflop_chart_mults=None,
+    )
+    state = SimpleNamespace(current_spot=spot, runner=runner)
+    # _range_is_restricted (predictor) must agree with the engine-side decision.
+    assert preflop_chart._range_is_restricted(near_full) is False
+    assert preflop_chart._next_solve_hits_blueprint(state) is True
+
+
+async def test_full_range_default_spot_hits_blueprint_no_live(
+    user: User,
+    isolated_state_dir: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The default full-range / default-sizes spot must serve from the
+    blueprint and NEVER dispatch a (slow) live solve."""
+    from ui.state import SolveRunner, get_state
+
+    live_calls: dict[str, int] = {"count": 0}
+
+    def _fake_start(self: Any, *a: Any, **k: Any) -> None:
+        live_calls["count"] += 1
+
+    monkeypatch.setattr(SolveRunner, "start_preflop_chart", _fake_start)
+
+    await user.open("/")
+    state = get_state()
+    # Default spot: full ranges, default sizes, 100BB / no-ante.
+    from ui.app import _on_preflop_chart_solve
+
+    with user.client:
+        _on_preflop_chart_solve(state)
+
+    assert live_calls["count"] == 0, (
+        "full-range default-sizes spot must hit the blueprint, not a live solve"
+    )
+    result = state.runner.preflop_chart_result
+    assert result is not None, "blueprint route must populate a chart result"
+    assert int(result.get("iterations", -1)) == 0, (
+        "blueprint route reports 0 iterations (no live CFR), got "
+        f"{result.get('iterations')}"
+    )
+    info = state.runner.preflop_route_info
+    from ui.blueprint_router import SourceLabel
+
+    assert getattr(info, "source", None) in (
+        SourceLabel.BLUEPRINT,
+        SourceLabel.INTERPOLATED,
+    ), f"expected a blueprint route badge, got {info!r}"
+
+
+# ---------------------------------------------------------------------------
+# Fix 1b: a full-range LIVE solve uses the fast 169-class kernel. The mocked
+# dispatch test above asserts the call; this proves the REAL engine round-trip
+# (backend label + 169-class projection) at low/bounded iters.
+# ---------------------------------------------------------------------------
+
+
+def test_full_range_live_solve_uses_class169_real_engine() -> None:
+    """REAL ENGINE: a full-range live solve through the worker projection uses
+    ``solve_hunl_preflop_rvr_class169`` (backend label) and yields a 169-class
+    chart. Bounded at 50 iters (class169 is ~0.3s for that)."""
+    import poker_solver._rust as _rust
+    from poker_solver.hunl import HUNLConfig, Street, _serialize_hunl_config
+    from ui.state import SolveRunner
+
+    config = HUNLConfig(
+        starting_stack=100 * 100,
+        small_blind=50,
+        big_blind=100,
+        ante=0,
+        starting_street=Street.PREFLOP,
+        initial_board=(),
+        initial_pot=0,
+        initial_contributions=(0, 0),
+        initial_hole_cards=(),
+        abstraction=None,
+    )
+    config_json = _serialize_hunl_config(config)
+    repo_root = pathlib.Path(__file__).resolve().parents[1]
+    equity_path = repo_root / "assets" / "preflop_equity_169x169.npz"
+    assert equity_path.exists()
+
+    out = _rust.solve_hunl_preflop_rvr_class169(
+        config_json, str(equity_path), 50, 1.5, 0.0, 2.0, None, None, None, None
+    )
+    assert out.get("backend") == "rust_preflop_rvr_class169"
+    # The worker's class169 projection produces a full 169-class root chart.
+    summary = SolveRunner._build_preflop_chart_summary(out, class169=True)
+    per_class = summary["per_class"]
+    assert len(per_class) == 169, (
+        f"class169 projection must yield 169 classes, got {len(per_class)}"
+    )
+    # AA should mostly raise/open; 72o should mostly fold (sanity, not exact).
+    assert "AA" in per_class and "72o" in per_class
+    assert per_class["72o"].get("fold", 0.0) > 0.5
+
+
+def test_class169_key_split_and_projection_unit() -> None:
+    """Unit: ``_split_class169_key`` parses ``<class>||p|<history>`` and the
+    projection keys cells by the class label directly (no hole aggregation)."""
+    from ui.state import SolveRunner, _split_class169_key
+
+    assert _split_class169_key("AA||p|") == ("AA", "||p|")
+    assert _split_class169_key("AKs||p|b300") == ("AKs", "||p|b300")
+    assert _split_class169_key("72o||p|cb200r600") == ("72o", "||p|cb200r600")
+    # Malformed / non-class prefixes are rejected.
+    assert _split_class169_key("ZZ||p|") == (None, "")
+    assert _split_class169_key("no-separator") == (None, "")
+
+    fake_out = {
+        "average_strategy": {
+            "AA||p|": [0.0, 0.0, 0.0, 1.0],
+            "72o||p|": [1.0, 0.0, 0.0, 0.0],
+        },
+        "iterations": 10,
+        "wallclock_seconds": 0.01,
+        "decision_node_count": 2,
+        "strategy_entry_count": 2,
+    }
+    summary = SolveRunner._build_preflop_chart_summary(fake_out, class169=True)
+    pc = summary["per_class"]
+    assert set(pc) == {"AA", "72o"}
+    assert pc["72o"]["fold"] == 1.0
+    assert pc["AA"]["open_3"] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: the ante selector sets the spot ante AND keys the blueprint lookup.
+# ---------------------------------------------------------------------------
+
+
+async def test_ante_selector_present_in_panel(
+    user: User,
+    isolated_state_dir: pathlib.Path,
+) -> None:
+    """The 'preflop-chart-ante-select' control is rendered in the configure
+    panel and starts at the spot's default (None / 0 bb)."""
+    from ui.state import get_state
+
+    await user.open("/")
+    state = get_state()
+    # Marker present (raises AssertionError inside find if absent).
+    user.find(marker="preflop-chart-ante-select")
+    assert float(state.current_spot.ante) == 0.0  # default None displayed
+
+
+def test_ante_value_coercion_mapping() -> None:
+    """The shipped ``_coerce_ante_bb`` (used by both the select's initial value
+    and its change handler) maps each option to its BB value and rejects junk
+    to 0.0 — so the selector can only ever set a valid blueprint shard cell."""
+    from ui.views import preflop_chart
+
+    assert preflop_chart._ANTE_OPTIONS == {
+        0.0: "None (0 bb)",
+        0.5: "Half (0.5 bb)",
+        1.0: "Full (1.0 bb)",
+    }
+    assert preflop_chart._coerce_ante_bb(0.0) == 0.0
+    assert preflop_chart._coerce_ante_bb(0.5) == 0.5
+    assert preflop_chart._coerce_ante_bb(1.0) == 1.0
+    # Out-of-set / junk -> 0.0 (None).
+    assert preflop_chart._coerce_ante_bb(0.25) == 0.0
+    assert preflop_chart._coerce_ante_bb("junk") == 0.0
+    assert preflop_chart._coerce_ante_bb(None) == 0.0
+
+
+async def test_ante_half_keys_blueprint_to_half_shard(
+    user: User,
+    isolated_state_dir: pathlib.Path,
+) -> None:
+    """Selecting Half ante routes the blueprint lookup to the anteHalf shard:
+    ``try_blueprint_preflop_chart(ante=0.5)`` resolves the half-ante asset."""
+    from ui.state import get_state
+
+    await user.open("/")
+    state = get_state()
+    state.current_spot.ante = 0.5
+
+    # The dispatch path passes float(spot.ante) to the router. Verify the
+    # router resolves the HALF-ante shard for (100BB, 0.5).
+    from ui.blueprint_router import (
+        BlueprintRouter,
+        SourceLabel,
+        default_asset_dir,
+    )
+
+    router = BlueprintRouter.from_asset_dir(default_asset_dir())
+    assert router is not None, "blueprint asset bundle must be present"
+    assert router.has_exact_shard(100, 0.5), (
+        "anteHalf 100BB shard must exist in the bundle"
+    )
+    info_half = router.lookup_chart(
+        stack_bb=100, ante=float(state.current_spot.ante), action_history=""
+    )
+    assert info_half.source == SourceLabel.BLUEPRINT
+    assert "half-ante" in info_half.confidence, (
+        f"half-ante route confidence expected, got {info_half.confidence!r}"
+    )
+    # And the no-ante lookup resolves a DIFFERENT (anteNone) shard.
+    info_none = router.lookup_chart(stack_bb=100, ante=0.0, action_history="")
+    assert "no-ante" in info_none.confidence
+    # The two ante cells must resolve to distinct precomputed charts.
+    assert info_half.per_class != info_none.per_class, (
+        "anteHalf and anteNone shards must differ"
+    )
+
+
+async def test_ante_selector_end_to_end_blueprint_route(
+    user: User,
+    isolated_state_dir: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: with Half ante on a full-range default-sizes spot, Solve
+    serves the half-ante blueprint (no live solve) and threads ante=0.5 into
+    the lookup."""
+    from ui.state import SolveRunner, get_state
+
+    seen: dict[str, Any] = {"ante": None, "live": 0}
+    real_try = SolveRunner.try_blueprint_preflop_chart
+
+    def _spy_try(self: Any, **kw: Any) -> bool:
+        seen["ante"] = kw.get("ante")
+        return real_try(self, **kw)
+
+    monkeypatch.setattr(SolveRunner, "try_blueprint_preflop_chart", _spy_try)
+    monkeypatch.setattr(
+        SolveRunner,
+        "start_preflop_chart",
+        lambda self, *a, **k: seen.__setitem__("live", seen["live"] + 1),
+    )
+
+    await user.open("/")
+    state = get_state()
+    state.current_spot.ante = 0.5
+
+    from ui.app import _on_preflop_chart_solve
+
+    with user.client:
+        _on_preflop_chart_solve(state)
+
+    assert float(seen["ante"]) == 0.5, (
+        f"ante=0.5 must be threaded into the blueprint lookup, got {seen['ante']!r}"
+    )
+    assert seen["live"] == 0, "half-ante full-range spot must hit the blueprint"
+    info = state.runner.preflop_route_info
+    assert info is not None and "half-ante" in info.confidence

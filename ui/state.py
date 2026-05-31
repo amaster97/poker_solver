@@ -290,6 +290,50 @@ def _hand_class_from_hole_str(hole_str: str) -> str | None:
     return hand_class_label(r1, r2, suited)
 
 
+_PREFLOP_KEY_SEP: str = "||p|"
+
+
+def _split_class169_key(key: str) -> tuple[str | None, str]:
+    """Split a class-169 engine key into (class_label, history_suffix).
+
+    The ``solve_hunl_preflop_rvr_class169`` kernel emits keys of the form
+    ``"<class_label>||p|<history>"`` (e.g. ``"AA||p|"`` for the SB AA root
+    decision, ``"T4s||p|b400r1900A"`` for a deeper node). The class label is
+    the standard Pio chart label (2 chars for a pair like ``"AA"``, 3 chars
+    for ``"AKs"`` / ``"AKo"``). The history suffix returned here matches the
+    ``"||p|<history>"`` shape that :func:`_split_preflop_key` returns for the
+    1326 kernel, so both feed the same per-line projection unchanged.
+
+    Returns ``(None, "")`` when the key lacks the separator or the prefix is
+    not a recognized hand-class label (defensive against malformed keys).
+    """
+    idx = key.find(_PREFLOP_KEY_SEP)
+    if idx < 0:
+        return (None, "")
+    cls = key[:idx]
+    if cls not in _ALL_169_HAND_CLASSES:
+        return (None, "")
+    # Re-attach the separator so the suffix shape matches _split_preflop_key's
+    # ``"||p|<history>"`` (the per-line projection keys on this exact suffix).
+    return (cls, key[idx:])
+
+
+def _all_169_hand_classes() -> frozenset[str]:
+    """The 169 canonical Pio hand-class labels (AA, AKs, AKo, ..., 22)."""
+    out: set[str] = set()
+    for r1 in range(2, 15):
+        for r2 in range(2, 15):
+            if r1 == r2:
+                out.add(hand_class_label(r1, r2, suited=False))  # pair
+            else:
+                out.add(hand_class_label(r1, r2, suited=True))  # suited
+                out.add(hand_class_label(r1, r2, suited=False))  # offsuit
+    return frozenset(out)
+
+
+_ALL_169_HAND_CLASSES: frozenset[str] = _all_169_hand_classes()
+
+
 def _action_labels_for_count(count: int) -> list[str]:
     """Build the default action-label list for a preflop tree.
 
@@ -1506,16 +1550,40 @@ class SolveRunner:
                 self.status = "error"
             logger.exception("preflop chart: _rust import failed: %s", exc)
             return
-        rust_solve = getattr(_rust_module, "solve_hunl_preflop_rvr", None)
-        if rust_solve is None:
-            with self._lock:
-                self.error = ImportError(
-                    "poker_solver._rust.solve_hunl_preflop_rvr not found. "
-                    "Rebuild via `maturin develop --release` (PR #122 binding "
-                    "required)."
-                )
-                self.status = "error"
-            return
+        # Fix 1b: a FULL-range live solve (e.g. custom bet sizes) routes to the
+        # 169-CLASS kernel, which is ~30-60x faster per iter than the 1326-combo
+        # kernel (empirically ~2.8s vs ~170s for 500 iters at 100BB). The
+        # ``solve_hunl_preflop_rvr`` dispatch enforces the both-or-neither hole
+        # invariant: both ``None`` == a full range on BOTH sides, so when both
+        # are ``None`` we use ``solve_hunl_preflop_rvr_class169`` with default
+        # (None) per-class root reach (full range, combo-weighted internally).
+        # A genuine restriction (explicit holes — non-class-aligned subsets)
+        # keeps the 1326-combo kernel, which is already fast for restricted
+        # ranges (one-sided 1326x6 ~ 2.8s, both-small ~ 0.4s).
+        use_class169 = hero_holes is None and villain_holes is None
+        if use_class169:
+            rust_solve = getattr(
+                _rust_module, "solve_hunl_preflop_rvr_class169", None
+            )
+            if rust_solve is None:
+                with self._lock:
+                    self.error = ImportError(
+                        "poker_solver._rust.solve_hunl_preflop_rvr_class169 "
+                        "not found. Rebuild via `maturin develop --release`."
+                    )
+                    self.status = "error"
+                return
+        else:
+            rust_solve = getattr(_rust_module, "solve_hunl_preflop_rvr", None)
+            if rust_solve is None:
+                with self._lock:
+                    self.error = ImportError(
+                        "poker_solver._rust.solve_hunl_preflop_rvr not found. "
+                        "Rebuild via `maturin develop --release` (PR #122 "
+                        "binding required)."
+                    )
+                    self.status = "error"
+                return
 
         # Equity table path: ship in assets/, repo-relative.
         from pathlib import Path as _Path
@@ -1536,6 +1604,19 @@ class SolveRunner:
         with self._lock:
             self.expl_history.append((0, float(iterations)))
 
+        # The two kernels share the leading 8 positional args; the last two
+        # differ: class169 takes per-class root-reach 169-vectors (None == full,
+        # combo-weighted), the 1326 kernel takes explicit p0/p1 hole lists.
+        if use_class169:
+            tail_args: tuple[Any, Any] = (None, None)  # root_reach_p0/p1
+        else:
+            tail_args = (hero_holes, villain_holes)
+        kernel_name = (
+            "solve_hunl_preflop_rvr_class169"
+            if use_class169
+            else "solve_hunl_preflop_rvr"
+        )
+
         try:
             rust_out = rust_solve(
                 config_json,
@@ -1546,12 +1627,13 @@ class SolveRunner:
                 float(gamma),
                 list(open_sizes_bb) if open_sizes_bb else None,
                 list(reraise_multipliers) if reraise_multipliers else None,
-                hero_holes,
-                villain_holes,
+                tail_args[0],
+                tail_args[1],
             )
         except (ValueError, RuntimeError, OSError) as exc:
             logger.exception(
-                "preflop chart: solve_hunl_preflop_rvr failed with %s",
+                "preflop chart: %s failed with %s",
+                kernel_name,
                 type(exc).__name__,
             )
             with self._lock:
@@ -1560,15 +1642,20 @@ class SolveRunner:
             return
         except BaseException as exc:  # noqa: BLE001
             logger.exception(
-                "preflop chart: solve_hunl_preflop_rvr raised unexpected exception"
+                "preflop chart: %s raised unexpected exception", kernel_name
             )
             with self._lock:
                 self.error = exc
                 self.status = "error"
             return
 
-        # Project into a per-class chart dict.
-        chart_result = self._build_preflop_chart_summary(rust_out)
+        # Project into a per-class chart dict. The class169 kernel emits
+        # ``"<class_label>||p|<history>"`` keys (already 169-class); the
+        # 1326 kernel emits ``"<hole_str>||p|<history>"`` keys that the
+        # default projection aggregates to classes.
+        chart_result = self._build_preflop_chart_summary(
+            rust_out, class169=use_class169
+        )
         with self._lock:
             self.preflop_chart_result = chart_result
             self.iteration = int(chart_result.get("iterations", iterations))
@@ -1583,15 +1670,26 @@ class SolveRunner:
 
             wall_s = float(chart_result.get("wallclock_seconds", 0.0))
             iters = int(chart_result.get("iterations", iterations))
+            # Surface WHICH kernel served the live solve so the badge (and
+            # tests) can confirm the fast 169-class path was taken for a
+            # full range. The engine reports its own backend label.
+            backend = str(
+                rust_out.get(
+                    "backend",
+                    "rust_preflop_rvr_class169"
+                    if use_class169
+                    else "rust_preflop_rvr",
+                )
+            )
             self.preflop_route_info = RouteInfo(
                 source=SourceLabel.LIVE,
                 wall_time_s=wall_s,
-                confidence=f"{iters} iter rust_preflop_rvr",
+                confidence=f"{iters} iter {backend}",
             )
 
     @staticmethod
     def _project_preflop_by_line(
-        rust_out: dict[str, Any],
+        rust_out: dict[str, Any], *, class169: bool = False
     ) -> dict[str, dict[str, dict[str, float]]]:
         """Project the full preflop output into a per-LINE, per-class summary.
 
@@ -1607,6 +1705,13 @@ class SolveRunner:
         probabilities are averaged across the concrete combos that map to the
         same hand class (matching the root projection's class-level mean).
 
+        ``class169`` selects the key parser:
+          * ``False`` (default): ``"{hole_str}||p|<history>"`` — the 4-char
+            hole_str is mapped to its 169 class and combos are averaged.
+          * ``True``: ``"{class_label}||p|<history>"`` — the prefix IS already
+            the class label; there is exactly one entry per (class, line) so
+            the per-class "average" is the entry itself.
+
         This is the data source for :meth:`available_preflop_lines` and
         :meth:`preflop_chart_summary_for_line`; UI code (a later chart agent)
         consumes it to render deeper lines (BB-call / 3-bet / 4-bet) instead
@@ -1618,10 +1723,15 @@ class SolveRunner:
         for key, probs in average_strategy.items():
             if not probs:
                 continue
-            hole_str, hist = _split_preflop_key(str(key))
-            if hole_str is None:
-                continue
-            cls = _hand_class_from_hole_str(hole_str)
+            if class169:
+                cls, hist = _split_class169_key(str(key))
+            else:
+                hole_str, hist = _split_preflop_key(str(key))
+                cls = (
+                    _hand_class_from_hole_str(hole_str)
+                    if hole_str is not None
+                    else None
+                )
             if cls is None:
                 continue
             line_slot = by_line.setdefault(hist, {})
@@ -1649,14 +1759,20 @@ class SolveRunner:
         return out
 
     @staticmethod
-    def _build_preflop_chart_summary(rust_out: dict[str, Any]) -> dict[str, Any]:
-        """Project ``_rust.solve_hunl_preflop_rvr`` output into a chart summary.
+    def _build_preflop_chart_summary(
+        rust_out: dict[str, Any], *, class169: bool = False
+    ) -> dict[str, Any]:
+        """Project a preflop RvR engine output into a chart summary.
 
-        The Rust output's ``average_strategy`` dict maps
-        ``"{hole_str}{key_suffix}" -> [probs]``. The ``key_suffix`` is
-        the canonical infoset-key shape ``"||p|<history>"``; the root
-        decision (SB's first action) is the entry whose ``<history>``
-        is empty — i.e. the suffix ends with the player slot only.
+        Handles both kernels:
+          * ``solve_hunl_preflop_rvr`` (``class169=False``, default): keys are
+            ``"{hole_str}||p|<history>"`` (4-char hole_str); combos are
+            aggregated to 169 classes.
+          * ``solve_hunl_preflop_rvr_class169`` (``class169=True``): keys are
+            ``"{class_label}||p|<history>"`` — already 169-class, no
+            aggregation needed.
+
+        In both cases ``<history>`` is empty at the root (SB's first action).
 
         This returns the ROOT open range only (default behavior, unchanged).
         The full per-line projection (deeper BB-call / 3-bet / 4-bet nodes)
@@ -1674,7 +1790,9 @@ class SolveRunner:
         decision_count = int(rust_out.get("decision_node_count", 0))
         entry_count = int(rust_out.get("strategy_entry_count", 0))
 
-        by_line = SolveRunner._project_preflop_by_line(rust_out)
+        by_line = SolveRunner._project_preflop_by_line(
+            rust_out, class169=class169
+        )
         available_lines = sorted(by_line, key=lambda h: (len(h), h))
         # Root = shortest history line (the SB open decision).
         root_line = available_lines[0] if available_lines else ""

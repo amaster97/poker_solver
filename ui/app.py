@@ -857,15 +857,57 @@ def _open_library() -> None:
 
 _FULL_RANGE_COMBO_COUNT = 1326
 
+# A range covering at least this many of the 1326 combos is treated as
+# "effectively full" and routed to the (instant) precomputed blueprint
+# rather than a live solve. The blueprint asset is class-aligned (169
+# hand classes); a range that is full except for a handful of combos is
+# strategically indistinguishable from full at chart granularity, and
+# routing it live drops onto the catastrophically-slow 1326-combo kernel
+# (~170s for 500 iters). Genuine restrictions are far smaller — even a
+# wide 200BB blueprint open is ~474 combos and a BB defend ~610 — so this
+# threshold cleanly separates "user typed/loaded a full range" (possibly
+# minus a few combos) from "user restricted the range".
+_EFFECTIVELY_FULL_COMBO_COUNT = 1313  # 1326 - 13 (~99%); see note above.
+
+
+def _range_is_effectively_full(range_with_freqs: Any) -> bool:
+    """Whether ``range_with_freqs`` should route to the blueprint (not live).
+
+    ``True`` when the range is empty/missing (no restriction to honor) or
+    covers ``>= _EFFECTIVELY_FULL_COMBO_COUNT`` of the 1326 combos. ``False``
+    for a genuine restriction (a real subset the user wants solved live).
+
+    Shared single source of truth for the full-vs-restricted decision so
+    :func:`_preflop_holes_from_range` (engine dispatch) and
+    ``ui.views.preflop_chart._range_is_restricted`` (route prediction / iter
+    greying) never diverge.
+    """
+    if range_with_freqs is None:
+        return True
+    base = getattr(range_with_freqs, "base_range", None)
+    if base is None:
+        return True
+    try:
+        n = sum(
+            1
+            for combo in base
+            if range_with_freqs.frequency_of(combo.cards) > 0.0
+        )
+    except Exception:  # noqa: BLE001 — defensive: never break the solve click
+        logger.exception("preflop chart: range fullness check failed")
+        return True
+    return n == 0 or n >= _EFFECTIVELY_FULL_COMBO_COUNT
+
 
 def _preflop_holes_from_range(range_with_freqs: Any) -> list[list[int]] | None:
     """Convert a ``RangeWithFreqs`` to the engine's hole enumeration.
 
-    Returns ``None`` when the range is the full deck (all 1326 combos) or is
-    empty/missing — i.e. NOT a real restriction, so the (full-range) blueprint
-    can still serve it. Otherwise returns a list of ``[card_int, card_int]``
-    pairs (only combos with weight > 0), which the dispatch handler both
-    forwards to ``solve_hunl_preflop_rvr`` and uses to force the live path.
+    Returns ``None`` when the range is the full deck (or effectively full —
+    see :func:`_range_is_effectively_full`) or is empty/missing — i.e. NOT a
+    real restriction, so the (full-range) blueprint can still serve it.
+    Otherwise returns a list of ``[card_int, card_int]`` pairs (only combos
+    with weight > 0), which the dispatch handler both forwards to
+    ``solve_hunl_preflop_rvr`` and uses to force the live path.
 
     CAVEAT: per-combo fractional weights are NOT propagated to the engine
     (uniform-within-enumeration) — fine for hard ranges. See
@@ -877,6 +919,9 @@ def _preflop_holes_from_range(range_with_freqs: Any) -> list[list[int]] | None:
     base = getattr(range_with_freqs, "base_range", None)
     if base is None:
         return None
+    # Effectively-full (or empty) is NOT a restriction -> blueprint route.
+    if _range_is_effectively_full(range_with_freqs):
+        return None
     try:
         from poker_solver.card import card_to_int
 
@@ -887,10 +932,6 @@ def _preflop_holes_from_range(range_with_freqs: Any) -> list[list[int]] | None:
         ]
     except Exception:  # noqa: BLE001 — defensive: never break the solve click
         logger.exception("preflop chart: range->holes conversion failed")
-        return None
-    n = len(present)
-    # Full deck (or, defensively, anything >= 1326) is NOT a restriction.
-    if n == 0 or n >= _FULL_RANGE_COMBO_COUNT:
         return None
     holes: list[list[int]] = []
     for combo in present:
