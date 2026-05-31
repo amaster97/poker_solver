@@ -116,6 +116,7 @@ fn build_subgame_config(street: &str) -> HUNLConfig {
         abstraction_path: None,
         abstraction_version: None,
         use_pcs: false,
+        ..Default::default()
     }
 }
 

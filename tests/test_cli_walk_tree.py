@@ -358,6 +358,12 @@ def test_action_label_decoder_for_all_token_kinds() -> None:
         street_aggressor=1,
         big_blind=100,
         bet_size_fractions=(0.33, 0.75, 1.0, 1.5, 2.0),
+        # C2 raises are multipliers of the bet faced (not pot-fractions). The
+        # default menu has a single 3.0x slot, so ACTION_RAISE_75 (slot index 1)
+        # would index past it; give all 5 raise slots so every ACTION_RAISE_*
+        # decodes. The "(75% pot)" display tag is a fixed per-slot label from
+        # _RAISE_FRACTIONS and is independent of these multiplier values.
+        raise_size_xs=(2.0, 3.0, 4.0, 5.0, 6.0),
         preflop_raise_cap=4,
         postflop_raise_cap=4,
         force_allin_threshold_bb=0,

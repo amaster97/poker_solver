@@ -3397,6 +3397,7 @@ mod tests {
             abstraction_path: None,
             abstraction_version: None,
             use_pcs: false,
+            ..Default::default()
         }
     }
 
@@ -3497,6 +3498,7 @@ mod tests {
             abstraction_path: None,
             abstraction_version: None,
             use_pcs: false,
+            ..Default::default()
         };
 
         // Hero (P0): AA + KK = 12 combos (6 each).
@@ -4066,6 +4068,7 @@ mod tests {
             abstraction_path: None,
             abstraction_version: None,
             use_pcs: false,
+            ..Default::default()
         }
     }
 
@@ -4266,6 +4269,7 @@ mod tests {
             abstraction_path: None,
             abstraction_version: None,
             use_pcs: false,
+            ..Default::default()
         }
     }
 
@@ -4897,6 +4901,7 @@ mod tests {
             abstraction_path: None,
             abstraction_version: None,
             use_pcs: false,
+            ..Default::default()
         }
     }
 
@@ -5237,6 +5242,7 @@ mod tests {
             abstraction_path: None,
             abstraction_version: None,
             use_pcs: false,
+            ..Default::default()
         }
     }
 

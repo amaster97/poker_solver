@@ -50,6 +50,7 @@ fn tiny_river_rvr() -> HUNLConfig {
         abstraction_path: None,
         abstraction_version: None,
         use_pcs: false,
+        ..Default::default()
     }
 }
 

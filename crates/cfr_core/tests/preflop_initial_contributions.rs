@@ -58,6 +58,7 @@ fn config_engine_posts_blinds() -> HUNLConfig {
         abstraction_path: None,
         abstraction_version: None,
         use_pcs: false,
+        ..Default::default()
     }
 }
 

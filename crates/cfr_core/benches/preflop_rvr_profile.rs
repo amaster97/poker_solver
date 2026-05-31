@@ -61,6 +61,7 @@ fn default_preflop_config() -> HUNLConfig {
         abstraction_path: None,
         abstraction_version: None,
         use_pcs: false,
+        ..Default::default()
     }
 }
 

@@ -106,7 +106,16 @@ class HUNLConfig:
     initial_hole_cards: tuple[tuple[Card, Card], tuple[Card, Card]] | tuple[()] = ()
     preflop_raise_cap: int = 4
     postflop_raise_cap: int = 3
+    # Legacy flat opening-bet menu (back-compat). Applied to every street whose
+    # per-street menu below is None. Also the only menu used preflop.
     bet_size_fractions: tuple[float, ...] = (0.33, 0.75, 1.00, 1.50, 2.00)
+    # C1 per-street opening-bet menus. None => fall back to bet_size_fractions.
+    flop_bet_fractions: tuple[float, ...] | None = None
+    turn_bet_fractions: tuple[float, ...] | None = None
+    river_bet_fractions: tuple[float, ...] | None = None
+    # C2 lean raise menu: multipliers of the bet faced (PrevBetRelative). One
+    # universal 3.0x size + all-in (offered separately); no IP/OOP split.
+    raise_size_xs: tuple[float, ...] = (3.0,)
     include_all_in: bool = True
     rake_rate: float = 0.0
     rake_cap: int = 0
@@ -135,6 +144,7 @@ class HUNLConfig:
         self._validate_initial_board()
         self._validate_initial_hole_cards()
         self._validate_bet_size_fractions()
+        self._validate_per_street_and_raise_menus()
 
         if self.rake_rate != 0.0:
             raise ValueError("rake_rate must be 0.0 in PR 3 (rake lands in PR 9)")
@@ -296,9 +306,73 @@ class HUNLConfig:
                 self, "bet_size_fractions", tuple(float(x) for x in fracs)
             )
 
+    def _validate_per_street_and_raise_menus(self) -> None:
+        """Validate the C1 per-street bet menus and the C2 raise menu.
+
+        Each per-street menu is either None (fall back to ``bet_size_fractions``)
+        or a tuple/list of positive floats with at most 5 entries (the number of
+        bet slots in the flat action enum). The raise menu is a non-empty
+        tuple/list of positive multipliers with at most 5 entries (raise slots).
+        List inputs are coerced to float tuples to match the frozen-dataclass
+        contract, mirroring ``_validate_bet_size_fractions``."""
+        for name in ("flop_bet_fractions", "turn_bet_fractions", "river_bet_fractions"):
+            menu = getattr(self, name)
+            if menu is None:
+                continue
+            if not isinstance(menu, (tuple, list)):
+                raise TypeError(
+                    f"HUNLConfig.{name}: expected tuple of float or None, "
+                    f"got {type(menu).__name__}"
+                )
+            if len(menu) > 5:
+                raise ValueError(
+                    f"HUNLConfig.{name}: at most 5 bet sizes are supported "
+                    f"(flat action enum has 5 bet slots); got {len(menu)}"
+                )
+            for i, x in enumerate(menu):
+                if isinstance(x, bool) or not isinstance(x, (int, float)):
+                    raise TypeError(
+                        f"HUNLConfig.{name}[{i}]: expected float, "
+                        f"got {type(x).__name__} (value={x!r})"
+                    )
+                if x <= 0:
+                    raise ValueError(
+                        f"HUNLConfig.{name}[{i}] must be positive; got {x}"
+                    )
+            object.__setattr__(self, name, tuple(float(x) for x in menu))
+
+        xs = self.raise_size_xs
+        if not isinstance(xs, (tuple, list)):
+            raise TypeError(
+                f"HUNLConfig.raise_size_xs: expected tuple of float, "
+                f"got {type(xs).__name__}"
+            )
+        if not xs:
+            raise ValueError("HUNLConfig.raise_size_xs must be non-empty")
+        if len(xs) > 5:
+            raise ValueError(
+                f"HUNLConfig.raise_size_xs: at most 5 raise sizes are supported "
+                f"(flat action enum has 5 raise slots); got {len(xs)}"
+            )
+        for i, x in enumerate(xs):
+            if isinstance(x, bool) or not isinstance(x, (int, float)):
+                raise TypeError(
+                    f"HUNLConfig.raise_size_xs[{i}]: expected float, "
+                    f"got {type(x).__name__} (value={x!r})"
+                )
+            if x <= 0:
+                raise ValueError(
+                    f"HUNLConfig.raise_size_xs[{i}] must be positive; got {x}"
+                )
+        object.__setattr__(self, "raise_size_xs", tuple(float(x) for x in xs))
+
     def to_action_config(self) -> ActionAbstractionConfig:
         return ActionAbstractionConfig(
             bet_size_fractions=self.bet_size_fractions,
+            flop_bet_fractions=self.flop_bet_fractions,
+            turn_bet_fractions=self.turn_bet_fractions,
+            river_bet_fractions=self.river_bet_fractions,
+            raise_size_xs=self.raise_size_xs,
             preflop_raise_cap=self.preflop_raise_cap,
             postflop_raise_cap=self.postflop_raise_cap,
             include_all_in=self.include_all_in,
@@ -580,11 +654,16 @@ class HUNLPoker:
             street_aggressor=state.street_aggressor,
             big_blind=cfg.big_blind,
             bet_size_fractions=cfg.bet_size_fractions,
+            flop_bet_fractions=cfg.flop_bet_fractions,
+            turn_bet_fractions=cfg.turn_bet_fractions,
+            river_bet_fractions=cfg.river_bet_fractions,
+            raise_size_xs=cfg.raise_size_xs,
             preflop_raise_cap=cfg.preflop_raise_cap,
             postflop_raise_cap=cfg.postflop_raise_cap,
             force_allin_threshold_bb=cfg.force_allin_threshold,
             min_bet_bb=cfg.min_bet_bb,
             include_all_in=cfg.include_all_in,
+            street_action_count=len(state.current_street_tokens),
         )
 
     def _apply_player(self, state: HUNLState, action: Action) -> HUNLState:
@@ -917,6 +996,12 @@ def _serialize_hunl_config(config: HUNLConfig) -> str:
     else:
         initial_hole = None
 
+    # C1/C2: per-street bet menus + lean raise menu. Per-street menus are
+    # emitted as null when None (the Rust `Option<Vec<f64>>` falls back to the
+    # flat `bet_size_fractions`). f64 lists round-trip bit-exactly.
+    def _opt_menu(menu: tuple[float, ...] | None) -> list[float] | None:
+        return None if menu is None else [float(x) for x in menu]
+
     payload: dict[str, object] = {
         "starting_stack": int(config.starting_stack),
         "small_blind": int(config.small_blind),
@@ -933,6 +1018,10 @@ def _serialize_hunl_config(config: HUNLConfig) -> str:
         "preflop_raise_cap": int(config.preflop_raise_cap),
         "postflop_raise_cap": int(config.postflop_raise_cap),
         "bet_size_fractions": [float(x) for x in config.bet_size_fractions],
+        "flop_bet_fractions": _opt_menu(config.flop_bet_fractions),
+        "turn_bet_fractions": _opt_menu(config.turn_bet_fractions),
+        "river_bet_fractions": _opt_menu(config.river_bet_fractions),
+        "raise_size_xs": [float(x) for x in config.raise_size_xs],
         "include_all_in": bool(config.include_all_in),
         "force_allin_threshold": int(config.force_allin_threshold),
         "min_bet_bb": int(config.min_bet_bb),

@@ -19,7 +19,7 @@ use cfr_core::hunl::{
     card_to_int, compute_bet_amount, compute_raise_to, default_tiny_subgame,
     enumerate_legal_actions, ActionContext, HUNLConfig, HUNLState, Street, ACTION_ALL_IN,
     ACTION_BET_100, ACTION_BET_33, ACTION_BET_75, ACTION_CALL, ACTION_CHECK, ACTION_FOLD,
-    ACTION_RAISE_100,
+    ACTION_RAISE_33,
 };
 use cfr_core::hunl_eval::Strength;
 use cfr_core::hunl_tree::{HUNLTree, TerminalKind};
@@ -138,10 +138,13 @@ fn test_05_showdown_winner_collects_canonical_pot() {
 // ---------------------------------------------------------------------------
 #[test]
 fn test_06_raise_cap_postflop() {
+    // C3 flop-no-donk: P1 (OOP) must check first; P0 (IP) opens. The lean
+    // raise menu defaults to a single 3.0x size, so ACTION_RAISE_33 is the
+    // only legal raise slot.
     let s = flop_state(100_000, 200);
-    let s1 = s.apply(ACTION_BET_100);
-    let s2 = s1.apply(ACTION_RAISE_100);
-    let s3 = s2.apply(ACTION_RAISE_100); // 3rd raise → at cap
+    let s1 = s.apply(ACTION_CHECK).apply(ACTION_BET_100);
+    let s2 = s1.apply(ACTION_RAISE_33);
+    let s3 = s2.apply(ACTION_RAISE_33); // 3rd raise → at cap
     let acts = s3.legal_actions();
     let any_raise = acts.iter().any(|a| (8..=12).contains(a));
     assert!(!any_raise, "expected no raise actions at cap; got {acts:?}");
@@ -254,11 +257,16 @@ fn test_11_legal_action_dedup() {
         street_aggressor: -1,
         big_blind: 100,
         bet_size_fractions: vec![0.33, 0.75, 1.0, 1.5, 2.0],
+        flop_bet_fractions: None,
+        turn_bet_fractions: None,
+        river_bet_fractions: None,
+        raise_size_xs: vec![3.0],
         preflop_raise_cap: 4,
         postflop_raise_cap: 3,
         force_allin_threshold: 1,
         min_bet_bb: 1,
         include_all_in: true,
+        street_action_count: 0,
     };
     let acts = enumerate_legal_actions(&ctx);
     // Bet 33% pot = 33 → min_bet_bb*BB = 100 (clamped) → bet 33 collapses to bet 100.
@@ -293,11 +301,16 @@ fn test_12_compute_bet_amount_rounding() {
         street_aggressor: -1,
         big_blind: 100,
         bet_size_fractions: vec![0.33, 0.75, 1.0, 1.5, 2.0],
+        flop_bet_fractions: None,
+        turn_bet_fractions: None,
+        river_bet_fractions: None,
+        raise_size_xs: vec![3.0],
         preflop_raise_cap: 4,
         postflop_raise_cap: 3,
         force_allin_threshold: 1,
         min_bet_bb: 1,
         include_all_in: true,
+        street_action_count: 0,
     };
     assert_eq!(compute_bet_amount(ACTION_BET_33, &ctx), 330);
     assert_eq!(compute_bet_amount(ACTION_BET_75, &ctx), 750);
@@ -309,19 +322,20 @@ fn test_12_compute_bet_amount_rounding() {
 // ---------------------------------------------------------------------------
 #[test]
 fn test_13_compute_raise_to_min_increment() {
-    // After P1 opens 100% pot from a 200-chip pot, P0 raise sizes are
-    // computed off (pot + to_call) * fraction added on top of aggressor's
-    // contribution. Verify raise_to math.
+    // C3 flop-no-donk: P1 (OOP) checks; P0 (IP) opens 100% pot from a 200-chip
+    // pot → contributions [100, 300], P0 is aggressor. C2 lean raise: the
+    // raise-to is round(aggressor_contrib * multiplier) (PrevBetRelative), with
+    // the default single 3.0x size → 300 * 3.0 = 900.
     let s = flop_state(100_000, 200);
-    let after_bet = s.apply(ACTION_BET_100); // pot was 200, bet 200 → contributions become [100, 300]
-                                             // Now pot = 100 + 300 = 400 (sum contribs) - 200 (initial contributions = sum 200) + 200 (initial_pot)
-                                             // = 400 - 200 + 200 = 400. to_call = 200 (P0 needs to match P1's 300 - own 100).
+    let after_bet = s.apply(ACTION_CHECK).apply(ACTION_BET_100);
+    // pot = sum(contribs) + initial_pot - sum(initial_contribs)
+    //     = (100 + 300) + 200 - 200 = 400. to_call = 300 - 100 = 200.
     let ctx = after_bet.action_context();
     assert_eq!(ctx.pot, 400);
     assert_eq!(ctx.to_call, 200);
-    // Raise 100% = (pot + to_call) * 1.0 = 600 added on top of aggressor's
-    // 300 → raise_to = 900.
-    assert_eq!(compute_raise_to(ACTION_RAISE_100, &ctx), 900);
+    // Raise 3.0x: round(300 * 3.0) = 900; min-raise floor = 300 + max(200,100)
+    // = 500; max(900, 500) = 900.
+    assert_eq!(compute_raise_to(ACTION_RAISE_33, &ctx), 900);
 }
 
 // ---------------------------------------------------------------------------

@@ -210,7 +210,17 @@ pub struct HUNLConfig {
     pub initial_hole_cards: Option<[[u8; 2]; 2]>,
     pub preflop_raise_cap: u8,
     pub postflop_raise_cap: u8,
+    /// Legacy flat opening-bet menu (back-compat). Applied to any street whose
+    /// per-street menu below is `None`, and the only menu used preflop.
     pub bet_size_fractions: Vec<f64>,
+    /// C1 per-street opening-bet menus. `None` => fall back to
+    /// `bet_size_fractions`. Mirrors Python's `flop/turn/river_bet_fractions`.
+    pub flop_bet_fractions: Option<Vec<f64>>,
+    pub turn_bet_fractions: Option<Vec<f64>>,
+    pub river_bet_fractions: Option<Vec<f64>>,
+    /// C2 lean raise menu: multipliers of the bet faced (PrevBetRelative).
+    /// Default one universal 3.0x size + all-in (offered separately).
+    pub raise_size_xs: Vec<f64>,
     pub include_all_in: bool,
     pub force_allin_threshold: i32,
     pub min_bet_bb: i32,
@@ -249,6 +259,10 @@ impl Default for HUNLConfig {
             preflop_raise_cap: 4,
             postflop_raise_cap: 3,
             bet_size_fractions: vec![0.33, 0.75, 1.00, 1.50, 2.00],
+            flop_bet_fractions: None,
+            turn_bet_fractions: None,
+            river_bet_fractions: None,
+            raise_size_xs: vec![3.0],
             include_all_in: true,
             force_allin_threshold: 1,
             min_bet_bb: 1,
@@ -599,11 +613,16 @@ impl HUNLState {
             street_aggressor: self.street_aggressor,
             big_blind: cfg.big_blind,
             bet_size_fractions: cfg.bet_size_fractions.clone(),
+            flop_bet_fractions: cfg.flop_bet_fractions.clone(),
+            turn_bet_fractions: cfg.turn_bet_fractions.clone(),
+            river_bet_fractions: cfg.river_bet_fractions.clone(),
+            raise_size_xs: cfg.raise_size_xs.clone(),
             preflop_raise_cap: cfg.preflop_raise_cap,
             postflop_raise_cap: cfg.postflop_raise_cap,
             force_allin_threshold: cfg.force_allin_threshold,
             min_bet_bb: cfg.min_bet_bb,
             include_all_in: cfg.include_all_in,
+            street_action_count: self.current_street_tokens.len() as u32,
         }
     }
 
@@ -1102,16 +1121,66 @@ pub struct ActionContext {
     pub street_num_raises: u8,
     pub street_aggressor: i8,
     pub big_blind: i32,
+    /// Legacy flat opening-bet menu (back-compat); used when the per-street
+    /// menu for `street` is `None`, and for preflop.
     pub bet_size_fractions: Vec<f64>,
+    /// C1 per-street opening-bet menus. `None` => fall back to
+    /// `bet_size_fractions`.
+    pub flop_bet_fractions: Option<Vec<f64>>,
+    pub turn_bet_fractions: Option<Vec<f64>>,
+    pub river_bet_fractions: Option<Vec<f64>>,
+    /// C2 raise multipliers of the bet faced (PrevBetRelative).
+    pub raise_size_xs: Vec<f64>,
     pub preflop_raise_cap: u8,
     pub postflop_raise_cap: u8,
     pub force_allin_threshold: i32,
     pub min_bet_bb: i32,
     pub include_all_in: bool,
+    /// Number of player actions already taken on the current street. Drives the
+    /// C3 flop-no-donk constraint (OOP first-to-act detection).
+    pub street_action_count: u32,
 }
 
 fn is_preflop(ctx: &ActionContext) -> bool {
     ctx.street == Street::Preflop
+}
+
+/// OOP player index postflop. P1 (the big blind) acts first postflop, so it is
+/// the out-of-position player whose flop open the C3 constraint removes.
+const OOP_PLAYER: u8 = 1;
+
+/// Opening-bet pot-fraction menu for `ctx.street` (C1). Selects the per-street
+/// menu when present, otherwise the flat `bet_size_fractions` (the only menu
+/// preflop). Truncated to 5 entries (the bet-slot count) for graceful
+/// degradation, matching Python's `_bet_menu`.
+fn bet_menu(ctx: &ActionContext) -> &[f64] {
+    let menu: &[f64] = match ctx.street {
+        Street::Flop => ctx.flop_bet_fractions.as_deref(),
+        Street::Turn => ctx.turn_bet_fractions.as_deref(),
+        Street::River => ctx.river_bet_fractions.as_deref(),
+        _ => None,
+    }
+    .unwrap_or(&ctx.bet_size_fractions);
+    let len = menu.len().min(BET_ACTION_IDS.len());
+    &menu[..len]
+}
+
+/// Raise multiplier menu (multiples of the bet faced, C2). Truncated to 5
+/// entries (the raise-slot count), matching Python's `_raise_menu`.
+fn raise_menu(ctx: &ActionContext) -> &[f64] {
+    let len = ctx.raise_size_xs.len().min(RAISE_ACTION_IDS.len());
+    &ctx.raise_size_xs[..len]
+}
+
+/// C3 flop-no-donk predicate. True iff the OOP player (P1) is first-to-act on
+/// the FLOP with no prior street aggression. Mirrors Python's
+/// `_is_oop_flop_first_action`.
+fn is_oop_flop_first_action(ctx: &ActionContext) -> bool {
+    ctx.street == Street::Flop
+        && ctx.cur_player == OOP_PLAYER
+        && ctx.street_action_count == 0
+        && ctx.to_call == 0
+        && ctx.street_aggressor < 0
 }
 
 fn raise_cap(ctx: &ActionContext) -> u8 {
@@ -1172,11 +1241,17 @@ fn bet_amount_for_fraction(ctx: &ActionContext, fraction: f64) -> i32 {
     raw.max(min_bet(ctx))
 }
 
-fn raise_to_for_fraction(ctx: &ActionContext, fraction: f64) -> i32 {
+/// Raise-to total for a "multiple of the bet faced" raise (C2).
+///
+/// PrevBetRelative pattern (postflop-solver `action_tree.rs`): the raise-to
+/// contribution is `round(bet_faced_total * multiplier)` where the bet faced is
+/// the aggressor's current contribution. Clamped up to the min-raise floor so a
+/// small multiplier can never produce an illegal under-raise. Mirrors Python's
+/// `_raise_to_for_multiplier`.
+fn raise_to_for_multiplier(ctx: &ActionContext, multiplier: f64) -> i32 {
     let aggressor_idx = ctx.street_aggressor.max(0) as usize;
     let aggressor_contrib = ctx.contributions[aggressor_idx];
-    let raw_increment = python_round_positive((ctx.pot + ctx.to_call) as f64 * fraction);
-    let raise_to = aggressor_contrib + raw_increment;
+    let raise_to = python_round_positive(aggressor_contrib as f64 * multiplier);
     let min_raise_to = aggressor_contrib + min_raise_increment(ctx);
     raise_to.max(min_raise_to)
 }
@@ -1192,7 +1267,7 @@ pub fn compute_bet_amount(action_id: u8, ctx: &ActionContext) -> i32 {
         .iter()
         .position(|&id| id == action_id)
         .unwrap_or_else(|| panic!("compute_bet_amount: action_id {action_id} is not a bet"));
-    let fraction = ctx.bet_size_fractions[idx];
+    let fraction = bet_menu(ctx)[idx];
     bet_amount_for_fraction(ctx, fraction).min(stack)
 }
 
@@ -1209,8 +1284,8 @@ pub fn compute_raise_to(action_id: u8, ctx: &ActionContext) -> i32 {
         .iter()
         .position(|&id| id == action_id)
         .unwrap_or_else(|| panic!("compute_raise_to: action_id {action_id} is not a raise"));
-    let fraction = ctx.bet_size_fractions[idx];
-    raise_to_for_fraction(ctx, fraction).min(max_raise_to)
+    let multiplier = raise_menu(ctx)[idx];
+    raise_to_for_multiplier(ctx, multiplier).min(max_raise_to)
 }
 
 fn enumerate_bets(ctx: &ActionContext) -> Vec<u8> {
@@ -1218,7 +1293,7 @@ fn enumerate_bets(ctx: &ActionContext) -> Vec<u8> {
     let force_threshold = force_allin_chip_threshold(ctx);
     let mut seen_amounts: Vec<i32> = Vec::with_capacity(5);
     let mut actions: Vec<u8> = Vec::with_capacity(5);
-    for (action_id, &fraction) in BET_ACTION_IDS.iter().zip(ctx.bet_size_fractions.iter()) {
+    for (action_id, &fraction) in BET_ACTION_IDS.iter().zip(bet_menu(ctx).iter()) {
         let raw_amount = bet_amount_for_fraction(ctx, fraction);
         if raw_amount >= stack || (stack - raw_amount) <= force_threshold {
             continue;
@@ -1239,8 +1314,8 @@ fn enumerate_raises(ctx: &ActionContext) -> Vec<u8> {
     let force_threshold = force_allin_chip_threshold(ctx);
     let mut seen_raise_tos: Vec<i32> = Vec::with_capacity(5);
     let mut actions: Vec<u8> = Vec::with_capacity(5);
-    for (action_id, &fraction) in RAISE_ACTION_IDS.iter().zip(ctx.bet_size_fractions.iter()) {
-        let raise_to = raise_to_for_fraction(ctx, fraction);
+    for (action_id, &multiplier) in RAISE_ACTION_IDS.iter().zip(raise_menu(ctx).iter()) {
+        let raise_to = raise_to_for_multiplier(ctx, multiplier);
         let chips_added = raise_to - cur_contrib;
         if raise_to >= max_raise_to || (stack - chips_added) <= force_threshold {
             continue;
@@ -1276,7 +1351,13 @@ pub fn enumerate_legal_actions(ctx: &ActionContext) -> Vec<u8> {
     let cap = raise_cap(ctx);
     let cap_reached = ctx.street_num_raises >= cap;
 
-    if !cap_reached {
+    // C3 flop-no-donk: structurally remove OOP's first-to-act flop open. When
+    // the predicate fires we offer only CHECK (no opening bets, no all-in);
+    // betting reopens for IP after the check, and on later streets. Mirrors
+    // Python's `enumerate_legal_actions`.
+    let flop_no_donk = !facing_bet && is_oop_flop_first_action(ctx);
+
+    if !cap_reached && !flop_no_donk {
         if facing_bet {
             actions.extend(enumerate_raises(ctx));
         } else {
@@ -1291,8 +1372,9 @@ pub fn enumerate_legal_actions(ctx: &ActionContext) -> Vec<u8> {
     // from Brown's reference (see cpp/src/river_game.cpp:76 + 98). Brown
     // returns `[c, f]` at the cap (line 76) without enumerating raises OR
     // an all-in, so we mirror that by gating ALL_IN on `!cap_reached`.
+    // The flop-no-donk constraint also suppresses the opening all-in.
     let can_actually_raise = stack > ctx.to_call;
-    if ctx.include_all_in && !cap_reached && can_actually_raise {
+    if ctx.include_all_in && !cap_reached && !flop_no_donk && can_actually_raise {
         actions.push(ACTION_ALL_IN);
     }
 
@@ -1446,16 +1528,24 @@ mod tests {
             ..Default::default()
         };
         let s = HUNLState::initial(Arc::new(cfg));
-        // P1 bets 100% pot → P0 raises → P1 raises → P0 raises (4th raise);
-        // verify each step's legal_actions reflect the cap.
-        let s1 = s.apply(ACTION_BET_100); // raises=1
+        // C3 flop-no-donk: P1 (OOP) first-to-act on the flop may only check.
+        let acts0 = s.legal_actions();
+        assert!(
+            acts0.iter().all(|&a| !is_opening_bet(a) && a != ACTION_ALL_IN),
+            "flop-no-donk: OOP flop open should expose no bets/all-in: {acts0:?}"
+        );
+        // P1 checks → P0 (IP) bets 100% pot → P1 raises → P0 raises (3rd raise
+        // = cap). The lean raise menu defaults to a single 3.0x size, so the
+        // only legal raise slot is ACTION_RAISE_33.
+        let s_check = s.apply(ACTION_CHECK);
+        let s1 = s_check.apply(ACTION_BET_100); // raises=1
         assert_eq!(s1.street_num_raises, 1);
-        // P0 should still have raise options at raises=1.
+        // P1 should still have raise options at raises=1.
         assert!(s1.legal_actions().iter().any(|&a| is_raise(a)));
-        let s2 = s1.apply(ACTION_RAISE_100); // raises=2
+        let s2 = s1.apply(ACTION_RAISE_33); // raises=2
         assert!(s2.legal_actions().iter().any(|&a| is_raise(a)));
-        let s3 = s2.apply(ACTION_RAISE_100); // raises=3 → at cap
-                                             // At cap → no raises legal (only fold/call/all-in).
+        let s3 = s2.apply(ACTION_RAISE_33); // raises=3 → at cap
+                                            // At cap → no raises legal (only fold/call/all-in).
         let acts = s3.legal_actions();
         assert!(
             !acts.iter().any(|&a| is_raise(a)),
@@ -1486,5 +1576,329 @@ mod tests {
         // Standard non-half cases match Python's round() exactly.
         assert_eq!(python_round_positive(330.0), 330);
         assert_eq!(python_round_positive(329.7), 330);
+    }
+
+    // -----------------------------------------------------------------------
+    // C1/C2/C3 redesign — parity with `tests/test_action_abstraction.py`.
+    // -----------------------------------------------------------------------
+
+    const DEFAULT_FLOP: [f64; 3] = [0.33, 0.75, 1.25];
+    const DEFAULT_TURN: [f64; 3] = [0.33, 0.75, 1.50];
+    const DEFAULT_RIVER: [f64; 4] = [0.15, 0.33, 0.75, 1.50];
+
+    /// Minimal `ActionContext` builder for the redesign tests; defaults mirror
+    /// the Python `_ctx` helper.
+    #[allow(clippy::too_many_arguments)]
+    fn ctx(
+        pot: i32,
+        to_call: i32,
+        contributions: [i32; 2],
+        stacks: [i32; 2],
+        cur_player: u8,
+        street: Street,
+        street_num_raises: u8,
+        street_aggressor: i8,
+        street_action_count: u32,
+        flop_bet_fractions: Option<Vec<f64>>,
+        turn_bet_fractions: Option<Vec<f64>>,
+        river_bet_fractions: Option<Vec<f64>>,
+        raise_size_xs: Vec<f64>,
+    ) -> ActionContext {
+        ActionContext {
+            pot,
+            to_call,
+            stacks,
+            contributions,
+            cur_player,
+            street,
+            street_num_raises,
+            street_aggressor,
+            big_blind: 100,
+            bet_size_fractions: vec![0.33, 0.75, 1.0, 1.5, 2.0],
+            flop_bet_fractions,
+            turn_bet_fractions,
+            river_bet_fractions,
+            raise_size_xs,
+            preflop_raise_cap: 4,
+            postflop_raise_cap: 3,
+            force_allin_threshold: 1,
+            min_bet_bb: 1,
+            include_all_in: true,
+            street_action_count,
+        }
+    }
+
+    #[test]
+    fn c1_per_street_flop_menu_bet_amounts() {
+        let c = ctx(
+            1000,
+            0,
+            [0, 0],
+            [10_000, 10_000],
+            0,
+            Street::Flop,
+            0,
+            -1,
+            0,
+            Some(DEFAULT_FLOP.to_vec()),
+            None,
+            None,
+            vec![3.0],
+        );
+        assert_eq!(compute_bet_amount(ACTION_BET_33, &c), 330);
+        assert_eq!(compute_bet_amount(ACTION_BET_75, &c), 750);
+        assert_eq!(compute_bet_amount(ACTION_BET_100, &c), 1250); // 1.25x
+    }
+
+    #[test]
+    fn c1_per_street_turn_menu_bet_amounts() {
+        let c = ctx(
+            1000,
+            0,
+            [0, 0],
+            [10_000, 10_000],
+            0,
+            Street::Turn,
+            0,
+            -1,
+            0,
+            None,
+            Some(DEFAULT_TURN.to_vec()),
+            None,
+            vec![3.0],
+        );
+        assert_eq!(compute_bet_amount(ACTION_BET_100, &c), 1500); // 1.50x
+    }
+
+    #[test]
+    fn c1_per_street_river_menu_bet_amounts() {
+        let c = ctx(
+            1000,
+            0,
+            [0, 0],
+            [10_000, 10_000],
+            0,
+            Street::River,
+            0,
+            -1,
+            0,
+            None,
+            None,
+            Some(DEFAULT_RIVER.to_vec()),
+            vec![3.0],
+        );
+        assert_eq!(compute_bet_amount(ACTION_BET_33, &c), 150); // 0.15x
+        assert_eq!(compute_bet_amount(ACTION_BET_75, &c), 330); // 0.33x
+        assert_eq!(compute_bet_amount(ACTION_BET_100, &c), 750); // 0.75x
+        assert_eq!(compute_bet_amount(ACTION_BET_150, &c), 1500); // 1.50x
+    }
+
+    #[test]
+    fn c1_per_street_menu_selects_by_street() {
+        let mk = |street| {
+            ctx(
+                1000,
+                0,
+                [0, 0],
+                [10_000, 10_000],
+                0,
+                street,
+                0,
+                -1,
+                0,
+                Some(DEFAULT_FLOP.to_vec()),
+                Some(DEFAULT_TURN.to_vec()),
+                Some(DEFAULT_RIVER.to_vec()),
+                vec![3.0],
+            )
+        };
+        let count_bets = |c: &ActionContext| {
+            enumerate_legal_actions(c)
+                .iter()
+                .filter(|&&a| is_opening_bet(a))
+                .count()
+        };
+        assert_eq!(count_bets(&mk(Street::Flop)), 3);
+        assert_eq!(count_bets(&mk(Street::Turn)), 3);
+        assert_eq!(count_bets(&mk(Street::River)), 4);
+    }
+
+    #[test]
+    fn c2_lean_raise_default_single_size() {
+        let c = ctx(
+            300,
+            100,
+            [100, 200],
+            [10_000, 10_000],
+            0,
+            Street::Flop,
+            1,
+            1,
+            1,
+            None,
+            None,
+            None,
+            vec![3.0],
+        );
+        let legal = enumerate_legal_actions(&c);
+        let raises: Vec<u8> = legal.iter().copied().filter(|&a| is_raise(a)).collect();
+        assert_eq!(raises, vec![ACTION_RAISE_33]);
+        assert_eq!(compute_raise_to(ACTION_RAISE_33, &c), 600); // 3.0x of 200
+        assert!(legal.contains(&ACTION_ALL_IN));
+    }
+
+    #[test]
+    fn c2_lean_raise_respects_min_raise_floor() {
+        let c = ctx(
+            300,
+            100,
+            [100, 200],
+            [10_000, 10_000],
+            0,
+            Street::Flop,
+            1,
+            1,
+            1,
+            None,
+            None,
+            None,
+            vec![1.01],
+        );
+        // floor = aggressor_contrib(200) + max(to_call 100, big_blind 100) = 300
+        assert_eq!(compute_raise_to(ACTION_RAISE_33, &c), 300);
+    }
+
+    #[test]
+    fn c2_lean_raise_clamped_to_all_in_cap() {
+        let c = ctx(
+            300,
+            100,
+            [100, 200],
+            [300, 10_000],
+            0,
+            Street::Flop,
+            1,
+            1,
+            1,
+            None,
+            None,
+            None,
+            vec![3.0],
+        );
+        // 3.0x of 200 = 600, but cur_contrib(100) + stack(300) = 400 caps it.
+        assert_eq!(compute_raise_to(ACTION_RAISE_33, &c), 400);
+    }
+
+    #[test]
+    fn c3_flop_no_donk_removes_oop_flop_open() {
+        let c = ctx(
+            1000,
+            0,
+            [0, 0],
+            [10_000, 10_000],
+            1, // OOP
+            Street::Flop,
+            0,
+            -1,
+            0,
+            Some(DEFAULT_FLOP.to_vec()),
+            None,
+            None,
+            vec![3.0],
+        );
+        assert_eq!(enumerate_legal_actions(&c), vec![ACTION_CHECK]);
+    }
+
+    #[test]
+    fn c3_flop_no_donk_allows_ip_flop_open() {
+        let c = ctx(
+            1000,
+            0,
+            [0, 0],
+            [10_000, 10_000],
+            0, // IP
+            Street::Flop,
+            0,
+            -1,
+            0,
+            Some(DEFAULT_FLOP.to_vec()),
+            None,
+            None,
+            vec![3.0],
+        );
+        let legal = enumerate_legal_actions(&c);
+        assert!(legal.iter().any(|&a| is_opening_bet(a)));
+        assert!(legal.contains(&ACTION_ALL_IN));
+    }
+
+    #[test]
+    fn c3_flop_no_donk_does_not_block_oop_after_prior_action() {
+        let c = ctx(
+            1000,
+            0,
+            [0, 0],
+            [10_000, 10_000],
+            1,
+            Street::Flop,
+            0,
+            -1,
+            1, // a prior action happened this street
+            Some(DEFAULT_FLOP.to_vec()),
+            None,
+            None,
+            vec![3.0],
+        );
+        assert!(enumerate_legal_actions(&c).contains(&ACTION_BET_33));
+    }
+
+    #[test]
+    fn c3_flop_no_donk_does_not_affect_turn_or_river_oop_open() {
+        for (street, menu) in [
+            (Street::Turn, (None, Some(DEFAULT_TURN.to_vec()), None)),
+            (Street::River, (None, None, Some(DEFAULT_RIVER.to_vec()))),
+        ] {
+            let (flop, turn, river) = menu;
+            let c = ctx(
+                1000,
+                0,
+                [0, 0],
+                [10_000, 10_000],
+                1,
+                street,
+                0,
+                -1,
+                0,
+                flop,
+                turn,
+                river,
+                vec![3.0],
+            );
+            let legal = enumerate_legal_actions(&c);
+            assert!(legal.contains(&ACTION_BET_33), "{street:?} OOP open");
+            assert!(legal.contains(&ACTION_ALL_IN), "{street:?} OOP all-in");
+        }
+    }
+
+    #[test]
+    fn c3_flop_no_donk_does_not_affect_oop_facing_bet() {
+        let c = ctx(
+            1000,
+            300,
+            [300, 0],
+            [10_000, 10_000],
+            1,
+            Street::Flop,
+            1,
+            0,
+            1,
+            None,
+            None,
+            None,
+            vec![3.0],
+        );
+        let legal = enumerate_legal_actions(&c);
+        assert!(legal.contains(&ACTION_FOLD));
+        assert!(legal.contains(&ACTION_CALL));
+        assert!(legal.contains(&ACTION_RAISE_33));
     }
 }

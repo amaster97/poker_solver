@@ -91,10 +91,10 @@ def test_hunl_call_preflop_advances_to_flop():
 
 
 def test_hunl_bet_amount_uses_pot_fractions():
-    """Interpretation note: spec says 'at start of flop with pot=2 BB,
-    ACTION_BET_75 = bet 1.5 BB (150 cents).' I interpreted as: after preflop
-    limp-call (both contribute 100), pot = 200 cents at start of flop, and
-    ACTION_BET_75 = round(200 * 0.75) = 150 cents."""
+    """ACTION_BET_75 = round(200 * 0.75) = 150 cents (flat menu, slot 1).
+
+    C3 flop-no-donk: OOP (P1) opens are removed on the flop, so OOP checks and
+    IP (P0) opens; the bet-sizing math is unchanged."""
     config = HUNLConfig(
         starting_street=Street.FLOP,
         initial_board=(Card.from_str("7d"), Card.from_str("2c"), Card.from_str("9h")),
@@ -105,21 +105,22 @@ def test_hunl_bet_amount_uses_pot_fractions():
     s = _initial(game)
     assert s.street == Street.FLOP
     assert game.current_player(s) == 1
+    # OOP may only check on the flop (flop-no-donk); IP then opens.
+    assert ACTION_BET_75 not in game.legal_actions(s)
+    s = game.apply(s, ACTION_CHECK)
+    assert game.current_player(s) == 0
     legal = game.legal_actions(s)
     assert ACTION_BET_75 in legal
     s_after = game.apply(s, ACTION_BET_75)
-    assert s_after.contributions[1] - s.contributions[1] == 150
+    assert s_after.contributions[0] - s.contributions[0] == 150
 
 
-def test_hunl_raise_amount_uses_pot_after_call():
-    """Interpretation note: spec test description (line 252) reads 'BB bets
-    1 BB on flop (pot becomes 3 BB after SB calls), ACTION_RAISE_100 raises by
-    3 BB on top of the 1 BB call -> raise-to = 4 BB' but this conflicts with
-    the explicit formula stated twice (lines 107 and 288): raise_to =
-    max_bet_in_pot + pot_after_call * fraction, where pot_after_call = pot +
-    to_call. I trust the formula. Setup: postflop pot=200, BB bets 100% pot
-    = 200 cents -> contributions=(100,300), to_call=200, pot=400. SB raises
-    100%: raise_to = max_bet_in_pot(300) + pot_after_call(600) * 1.0 = 900."""
+def test_hunl_raise_amount_uses_multiplier_of_bet_faced():
+    """C2 lean raise: raise-to = round(aggressor_contrib * multiplier).
+
+    Flop, OOP checks (flop-no-donk), IP opens 100% pot (200) -> IP contributes
+    to 300 and becomes aggressor. OOP raises with the default single 3.0x size:
+    round(300 * 3.0) = 900."""
     config = HUNLConfig(
         starting_street=Street.FLOP,
         initial_board=(Card.from_str("7d"), Card.from_str("2c"), Card.from_str("9h")),
@@ -129,14 +130,15 @@ def test_hunl_raise_amount_uses_pot_after_call():
     game = HUNLPoker(config)
     s = _initial(game)
     assert game.current_player(s) == 1
-    s = game.apply(s, ACTION_BET_100)
-    assert s.contributions == (100, 300)
-    assert game.current_player(s) == 0
+    s = game.apply(s, ACTION_CHECK)  # OOP checks (flop-no-donk)
+    s = game.apply(s, ACTION_BET_100)  # IP opens 100% pot
+    assert s.contributions == (300, 100)
+    assert game.current_player(s) == 1
     assert s.to_call == 200
     legal = game.legal_actions(s)
-    assert ACTION_RAISE_100 in legal
-    s_after = game.apply(s, ACTION_RAISE_100)
-    assert s_after.contributions[0] == 900
+    assert ACTION_RAISE_33 in legal
+    s_after = game.apply(s, ACTION_RAISE_33)
+    assert s_after.contributions[1] == 900
 
 
 def test_hunl_min_bet_is_one_bb():
@@ -204,6 +206,9 @@ def test_hunl_force_allin_threshold_snaps_short_shoves():
     )
     game = HUNLPoker(config)
     s = _initial(game)
+    # C3 flop-no-donk: OOP checks first; IP is the player whose short shove the
+    # force-allin threshold collapses.
+    s = game.apply(s, ACTION_CHECK)
     legal = game.legal_actions(s)
     assert ACTION_ALL_IN in legal
     assert legal.count(ACTION_ALL_IN) == 1
@@ -213,11 +218,13 @@ def test_hunl_force_allin_threshold_snaps_short_shoves():
 
 
 def test_hunl_preflop_4_raise_cap():
+    # Lean raise default offers a single 3.0x size -> ACTION_RAISE_33 is the
+    # only raise slot. Preflop is unaffected by C3 (flop-only).
     game = HUNLPoker(HUNLConfig())
     s = _initial(game)
-    s = game.apply(s, ACTION_RAISE_100)
-    s = game.apply(s, ACTION_RAISE_100)
-    s = game.apply(s, ACTION_RAISE_100)
+    s = game.apply(s, ACTION_RAISE_33)
+    s = game.apply(s, ACTION_RAISE_33)
+    s = game.apply(s, ACTION_RAISE_33)
     legal = game.legal_actions(s)
     assert not any(
         a
@@ -243,9 +250,12 @@ def test_hunl_postflop_3_raise_cap():
     )
     game = HUNLPoker(config)
     s = _initial(game)
-    s = game.apply(s, ACTION_BET_100)
-    s = game.apply(s, ACTION_RAISE_100)
-    s = game.apply(s, ACTION_RAISE_100)
+    # C3 flop-no-donk: OOP checks; IP opens; then 3 raises reach the cap. Lean
+    # raise default offers only ACTION_RAISE_33.
+    s = game.apply(s, ACTION_CHECK)  # OOP check (raises still 0)
+    s = game.apply(s, ACTION_BET_100)  # IP open (raises=1)
+    s = game.apply(s, ACTION_RAISE_33)  # raises=2
+    s = game.apply(s, ACTION_RAISE_33)  # raises=3 -> at cap
     legal = game.legal_actions(s)
     for a in legal:
         assert a not in {

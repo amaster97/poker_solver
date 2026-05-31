@@ -63,6 +63,7 @@ fn build_river_config_full() -> HUNLConfig {
         abstraction_path: None,
         abstraction_version: None,
         use_pcs: false,
+        ..Default::default()
     }
 }
 
@@ -96,6 +97,7 @@ fn build_river_config(raise_cap: u8) -> HUNLConfig {
         abstraction_path: None,
         abstraction_version: None,
         use_pcs: false,
+        ..Default::default()
     }
 }
 

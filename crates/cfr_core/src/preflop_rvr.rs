@@ -2342,6 +2342,7 @@ mod tests {
             abstraction_path: None,
             abstraction_version: None,
             use_pcs: false,
+            ..Default::default()
         }
     }
 
@@ -2726,6 +2727,7 @@ mod tests {
             abstraction_path: None,
             abstraction_version: None,
             use_pcs: false,
+            ..Default::default()
         };
         // Filter reach: AA only for P0, KK only for P1.
         let n = crate::preflop_equity::NUM_CLASSES;
@@ -2857,6 +2859,7 @@ mod tests {
             abstraction_path: None,
             abstraction_version: None,
             use_pcs: false,
+            ..Default::default()
         };
         // 1-iter wall for warm-up not measured; 30-iter to get stable
         // timings. The 1326-combo path's leaf table is built once at
