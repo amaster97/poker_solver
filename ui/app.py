@@ -422,7 +422,7 @@ def _render_solver_tab(state: AppState) -> None:
 
 
 def _format_spot_label(state: AppState) -> str:
-    """Compose the header's spot-summary label."""
+    """Compose the header's spot-summary label (plain text)."""
     board = "".join(str(c) for c in state.current_spot.board) or "(preflop)"
     stacks = state.current_spot.stacks_bb
     if stacks[0] == stacks[1]:
@@ -431,6 +431,30 @@ def _format_spot_label(state: AppState) -> str:
         stack_text = f"{stacks[0]}/{stacks[1]}BB"
     street = state.current_spot.starting_street.name.lower()
     return f"{stack_text} {street} ({board})"
+
+
+def _spot_label_prefix(state: AppState) -> str:
+    """The non-board portion of the header spot label, e.g. ``"100BB flop "``."""
+    stacks = state.current_spot.stacks_bb
+    if stacks[0] == stacks[1]:
+        stack_text = f"{stacks[0]}BB"
+    else:
+        stack_text = f"{stacks[0]}/{stacks[1]}BB"
+    street = state.current_spot.starting_street.name.lower()
+    return f"{stack_text} {street} "
+
+
+def _spot_label_board_html(state: AppState) -> str:
+    """Header board portion as inline HTML: ``(`` + colored card symbols + ``)``.
+
+    Preflop spots have no board, so this renders ``(preflop)``.
+    """
+    from ui.views._cards import board_html
+
+    board = state.current_spot.board
+    if not board:
+        return "(preflop)"
+    return "(" + board_html(list(board), sep="") + ")"
 
 
 # Module-level holder for the Spot Input expansion element so the header's
@@ -479,18 +503,26 @@ def _build_spot_label(state: AppState):
             logger.exception("scroll-to spot-input failed")
 
     with ui.row().classes(
-        "items-center gap-1 cursor-pointer rounded px-1 "
+        "items-center gap-0 cursor-pointer rounded px-1 "
         "hover:bg-primary/10 hover:underline"
     ).mark("header-spot-label") as label_row:
-        label_widget = ui.label(_format_spot_label(state)).classes(
+        # Prefix (stacks + street) stays plain text; the board portion is
+        # rendered as colored suit-symbol HTML (issue: real card graphics).
+        # ``header-spot-label`` (the row marker) + the canonical aria-label on
+        # each card span keep the text/marker contract intact.
+        prefix_widget = ui.label(_spot_label_prefix(state)).classes(
             "text-sm underline decoration-dotted underline-offset-4"
         )
-        ui.icon("edit", size="14px").classes("opacity-60")
+        board_widget = ui.html(_spot_label_board_html(state)).classes(
+            "text-sm underline decoration-dotted underline-offset-4"
+        )
+        ui.icon("edit", size="14px").classes("opacity-60 ml-1")
     label_row.tooltip("Click to edit stack depth & blinds")
     label_row.on("click", lambda _e=None: _go_to_spot_input())
 
     def _refresh() -> None:
-        label_widget.set_text(_format_spot_label(state))
+        prefix_widget.set_text(_spot_label_prefix(state))
+        board_widget.set_content(_spot_label_board_html(state))
 
     return _refresh
 

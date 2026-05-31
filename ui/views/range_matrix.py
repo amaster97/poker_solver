@@ -38,6 +38,7 @@ import numpy as np
 
 from poker_solver.card import RANKS, Card
 from poker_solver.hunl import HUNLState
+from ui.views._cards import board_html
 
 if TYPE_CHECKING:
     # Agent A owns ``ui.state``; we consume the contract documented in
@@ -984,6 +985,7 @@ class _ComboRow:
     ev_mbb: float
     reach: float
     infoset_key: str
+    cards: tuple[Card, Card] | None = None
 
 
 def _build_combo_rows(state: AppState, hand_class: str) -> list[_ComboRow]:
@@ -1022,6 +1024,7 @@ def _build_combo_rows(state: AppState, hand_class: str) -> list[_ComboRow]:
                     ev_mbb=0.0,
                     reach=0.0,
                     infoset_key="",
+                    cards=combo,
                 )
             )
             continue
@@ -1036,6 +1039,7 @@ def _build_combo_rows(state: AppState, hand_class: str) -> list[_ComboRow]:
                     ev_mbb=0.0,
                     reach=weight,
                     infoset_key="",
+                    cards=combo,
                 )
             )
             continue
@@ -1058,6 +1062,7 @@ def _build_combo_rows(state: AppState, hand_class: str) -> list[_ComboRow]:
                 ev_mbb=0.0,  # Real EV plugs in when Agent A wires per-combo EV.
                 reach=weight,
                 infoset_key=key,
+                cards=combo,
             )
         )
     return rows
@@ -1095,10 +1100,15 @@ def inspect_panel(state: AppState, hand_class: str) -> None:
                 .mark(marker)
                 .style("align-items:center;gap:10px;padding:2px 0")
             ):
-                ui_mod.label(row.label).style(
-                    "font-family:Menlo,Consolas,monospace;width:64px;"
-                    "color:var(--ps-text-dim)"
-                )
+                if row.cards is not None:
+                    ui_mod.html(board_html(list(row.cards), sep="")).style(
+                        "width:64px"
+                    )
+                else:
+                    ui_mod.label(row.label).style(
+                        "font-family:Menlo,Consolas,monospace;width:64px;"
+                        "color:var(--ps-text-dim)"
+                    )
                 if row.blocked:
                     ui_mod.label("BLOCKED — card on board").style(
                         "color:var(--ps-text-muted);font-style:italic"

@@ -42,6 +42,7 @@ from ui.state import (
     load_fixture_config,
     save_state,
 )
+from ui.views._cards import card_html
 
 logger = logging.getLogger(__name__)
 
@@ -136,33 +137,60 @@ def _render_spot_input_body(state: AppState) -> None:
 
 
 def _render_board_section(state: AppState) -> None:
-    """4x13 suit-by-rank board grid with selected-chip strip + clear."""
+    """4x13 suit-by-rank board grid with selected-chip strip + clear.
+
+    Board-chip refresh fix
+    ----------------------
+    The chip strip is now rendered DECLARATIVELY inline, as a direct part of
+    the ``@ui.refreshable`` body (this whole function re-executes on every
+    ``_spot_input_body.refresh()``), instead of via a captured-closure
+    ``_redraw_chips()`` that imperatively ``clear()``ed + repopulated a
+    ``chip_row``. The old imperative redraw worked at page build but produced
+    an EMPTY strip after a preset/reset because the repaint was driven by the
+    button's ``background_tasks.create(_trigger_spot_views_refresh(...))``
+    (fire-and-forget): the deferred refresh re-ran the body but the chip strip
+    repaint did not land reliably (the declaratively-bound range textarea DID
+    repaint, masking the divergence). Rendering chips inline ties the strip to
+    the same deterministic body re-execution that repaints every other field —
+    so a preset load shows all board cards and a reset clears them, with no
+    deferred-closure / stale-reference timing window.
+
+    The per-chip remove, the grid-cell toggle, and "Clear board" each mutate
+    the board then trigger the registered spot-input refresh hook (same path
+    the preset/reset buttons use), so the strip repaints through the one
+    refreshable mechanism rather than a second, divergent imperative one.
+    """
     from nicegui import ui
 
     ui.label("Board").classes("font-medium")
 
-    # Chip strip showing selected cards with [x] remove affordance.
-    chip_row = ui.row().classes("gap-1 items-center min-h-8")
+    def _repaint_board() -> None:
+        # Re-run the refreshable spot-input body (and the range matrix) so the
+        # chip strip + picker cell colors reflect the mutated board. Routed
+        # through the same ``ui.timer``-backed scheduler the preset/reset
+        # buttons use so the repaint lands in the LIVE client/slot context
+        # (a bare detached ``refresh()`` from a sync handler left the strip
+        # stale until the next event-loop turn / never on the live client).
+        _schedule_spot_views_refresh(state)
 
-    def _redraw_chips() -> None:
-        chip_row.clear()
-        with chip_row:
-            for c in state.current_spot.board:
-                with ui.row().classes(
-                    "border rounded px-2 py-0 items-center gap-1 bg-gray-100 "
-                    "dark:bg-gray-800"
-                ):
-                    ui.label(str(c)).classes("font-mono")
+    # Chip strip showing selected cards with [x] remove affordance. Rendered
+    # inline (not via a deferred closure) so it always matches the current
+    # board on every refreshable re-execution.
+    with ui.row().classes("gap-1 items-center min-h-8"):
+        for c in state.current_spot.board:
+            with ui.row().classes(
+                "border rounded px-2 py-0 items-center gap-1 bg-gray-100 "
+                "dark:bg-gray-800"
+            ):
+                ui.html(card_html(c))
 
-                    def _remove(card: Card = c) -> None:
-                        _remove_board_card(state, card)
-                        _redraw_chips()
+                def _remove(_e: Any = None, card: Card = c) -> None:
+                    _remove_board_card(state, card)
+                    _repaint_board()
 
-                    ui.button(icon="close", on_click=_remove).props(
-                        "flat dense round size=xs"
-                    )
-
-    _redraw_chips()
+                ui.button(icon="close", on_click=_remove).props(
+                    "flat dense round size=xs"
+                )
 
     # 4x13 suit-by-rank grid.
     with ui.grid(columns=13).classes("gap-1 max-w-md"):
@@ -183,7 +211,7 @@ def _render_board_section(state: AppState) -> None:
 
                 def _on_board_click(_e: Any, c: Card = card) -> None:
                     _toggle_board_card(state, c)
-                    _redraw_chips()
+                    _repaint_board()
 
                 btn = (
                     ui.button(
@@ -196,10 +224,10 @@ def _render_board_section(state: AppState) -> None:
                 btn.mark(f"board-picker-cell-{card_str}")
                 _suit_color(btn, suit_idx)
 
-    def _clear_all_board() -> None:
+    def _clear_all_board(_e: Any = None) -> None:
         state.current_spot.board = []
         save_state()
-        _redraw_chips()
+        _repaint_board()
 
     ui.button(
         "Clear board",
@@ -1061,20 +1089,25 @@ def _render_reset_preset_row(state: AppState) -> None:
     On bootstrap before mock_solver exists, fall back to the 12 IDs listed
     in ``pr10a_spec.md`` §7.4.
     """
-    from nicegui import background_tasks, ui
+    from nicegui import ui
 
     # Regressions 2 & 4: the on_click runs the SYNCHRONOUS mutation core
     # (``_reset_spot_core`` -> set current_spot + ``clear_results`` +
     # ``save_state`` + notify) INLINE at click time, then SCHEDULES the async
-    # repaint as a background task. A fully-async on_click let NiceGUI defer the
+    # repaint via a ``ui.timer``. A fully-async on_click let NiceGUI defer the
     # WHOLE coroutine (mutations included) to a background task that could land
     # AFTER a same-tick solve start / OOM error, clobbering ``runner.status``
     # back to ``'idle'`` (``clear_results`` cancels + reaps the in-flight
-    # worker). Running the core inline commits the mutation at click time; the
-    # repaint still awaits the refreshable hooks (G3) inside the scheduled task.
+    # worker). Running the core inline commits the mutation at click time.
+    #
+    # Live-refresh fix: the repaint is scheduled via
+    # :func:`_schedule_spot_views_refresh` (a ``ui.timer(once=True)`` that runs
+    # the awaited refresh in the live client/slot context), NOT a detached
+    # ``background_tasks.create`` — the latter has no client context / no
+    # connection guard, so live it left the matrix + board chips stale.
     def _reset(_e: Any = None) -> None:
         _reset_spot_core(state)
-        background_tasks.create(_trigger_spot_views_refresh(state))
+        _schedule_spot_views_refresh(state)
 
     ui.button(
         "Reset spot",
@@ -1112,12 +1145,14 @@ def _render_reset_preset_row(state: AppState) -> None:
             # (``_load_preset_core`` -> set current_spot + ``clear_results`` +
             # ``save_state`` + "Loaded preset" toast) commit at click time so a
             # same-tick solve/OOM is not clobbered by a deferred
-            # ``clear_results``; the repaint still awaits the refreshable hooks
-            # (G3) inside the scheduled background task.
+            # ``clear_results``; the repaint is then scheduled via the
+            # ``ui.timer``-backed :func:`_schedule_spot_views_refresh` so the
+            # refreshable bodies re-execute in the LIVE client context (a
+            # detached ``background_tasks.create`` left the views stale live).
             def _load_preset(_e: Any = None, pid: str = preset_id) -> None:
                 if not _load_preset_core(state, pid):
                     return
-                background_tasks.create(_trigger_spot_views_refresh(state))
+                _schedule_spot_views_refresh(state)
 
             ui.button(
                 preset_id.replace("_", " "),
@@ -1308,6 +1343,57 @@ async def _on_load_preset(state: AppState, preset_id: str) -> None:
     # at page build and otherwise only redraw via their own refresh hooks,
     # so without these calls the freshly-loaded spot would be invisible.
     await _trigger_spot_views_refresh(state)
+
+
+def _schedule_spot_views_refresh(state: AppState) -> None:
+    """Schedule the spot-views repaint from a SYNCHRONOUS event handler.
+
+    Live-refresh fix
+    ----------------
+    A sync ``on_click`` must (a) run the click-time mutations inline (so a
+    same-tick ``start()`` / OOM is not clobbered by a deferred
+    ``clear_results`` — smoke tests #2/#4) and then (b) trigger an
+    ``@ui.refreshable`` repaint that ACTUALLY re-executes the bodies in the
+    LIVE client context. The previous
+    ``background_tasks.create(_trigger_spot_views_refresh(state))`` satisfied
+    (a) but NOT (b) live: ``background_tasks.create`` spawns a *detached*
+    asyncio task with NO client/slot context and NO client-connection guard,
+    so on the real (websocket) client the awaited ``refresh()`` re-render did
+    not land — the matrix kept the old range and the board chip strip stayed
+    empty even though ``state.current_spot`` had updated.
+
+    The NiceGUI-correct mechanism is ``ui.timer(interval, cb, once=True)``: the
+    *element* timer (``nicegui.elements.timer.Timer``)
+
+      * runs ``cb`` INSIDE its ``parent_slot`` (the live client/slot context),
+        not a contextless detached task, so the refreshable re-render targets
+        the connected client's element tree (``Timer._get_context``); and
+      * awaits ``client.connected()`` before firing (``Timer._can_start`` —
+        NiceGUI issue #206), the exact guard a bare ``background_tasks.create``
+        lacks and the reason the old path silently no-op'd live.
+
+    The timer is created HERE, while the sync handler's slot context is still
+    active, so its ``parent_slot`` resolves to the live client. ``once=True``
+    fires it a single time after a short delay; the callback awaits
+    :func:`_trigger_spot_views_refresh` so every refreshable body re-executes
+    inline within the client context. Mutations already committed inline before
+    this call, so the synchronous-at-click contract (smoke #2/#4) is preserved.
+    """
+    from nicegui import ui
+
+    async def _do_refresh() -> None:
+        await _trigger_spot_views_refresh(state)
+
+    try:
+        # Small non-zero interval so it fires on the next timer tick; ``once``
+        # tears the timer down after a single invocation.
+        ui.timer(0.01, _do_refresh, once=True)
+    except Exception:  # noqa: BLE001 -- no slot/client context (e.g. unit test)
+        # Fall back to a detached task so non-UI callers (or a torn-down slot)
+        # still attempt the repaint rather than silently skipping it.
+        from nicegui import background_tasks
+
+        background_tasks.create(_do_refresh())
 
 
 async def _trigger_spot_views_refresh(state: AppState) -> None:

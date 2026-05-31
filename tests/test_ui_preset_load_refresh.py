@@ -89,6 +89,53 @@ def _p0_textarea_combos(user: User) -> int:
     return _combos_in(str(value or ""))
 
 
+def _board_chip_labels(user: User) -> list[str]:
+    """Return the board-chip strip's rendered card aria-labels (in order).
+
+    The chip strip is the ``ui.row().classes(... 'min-h-8')`` inside
+    ``_render_board_section``; each selected card is a ``ui.html(card_html(c))``
+    whose span carries ``aria-label='<canonical 2-char code>'`` (e.g. ``As``).
+    We read the labels off the spans that live inside a chip wrapper row
+    (``bg-gray-100`` border chip) so we count ONLY the chip strip — not the
+    header spot-label, which also renders ``card_html`` spans.
+    """
+    import re
+
+    labels: list[str] = []
+    for el in user.client.elements.values():
+        content = getattr(el, "content", None)
+        if not content or "ps-card" not in str(content):
+            continue
+        # Only count spans whose grand-parent chip wrapper is the bordered
+        # ``bg-gray-100`` chip (the strip), excluding the header spot-label.
+        parent = getattr(el, "parent_slot", None)
+        wrapper = getattr(parent, "parent", None) if parent else None
+        wrapper_classes = getattr(wrapper, "_classes", None) or []
+        if "bg-gray-100" not in wrapper_classes:
+            continue
+        m = re.search(r"aria-label='([^']+)'", str(content))
+        if m:
+            labels.append(m.group(1))
+    return labels
+
+
+def _board_close_buttons(user: User) -> int:
+    """Count [x] close buttons inside the board-chip strip wrappers."""
+    n = 0
+    for el in user.client.elements.values():
+        # Close buttons are ``ui.button(icon='close')`` inside a ``bg-gray-100``
+        # chip wrapper; identify by the wrapper class on the button's parent.
+        parent = getattr(el, "parent_slot", None)
+        wrapper = getattr(parent, "parent", None) if parent else None
+        wrapper_classes = getattr(wrapper, "_classes", None) or []
+        if "bg-gray-100" not in wrapper_classes:
+            continue
+        props = getattr(el, "_props", {}) or {}
+        if props.get("icon") == "close":
+            n += 1
+    return n
+
+
 async def test_loading_flop_preset_repaints_range_editor_inline(
     user: User, isolated_state_dir: pathlib.Path
 ) -> None:
@@ -308,3 +355,265 @@ async def test_board_picker_label_matches_placed_card(
             f"P1 invariant: marker label {label!r} must equal str(card) "
             f"({str(card)!r}) for the cell"
         )
+
+
+async def test_board_chip_strip_repaints_on_preset_load_and_reset(
+    user: User, isolated_state_dir: pathlib.Path
+) -> None:
+    """Board-chip refresh: the selected-card chip strip repaints on a preset
+    load (shows ALL 5 river board cards) and clears on a RESET.
+
+    Bug
+    ---
+    ``_render_board_section`` built the chip strip imperatively via a captured
+    ``_redraw_chips()`` closure (``chip_row.clear()`` + ``with chip_row:``). It
+    rendered correctly at page build, but after loading an example preset the
+    strip was EMPTY: the preset/reset button's repaint goes through a
+    fire-and-forget ``background_tasks.create(_trigger_spot_views_refresh(...))``,
+    and the deferred re-render did not reliably repopulate the imperatively-built
+    strip — even though ``state.current_spot.board`` (and the declaratively-bound
+    range textarea) had updated. RESET "clearing" only looked correct because an
+    empty strip is what a clear should produce.
+
+    Fix
+    ---
+    The chip strip is rendered DECLARATIVELY inline in ``_render_board_section``
+    (part of the ``@ui.refreshable`` body), so it repaints deterministically on
+    every ``_spot_input_body.refresh()`` — the same body re-execution that
+    repaints every other field.
+
+    This drives the real (awaited) ``_on_load_preset`` / ``_on_reset`` handlers
+    and asserts the chip strip shows all 5 board cards
+    (As, 7c, 2d, Kh, 5s) after load and clears to 0 after reset. It also locks
+    the no-dropped-card invariant: the heart (Kh) must be present (a probe
+    suggested a card might be dropped).
+    """
+    from ui.state import get_state
+    from ui.views.spot_input import _on_load_preset, _on_reset
+
+    await user.open("/")
+
+    # At build the default spot is preflop (empty board) -> 0 chips.
+    with user.client:
+        assert _board_chip_labels(user) == [], (
+            "default preflop spot should render an empty board-chip strip"
+        )
+
+        # Load the river preset (board As 7c 2d Kh 5s) via the real handler.
+        await _on_load_preset(get_state(), "river_tiny_subgame")
+
+        # Sanity: the underlying board data is the full 5-card river.
+        board = [str(c) for c in get_state().current_spot.board]
+        assert board == ["As", "7c", "2d", "Kh", "5s"], (
+            f"river_tiny_subgame board should be the 5-card river; got {board}"
+        )
+
+        labels = _board_chip_labels(user)
+        # All 5 cards render as chips (no dropped card — Kh present).
+        assert labels == ["As", "7c", "2d", "Kh", "5s"], (
+            "board-chip strip did not repaint to all 5 river cards after the "
+            f"preset load (rendered chips: {labels!r}). An empty list is the "
+            "original bug (fire-and-forget refresh never repopulated the "
+            "imperatively-built strip); a 4-element list with 'Kh' missing "
+            "would be a dropped-card off-by-one."
+        )
+        assert "Kh" in labels, "the heart Kh must not be dropped from the strip"
+
+        # Each chip carries its [x] close button (affordance intact).
+        assert _board_close_buttons(user) == 5, (
+            "each of the 5 board chips should carry a close [x] button; got "
+            f"{_board_close_buttons(user)}"
+        )
+
+        # RESET clears the board -> strip empties to 0 chips.
+        await _on_reset(get_state())
+        assert get_state().current_spot.board == [], (
+            "RESET should clear the board"
+        )
+        cleared = _board_chip_labels(user)
+        assert cleared == [], (
+            f"board-chip strip should clear to 0 chips after RESET; got {cleared!r}"
+        )
+        assert _board_close_buttons(user) == 0, (
+            "no close buttons should remain after RESET clears the board"
+        )
+
+
+def _count_ui_timers(user: User) -> int:
+    """Count live ``ui.timer`` ELEMENTS on the page.
+
+    The live-refresh fix schedules the spot-views repaint via
+    ``ui.timer(..., once=True)`` (an *element* timer owned by the client and
+    run inside its slot context). The pre-fix code scheduled the repaint via a
+    contextless, detached ``background_tasks.create`` task, which creates NO
+    element. So a ``ui.timer`` appearing after a preset/reset click is the
+    structural signature of the slot-context scheduler — and its absence is the
+    pre-fix fire-and-forget path that left the views stale live.
+    """
+    from nicegui.elements.timer import Timer as _UITimer
+
+    return sum(1 for el in user.client.elements.values() if isinstance(el, _UITimer))
+
+
+async def test_live_preset_button_repaints_spot_views(
+    user: User, isolated_state_dir: pathlib.Path
+) -> None:
+    """Live-path regression: clicking the EXAMPLE-SPOT button repaints the
+    range editor AND the board-chip strip.
+
+    Gap this closes
+    ---------------
+    The other tests in this file drive ``await _on_load_preset(...)`` /
+    ``await _on_reset(...)`` DIRECTLY (already awaited), so they never exercise
+    the actual ``on_click`` wiring: a SYNCHRONOUS handler that runs the
+    click-time mutations inline and then SCHEDULES the repaint. That gap hid a
+    regression where the scheduled repaint went through a contextless detached
+    ``background_tasks.create(...)`` task, which did not re-execute the
+    ``@ui.refreshable`` bodies in the LIVE client context — so live the range
+    matrix kept its old range and the board chip strip stayed empty even though
+    ``state.current_spot`` had updated.
+
+    The fix schedules the repaint via ``ui.timer(..., once=True)``: the element
+    timer runs its (awaited) refresh callback INSIDE the client/slot context
+    and only after ``client.connected()``, so the refreshable bodies re-execute
+    against the live client.
+
+    This test drives the real BUTTON ``on_click`` (marker
+    ``preset-flop-t87s-100bb``), pumps the event loop past the timer interval,
+    and asserts:
+
+      1. (structural) the click scheduled the repaint via a ``ui.timer``
+         element — the slot-context mechanism. On the pre-fix fire-and-forget
+         path NO timer is created, so this assertion FAILS pre-fix.
+      2. (behavioral) the P0 range editor repainted to the loaded ~226-combo
+         range — NOT the stale 1326-combo default.
+      3. (behavioral) the board-chip strip repainted to the loaded flop.
+    """
+    import asyncio
+
+    from ui.state import get_state
+
+    await user.open("/")
+
+    # Baseline: full preflop default — empty board, 1326-combo P0 range.
+    assert _p0_textarea_combos(user) == 1326, (
+        "P0 textarea did not start at the full default range"
+    )
+    assert _board_chip_labels(user) == [], (
+        "default preflop spot should render an empty board-chip strip"
+    )
+
+    timers_before = _count_ui_timers(user)
+
+    # Click the ACTUAL example-spot button. Its ``on_click`` is the production
+    # sync handler: inline mutations + ``_schedule_spot_views_refresh``.
+    user.find(marker="preset-flop-t87s-100bb").click()
+
+    # Structural: the sync handler scheduled the repaint through a ui.timer
+    # (slot-context) — NOT a contextless detached background task. This is the
+    # mechanism that repaints live; its presence is what distinguishes the fix
+    # from the pre-fix fire-and-forget path (which creates no element).
+    timers_after = _count_ui_timers(user)
+    assert timers_after == timers_before + 1, (
+        "live-refresh regression: clicking the preset button must schedule the "
+        "spot-views repaint via a slot-context ui.timer "
+        f"(timers {timers_before} -> {timers_after}); a contextless "
+        "background_tasks.create (delta 0) is the pre-fix fire-and-forget path "
+        "that left the matrix + board chips stale on the live client."
+    )
+
+    # Mutations already committed inline at click time.
+    after = get_state().current_spot
+    n0 = sum(
+        1
+        for c in after.ranges[0].base_range.combos
+        if after.ranges[0].frequency_of(c) > 0.0
+    )
+    assert n0 == 226, (
+        f"clicking flop_t87s_100bb should set P0 to 226 combos inline; got {n0}"
+    )
+
+    # Pump the loop past the timer's 0.01s interval so the once-timer fires and
+    # awaits the refresh, re-executing the refreshable bodies in the client
+    # context (the live repaint).
+    for _ in range(6):
+        await asyncio.sleep(0.02)
+
+    # Behavioral: the rendered range editor repainted to the loaded range.
+    rendered = _p0_textarea_combos(user)
+    assert rendered == 226, (
+        "live-refresh regression: the P0 range editor did not repaint to the "
+        f"loaded 226-combo range after the BUTTON click (rendered {rendered}). "
+        "1326 means the scheduled refresh never re-executed the refreshable "
+        "body in the live client context."
+    )
+
+    # Behavioral: the board-chip strip repainted to the loaded flop board.
+    board = [str(c) for c in after.board]
+    chips = _board_chip_labels(user)
+    assert chips == board, (
+        "live-refresh regression: the board-chip strip did not repaint to the "
+        f"loaded board {board!r} after the BUTTON click (rendered {chips!r}). "
+        "An empty strip is the pre-fix symptom (the scheduled repaint never "
+        "re-ran the declarative chip strip in the live client context)."
+    )
+    assert chips, "loaded flop preset should render a non-empty board-chip strip"
+
+
+async def test_live_reset_button_repaints_spot_views(
+    user: User, isolated_state_dir: pathlib.Path
+) -> None:
+    """Live-path regression for RESET SPOT: the BUTTON click clears the board
+    chip strip and repaints the range editor to the full default.
+
+    Same gap as the preset-button test: the existing reset test awaits
+    ``_on_reset`` directly and never exercises the sync ``on_click`` +
+    scheduled-repaint wiring. This drives the real ``reset-spot-button``
+    ``on_click`` after first loading a non-default spot, then asserts the views
+    repaint back to defaults (empty board, full 1326-combo range) via the
+    slot-context ``ui.timer`` scheduler.
+    """
+    import asyncio
+
+    from ui.state import get_state
+    from ui.views.spot_input import _on_load_preset
+
+    await user.open("/")
+
+    # Seed a loaded postflop spot so RESET has something visible to clear.
+    with user.client:
+        await _on_load_preset(get_state(), "flop_t87s_100bb")
+    # Pump so the seed load's repaint settles.
+    for _ in range(4):
+        await asyncio.sleep(0.02)
+    assert _board_chip_labels(user), "seed preset should render board chips"
+
+    timers_before = _count_ui_timers(user)
+
+    # Click the ACTUAL reset button (sync handler + scheduled repaint).
+    user.find(marker="reset-spot-button").click()
+
+    timers_after = _count_ui_timers(user)
+    assert timers_after == timers_before + 1, (
+        "live-refresh regression: RESET SPOT must schedule the repaint via a "
+        f"slot-context ui.timer (timers {timers_before} -> {timers_after}); "
+        "delta 0 is the pre-fix contextless background-task path."
+    )
+
+    # Mutation committed inline: board cleared, P0 back to the full default.
+    after = get_state().current_spot
+    assert after.board == [], "RESET should clear the board inline at click time"
+
+    for _ in range(6):
+        await asyncio.sleep(0.02)
+
+    assert _board_chip_labels(user) == [], (
+        "live-refresh regression: the board-chip strip did not clear after the "
+        f"RESET button click (rendered {_board_chip_labels(user)!r})."
+    )
+    rendered = _p0_textarea_combos(user)
+    assert rendered == 1326, (
+        "live-refresh regression: the P0 range editor did not repaint to the "
+        f"full 1326-combo default after the RESET button click (rendered "
+        f"{rendered})."
+    )
