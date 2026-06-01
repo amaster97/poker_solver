@@ -1173,7 +1173,21 @@ def _render_chained_json(
         }
 
     def _postflop_to_dict(pf) -> dict:
+        # Postflop per_history is off-path-CLEANED by DEFAULT (combos that
+        # folded / went all-in / passively closed an earlier same-street
+        # decision, plus board-blocked combos, are overwritten to fold);
+        # ``--raw-offpath`` emits the raw rows. Each postflop subgame is a
+        # ``RangeVsRangeNashResult`` (chained stores them as such), so it
+        # carries ``per_history_strategy_view`` — the default-on clean
+        # accessor that recovers the board from the keys and never mutates the
+        # raw attribute. Hero is OOP postflop when the solve reports defender.
+        raw_offpath = bool(getattr(args, "raw_offpath", False))
+        per_history = pf.per_history_strategy_view(
+            clean=not raw_offpath,
+            hero_is_oop=pf.position == "defender",
+        )
         return {
+            "per_history_strategy": {k: list(v) for k, v in per_history.items()},
             "per_class_strategy": {
                 cls: dict(freqs) for cls, freqs in pf.per_class_strategy.items()
             },
@@ -2930,6 +2944,16 @@ def build_parser() -> argparse.ArgumentParser:
             "at deep stacks) is prohibitively slow; the cap keeps the "
             "CLI usable. Callers who want every terminal can drive "
             "``ChainedSolveResult.solve_postflop`` from Python."
+        ),
+    )
+    ch.add_argument(
+        "--raw-offpath",
+        action="store_true",
+        help=(
+            "Emit the RAW postflop per_history_strategy in JSON output (every "
+            "combo at every node, including off-path folds/all-ins/closed "
+            "lines and board-blocked combos). By default the JSON output is "
+            "off-path-CLEANED: such combos are overwritten to fold."
         ),
     )
     ch.set_defaults(func=_cmd_chained)
