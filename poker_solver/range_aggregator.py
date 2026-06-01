@@ -938,6 +938,73 @@ class RangeVsRangeNashResult:
     position: str = "aggressor"
     warnings: list[str] = field(default_factory=list)
 
+    def per_history_strategy_view(
+        self,
+        clean: bool = True,
+        *,
+        hero_range: dict[str, float] | None = None,
+        hero_is_oop: bool = True,
+    ) -> dict[str, list[float]]:
+        """Return a per-history strategy view, off-path-CLEANED by default.
+
+        This is the READ-layer accessor that hides off-path noise (the engine
+        stores a strategy row for EVERY combo at EVERY node, including combos
+        that already folded / went all-in / passively closed an earlier
+        decision). It mirrors the preflop ``strategy_table(..., clean=True)``
+        default-on contract.
+
+        * ``clean=True`` (DEFAULT) -> off-path rows are overwritten to fold
+          (index 0 = 1.0, rest 0.0), via
+          :func:`poker_solver.postflop_offpath.clean_off_path`. The result is
+          a fresh deep copy.
+        * ``clean=False`` -> the raw :attr:`per_history_strategy` (a per-row
+          copy so callers can't accidentally mutate the attribute).
+
+        CRITICAL: the raw :attr:`per_history_strategy` attribute is NEVER
+        mutated by this method (exploitability / blueprint / diff-tests read
+        it directly), regardless of ``clean``.
+
+        The board is recovered from the infoset keys themselves (the result
+        dataclass does not carry it). ``hero_range`` is the
+        ``{hole_str -> weight}`` map; when ``None`` it defaults to uniform
+        weight 1.0 over every combo present in the mapping (so cleaning still
+        removes folded/closed/all-in noise and board-blocked rows even without
+        explicit weights). ``hero_is_oop`` selects which seat's own-decision
+        nodes gate reach (postflop OOP acts first; the
+        ``solve_range_vs_range_nash`` convention puts hero OOP at
+        ``hero_player == 1``).
+        """
+        from poker_solver.postflop_offpath import (  # local import: avoid cycle
+            _split_key,
+            clean_off_path,
+        )
+
+        if not clean:
+            return {k: list(v) for k, v in self.per_history_strategy.items()}
+
+        # Recover the board from the keys (all keys share one board here).
+        board = ""
+        for key in self.per_history_strategy:
+            _, b, _ = _split_key(key)
+            if b is not None:
+                board = b
+                break
+
+        if hero_range is None:
+            holes: set[str] = set()
+            for key in self.per_history_strategy:
+                hole, _, _ = _split_key(key)
+                if hole is not None:
+                    holes.add(hole)
+            hero_range = dict.fromkeys(holes, 1.0)
+
+        return clean_off_path(
+            self.per_history_strategy,
+            hero_range,
+            board=board,
+            hero_is_oop=hero_is_oop,
+        )
+
 
 def _hole_string_rust(combo: tuple[Card, Card]) -> str:
     """Render a ``(Card, Card)`` combo as Rust's ``hole_string`` format.
