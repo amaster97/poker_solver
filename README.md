@@ -39,7 +39,11 @@ What the GUI offers:
 
 - **Preflop charts / ranges** — a 13×13 hand-class matrix showing GTO action
   frequencies, backed by the precomputed preflop blueprint with a fall-through
-  to a live solve for out-of-envelope spots.
+  to a live solve for out-of-envelope spots. Hands that can't actually reach
+  the selected line are greyed as off-path with reason-aware tooltips (see
+  [off-path handling](docs/off_path_handling.md), which also covers the
+  default-clean preflop/postflop APIs and the `chained` CLI `--raw-offpath`
+  opt-out).
 - **Range editor** — build and edit ranges three ways: clicking cells on the
   13×13 matrix, typing Pio-style range strings (`AA, KK, AKs, 76s+`), and a
   per-hand frequency editor for finer control. Suited / offsuit cells are

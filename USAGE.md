@@ -745,6 +745,14 @@ unchanged); downstream tooling that displays full strategy dumps
 should filter before rendering to avoid surfacing strategies at nodes
 that the solver never visits under the equilibrium.
 
+> **Related (v1.11):** this §5.7 feature is a *set of unreachable infoset
+> keys* on the scalar postflop solve path. A complementary read-layer that
+> *cleans off-path entries to fold by default* — for the preflop chart, the
+> preflop/postflop APIs (`strategy_table` / `per_history_strategy_view`),
+> and the `chained` CLI (`--raw-offpath` to opt out) — is documented in
+> `docs/off_path_handling.md`. The two are independent; use whichever matches
+> your read path.
+
 ### 5.8 DCFR α-guard (v1.8.2)
 
 v1.8.2 (PR #113) hard-fails `solve(..., alpha=0)` — previously this
@@ -1162,6 +1170,30 @@ is a thin wrapper around an existing library API; zero engine changes.
   `--fixture-path` (override fixture JSON), `--iters` (default 2000).
   Requires Brown's binary built via `scripts/build_noambrown.sh`; exits
   2 with a hint when the binary is missing.
+
+### v1.11 CLI additions
+
+- **`poker-solver chained ... --raw-offpath`.** The `chained` subcommand
+  (preflop range solve + per-action continuation ranges + optional lazy
+  postflop flop solve) emits its postflop `per_history_strategy` JSON
+  **off-path-cleaned by default**: combos that folded / went all-in /
+  passively closed an earlier same-street decision, plus board-blocked combos,
+  are overwritten to a pure fold (index 0 = 1.0). Pass `--raw-offpath` to emit
+  the **raw** rows instead (every combo at every node, off-path entries
+  included). The raw engine output is never mutated either way — cleaning
+  happens only on the emitted JSON. See `docs/off_path_handling.md` for the
+  full detection rules, reason taxonomy, and the Python read-layer accessors
+  (`strategy_table` / `per_history_strategy_view`).
+
+  ```bash
+  # Default — cleaned:
+  poker-solver chained --hero-range "AA,KK,AKs" --villain-range "QQ,JJ,AKs" \
+      --board "Ad 8h 9d" --lazy-postflop > chained_clean.json
+
+  # Raw off-path rows:
+  poker-solver chained --hero-range "AA,KK,AKs" --villain-range "QQ,JJ,AKs" \
+      --board "Ad 8h 9d" --lazy-postflop --raw-offpath > chained_raw.json
+  ```
 
 ### v1.8.2 CLI additions
 

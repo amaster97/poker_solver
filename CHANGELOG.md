@@ -9,6 +9,36 @@ and this project adheres to [semantic versioning](https://semver.org/spec/v2.0.0
 
 In-flight on feature branches; not yet merged to `main`.
 
+### Added — Off-path detection + cleaning (v1.11)
+
+CFR stores a strategy at every node, including ones a hand reaches with ≈ 0
+probability (untrained noise). The read layer now detects and cleans these so
+charts, the API, the CLI, and chained solves never surface a meaningless action
+at an unreached node. See `docs/off_path_handling.md` for the full reference.
+
+- **Preflop.** GUI preflop chart greys off-path cells (em-dash, faded) with
+  **reason-aware tooltips** (`already all-in earlier` / `folded earlier on this
+  line` / `called & closed action earlier` / generic `doesn't reach this line;
+  reach ≈ 0%`). The default-clean API is `preflop_offpath.strategy_table(...)`
+  (`clean=True` by default; `clean=False` for the raw projection).
+- **Postflop.** Per-combo, board-aware, street-by-street detection
+  (`postflop_offpath`). Default-clean API
+  (`RangeVsRangeNashResult.per_history_strategy_view`, `clean=True` by default)
+  and CLI: the `chained` subcommand's JSON output is off-path-cleaned by
+  default, with `--raw-offpath` to opt out. Chained per-street results inherit
+  the accessor.
+- **Size-agnostic reach fix.** Reach at a player's own bet/raise node now sums
+  over **all** bet/raise sizes rather than the single matched size, so premiums
+  (e.g. AA) that 3-bet to a different size than the line's size are no longer
+  falsely greyed on multi-size raise nodes.
+- **All-in carry-over.** An all-in-dominant hand now carries off-path onto every
+  deeper line (previously only fold was checked, leaving an all-in hand wrongly
+  in-range on a size-raise continuation).
+- **Invariant.** The raw engine output (`average_strategy` /
+  `per_history_strategy`) is **never** mutated — it stays the source of truth
+  for exploitability / blueprint generation / diff-tests; cleaning happens only
+  on a freshly built / deep-copied read-layer result.
+
 ### Added — Configurable bet menu (v1.11)
 - **Per-street opening-bet menus + lean raise multipliers.** `HUNLConfig`
   gains `flop_bet_fractions` / `turn_bet_fractions` / `river_bet_fractions`

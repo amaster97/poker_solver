@@ -177,10 +177,23 @@ regenerating the shards ALONE will NOT fix this — CFR reproduces the same
 off-path noise on every solve.** It needs the explicit post-process pass; a
 re-solve without it changes nothing.
 
-**Priority: LOW.** The display filter already handles the chart, and other
-consumers read on-path lines (where the strategy is trained and correct), so
-the source noise is currently inert. This is a cleanliness/correctness-at-source
-nicety, not a blocker.
+**Priority: LOW (now OPTIONAL).** Off-path is now handled at the **READ layer**
+for **both preflop AND postflop**, so this engine-side post-process is no longer
+needed for any consumer and stays optional:
+
+- **Preflop:** GUI chart greys off-path cells with reason-aware tooltips
+  (`ui/views/preflop_chart.py`); the default-clean API is
+  `preflop_offpath.strategy_table(..., clean=True)`.
+- **Postflop:** per-combo, board-aware, street-by-street cleaning
+  (`postflop_offpath`) is default-on in the API
+  (`RangeVsRangeNashResult.per_history_strategy_view`), the CLI (`chained`
+  JSON, opt out with `--raw-offpath`), and chained per-street results.
+- The raw engine output / shard strategy is **never** mutated by the read layer
+  (it stays the source of truth for exploitability / blueprint-gen / diff-tests).
+
+See `docs/off_path_handling.md` for the full reference. Baking fold→downstream
+into the shards at the SOURCE remains a cleanliness-at-source nicety only — not
+a blocker, since every consumer reads through the clean read layer.
 
 ---
 
@@ -247,6 +260,13 @@ the main checkout (repo root) (main)** (old value backed up as `poker_solver.pth
   does **not** guarantee non-degenerate per-hand EVs — dominated hands can be
   pinned at 0 / >pot at low iters. Validate combo-inspector EVs after the
   engine merge. See `docs/gui_audit/TODO.md` follow-ups.
+- **Off-path is handled at the READ layer (preflop + postflop).** The engine
+  pipeline post-process (§3e) is now OPTIONAL/low-priority. Coverage: GUI
+  preflop chart greys off-path cells with reasons; API/CLI/chain return
+  off-path-cleaned strategies by default; the raw engine output is never
+  mutated (see `docs/off_path_handling.md`). **Remaining gap:** the postflop
+  **range-matrix GUI does not yet grey off-path cells** (the postflop tree
+  browser is already reach-filtered; only the matrix greying is unwired).
 
 ---
 
